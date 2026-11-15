@@ -349,6 +349,7 @@ public sealed class RepositoryHygieneTests
 
         var problems = new List<string>();
         int commits = 0;
+        int checkedCommits = 0;
         foreach (string record in log.Split('\u001e', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
         {
             commits++;
@@ -362,6 +363,7 @@ public sealed class RepositoryHygieneTests
             // Names and addresses are never printed, only which commit and which field is wrong.
             string id = f[0];
             if (checkedOut != null && checkedOut.StartsWith(id, StringComparison.Ordinal)) continue;
+            checkedCommits++;
             if (!IsAuthor(f[1], f[2])) problems.Add($"{id}: author is not the public identity");
             if (!IsCommitter(f[3], f[4])) problems.Add($"{id}: committer is not the public identity");
             if (!f[5].EndsWith(" +0000", StringComparison.Ordinal)) problems.Add($"{id}: author date is not UTC");
@@ -373,6 +375,7 @@ public sealed class RepositoryHygieneTests
         }
 
         Assert.True(commits > 0, "git reported no commits");
+        Assert.True(checkedCommits > 0, "Only the merge commit of the pull request run is in the clone, so no commit was checked; fetch the full history (fetch-depth: 0).");
         Assert.True(problems.Count == 0, "History problems:" + Environment.NewLine + string.Join(Environment.NewLine, problems));
     }
 
