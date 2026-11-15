@@ -1,0 +1,27 @@
+{
+  "metadata": [
+    {
+      "src": [
+        { "src": "src/PclIO", "files": ["PclIO.csproj"] }
+      ],
+      "dest": "docs/api",
+      "properties": { "TargetFramework": "net10.0", "TargetFrameworks": "net10.0" },
+      "outputFormat": "apiPage"
+    }
+  ],
+  "build": {
+    "content": [
+      { "src": "docs", "files": ["*.md", "toc.yml", "api/**/*.yml", "api/**/*.md"] }
+    ],
+    "resource": [
+      { "src": "docs", "files": ["images/**"] }
+    ],
+    "output": "_site",
+    "globalMetadata": {
+      "_appTitle": "PclIO",
+      "_appFooter": "PclIO is licensed under the MIT License. Not affiliated with any scanner or software vendor.",
+      "_enableSearch": true
+    },
+    "template": ["default", "modern"]
+  }
+}

@@ -1,0 +1,65 @@
+namespace PclIO.Tests;
+
+/// <summary>Where the tests find private scan files that are not part of the repository. The folder is named by the
+/// environment variable PCLIO_TEST_FILES; when it is not set, a folder test_files in the repository root (or in an ancestor of
+/// the test binary) is used. A fixture is found by its extension, anywhere up to three folder levels below the root, so no file
+/// name is ever written into a test. A test that needs a file which is not there is reported as skipped with the reason,
+/// never passed.</summary>
+internal static class TestFiles
+{
+    public const string EnvironmentVariable = "PCLIO_TEST_FILES";
+
+    private const int MaxDepth = 3;
+
+    /// <summary>Folders searched for fixtures, the one named by the environment variable first.</summary>
+    public static IEnumerable<string> Roots() => Roots(Environment.GetEnvironmentVariable(EnvironmentVariable));
+
+    /// <summary>The same search with the value of the environment variable given, so a test need not change the process environment.</summary>
+    public static IEnumerable<string> Roots(string? configured)
+    {
+        if (configured is { Length: > 0 } && Directory.Exists(configured))
+            yield return configured;
+        for (var directory = AppContext.BaseDirectory; directory != null; directory = Path.GetDirectoryName(directory))
+        {
+            string candidate = Path.Combine(directory, "test_files");
+            if (Directory.Exists(candidate)) yield return candidate;
+        }
+    }
+
+    /// <summary>The first file (in ordinal path order) with this extension, or null when there is none.</summary>
+    public static string? TryFindByExtension(string extension) => TryFindByExtension(extension, Roots());
+
+    /// <summary>The first file with this extension in the first of the given folders that holds one, or null.</summary>
+    public static string? TryFindByExtension(string extension, IEnumerable<string> roots)
+    {
+        var options = new EnumerationOptions
+        {
+            RecurseSubdirectories = true,
+            MaxRecursionDepth = MaxDepth,
+            IgnoreInaccessible = true,
+            MatchCasing = MatchCasing.CaseInsensitive,
+        };
+
+        foreach (string root in roots)
+        {
+            string? found = Directory.EnumerateFiles(root, "*" + extension, options)
+                .Where(f => string.Equals(Path.GetExtension(f), extension, StringComparison.OrdinalIgnoreCase))
+                .Order(StringComparer.Ordinal)
+                .FirstOrDefault();
+            if (found != null) return found;
+        }
+
+        return null;
+    }
+
+    /// <summary>The path of a fixture with this extension, or a <see cref="SkipException"/> when none is available.</summary>
+    public static string FindByExtension(string extension) => FindByExtension(extension, Roots());
+
+    /// <summary>The path of a fixture with this extension in the given folders, or a <see cref="SkipException"/> when none is available.</summary>
+    public static string FindByExtension(string extension, IEnumerable<string> roots) =>
+        TryFindByExtension(extension, roots) ?? throw Missing(extension);
+
+    /// <summary>The skip that names the missing kind of fixture and the variable, without any absolute path.</summary>
+    public static SkipException Missing(string extension) =>
+        new($"No private '{extension}' fixture is available. Set {EnvironmentVariable} to a folder that holds private scan files, or create a test_files folder.");
+}

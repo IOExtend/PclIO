@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <PackageId>PclIO.Cli</PackageId>
+    <Description>Command line tool that inspects point cloud files, lists their scans, prints sample points and exports to LAS, XYZ, PTS or JSON.</Description>
+    <OutputType>Exe</OutputType>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>pclio</ToolCommandName>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <RootNamespace>PclIO.CommandLine</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\PclIO\PclIO.csproj" />
+  </ItemGroup>
+
+</Project>
