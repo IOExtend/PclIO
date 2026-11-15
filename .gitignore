@@ -31,3 +31,20 @@ docs/api/
 # OS metadata
 .DS_Store
 Thumbs.db
+
+# Scan and point cloud files never go into the repository
+*.e57
+*.rcp
+*.rcs
+*.lgsx
+*.lgs
+*.fls
+*.smf
+*.srf
+*.c3db
+*.c3ptx
+*.las
+*.ptx
+
+# Local secrets
+.env
