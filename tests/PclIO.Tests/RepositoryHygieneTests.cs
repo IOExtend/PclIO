@@ -341,6 +341,12 @@ public sealed class RepositoryHygieneTests
         bool IsCommitter(string name, string address) =>
             IsAuthor(name, address) || (name == "GitHub" && address == "noreply" + "@github.com");
 
+        // On a pull request run the checkout is the merge commit that GitHub makes for the check. It is not part of the
+        // repository's history and carries the identity and time zone of whoever triggered the run, so it is left out.
+        string? checkedOut = Environment.GetEnvironmentVariable("GITHUB_REF") is { } gitRef && gitRef.StartsWith("refs/pull/", StringComparison.Ordinal)
+            ? RunGit(root, "rev-parse", "HEAD")?.Trim()
+            : null;
+
         var problems = new List<string>();
         int commits = 0;
         foreach (string record in log.Split('\u001e', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
@@ -355,6 +361,7 @@ public sealed class RepositoryHygieneTests
 
             // Names and addresses are never printed, only which commit and which field is wrong.
             string id = f[0];
+            if (checkedOut != null && checkedOut.StartsWith(id, StringComparison.Ordinal)) continue;
             if (!IsAuthor(f[1], f[2])) problems.Add($"{id}: author is not the public identity");
             if (!IsCommitter(f[3], f[4])) problems.Add($"{id}: committer is not the public identity");
             if (!f[5].EndsWith(" +0000", StringComparison.Ordinal)) problems.Add($"{id}: author date is not UTC");
