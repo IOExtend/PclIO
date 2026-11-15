@@ -69,6 +69,8 @@ implementations, anything derived from vendor binaries, or vendor-internal symbo
 needs stays in the code as a plain constant with a short neutral comment (for example "container signature"). Detailed notes on
 proprietary formats do not belong in this repository. Test inputs are synthetic.
 
+Do not put personal data in code, documentation, test data or commit metadata. Use your GitHub noreply address as the commit email.
+
 ## Pull requests
 
 Include:
