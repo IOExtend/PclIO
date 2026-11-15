@@ -1,0 +1,27 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## [0.1.0] - 2026-11-15
+
+First release.
+
+### Added
+
+- Core types `PclDocument`, `PclScan`, `PclPoint`, `PclVector3`, `PclBounds`, `PclColor`, `PclTransform` and `PclReadOptions`; `PclReadOptions.MaxPoints` and `SubsampleStep` are validated, and `MaxPoints` of 0 yields no points.
+- Automatic format detection in `PclFile.DetectKind` and `PclFile.Open`, from the signature, the extension or the folder layout. A file with a recognised extension and the wrong content is `PclFileKind.Unknown`, except `.c3db` and `.c3ptx`, which are detected by extension alone and fail when opened.
+- Readers for ASTM E57 (a defined subset, with page checksum verification and pose rotation), ReCap scans (`.rcs`) and projects (`.rcp`), Leica containers (`.lgsx`, `.lgs`, with Zstandard decompression of point blocks through `ZstdSharp.Port`; all points of a container form one scan), FARO scans (`.fls` and scan folders), PinPoint projects (`.srf`, `.smf`) and EdgeWise databases and clusters (`.c3db`, `.c3ptx`).
+- Channel availability (`HasColors`, `HasIntensities`, `HasNormals`) follows what the file contains, except for ReCap scans, where it is fixed by the supported layout, and for the scans of a ReCap project, where it depends only on whether the `.rcs` file was found. Colour and intensity that a file does not store are null, and a project manifest that states no point count reports 0, instead of invented values.
+- Reading of untrusted files: declared sizes and counts are checked against the file and against fixed limits, XML is read without DTDs, decompressed sizes are capped before allocation, FARO planes are inflated in chunks, and malformed or truncated input fails with `InvalidDataException` and unsupported layouts with `NotSupportedException`. The limits are listed in the README.
+- `SafePath`, which resolves file names stored inside ReCap, PinPoint and EdgeWise project files only inside the project folder. The check is lexical; symbolic links are not resolved.
+- Exporters for ASPRS LAS 1.2 point format 2, ASCII XYZ, PTS and JSON, with overloads that report points skipped because a coordinate was NaN or infinite. LAS and PTS read the source twice instead of buffering the points. XYZ and PTS output is culture independent and ends lines with `\n`. JSON writes the file name, not its path.
+- The command line tool `pclio` with `info`, `scans`, `points` and `export`. Exit codes are 0 success, 1 command line, 2 input unreadable, 3 corrupt or unsupported, 4 unexpected, with one `error:` line on standard error. Options are parsed strictly. `export` refuses to overwrite an existing file without `--force`, refuses to write to the input or into an input folder (compared after following links and junctions), and writes through a temporary file. `points --format xyz|pts` prints the same lines as the exporters. Files written by `export` are UTF-8 without a BOM.
+- A test suite with synthetic fixtures; tests that need private scan files are skipped when the files are not available.
+- Documentation in `docs/` (getting started, public API, dependencies, private test fixtures), `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, a security policy with private vulnerability reporting, issue and pull request templates, CI, documentation and release workflows, `docfx.json` and `tools/pack-release.ps1`.
+- XML documentation on every public type and member.
+- `ZstdSharp.Port` 0.8.8 (MIT) as the only runtime dependency, and `Microsoft.SourceLink.GitHub` as a build-time package.

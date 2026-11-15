@@ -1,0 +1,33 @@
+# Build results
+[Bb]in/
+[Oo]bj/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Packages and release output
+*.nupkg
+*.snupkg
+artifacts/
+
+# Visual Studio and other editors
+.vs/
+.idea/
+.vscode/
+
+# Test results and coverage
+TestResults/
+*.trx
+coverage/
+
+# Private test fixtures (see docs/test-fixtures.md)
+test_files/
+
+# Documentation site (DocFX output and generated API pages)
+_site/
+docs/api/
+
+# OS metadata
+.DS_Store
+Thumbs.db

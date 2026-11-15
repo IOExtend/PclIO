@@ -1,0 +1,7 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/PclIO/PclIO.csproj" />
+    <Project Path="src/PclIO.Cli/PclIO.Cli.csproj" />
+  </Folder>
+  <Project Path="tests/PclIO.Tests/PclIO.Tests.csproj" />
+</Solution>

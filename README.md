@@ -1,0 +1,227 @@
+<p align="center">
+  <img src="docs/images/pclio-banner.png" alt="PclIO" width="640">
+</p>
+
+PclIO is a .NET library and command line tool that reads point cloud files from several scanner and project formats and exports the points to LAS, XYZ, PTS and JSON, without the software that wrote the files.
+
+## What it does
+
+- Detects the format of a file or folder from its content, extension or layout (`PclFile.DetectKind`).
+- Opens a file as a `PclDocument` with its scans, bounds, transforms, metadata and warnings, and streams the points (`ReadAllPoints`, `PclScan.ReadPoints`) with a point limit, a subsampling step and an optional scan transform.
+- Exports to ASPRS LAS 1.2 (point format 2), ASCII XYZ, ASCII PTS and JSON.
+- Ships the command line tool `pclio` with `info`, `scans`, `points` and `export`.
+
+## Install
+
+PclIO is a preview (0.x). The packages are published on nuget.org, not on GitHub Packages, so the Packages box of this repository stays empty.
+
+[![PclIO on NuGet](https://img.shields.io/nuget/v/PclIO?label=PclIO)](https://www.nuget.org/packages/PclIO) [![PclIO.Cli on NuGet](https://img.shields.io/nuget/v/PclIO.Cli?label=PclIO.Cli)](https://www.nuget.org/packages/PclIO.Cli)
+
+Install the command line tool:
+
+```sh
+dotnet tool install --global PclIO.Cli
+```
+
+Add the library to a .NET project:
+
+```sh
+dotnet add package PclIO
+```
+
+The library targets .NET 8 and .NET 10. It is managed code with one runtime dependency, [ZstdSharp.Port](THIRD-PARTY-NOTICES.md), and has no native dependencies or Windows-only APIs, and is tested on Windows, Linux and macOS. It does not contact the network and writes nothing to the console.
+
+## Supported formats
+
+| Format | Extensions | Support level |
+| --- | --- | --- |
+| ASTM E57 | `.e57` | Points decoded for a defined subset: uncompressed bit-packed streams with single or double precision Cartesian coordinates, 8-bit colour and 8-bit intensity. Pose translation and rotation are applied. Scaled-integer coordinates, spherical coordinates and other codecs are not supported: a scan that uses them lists normally and fails when its points are read. Per-point validity flags and images are not read, so points flagged as invalid are returned as stored, and colour or intensity fields of any other type or range are ignored. Page checksums are verified. |
+| ReCap scan | `.rcs` | Experimental. The header is read; point decoding covers only the node layout of major version 3, and any other layout is rejected. Colour and intensity are decoded, and normals when a node has them. `HasColors`, `HasIntensities` and `HasNormals` are fixed for this layout and are not read from the file. |
+| ReCap project | `.rcp` | Lists the scans of the project manifest and opens the `.rcs` files it finds next to the project. Node transforms are exposed as data and are not applied to points. |
+| Leica scan container | `.lgsx`, `.lgs` | Experimental. Points are decoded from the compressed point blocks: position, and colour, intensity and normals when the block has them. Poses and bounds are not read, all points of a container form one scan (setups are not separated; a warning says so), and the point count is found by decoding the data, which is slow on large files. |
+| FARO scan | `.fls`, or a FARO scan folder | Experimental. The scan grid and angles are read from the stored parameters and points are projected from the range grid; a file without them fails to open. The point count is the grid size, not a count of valid returns. Folder scans are read with an assumed record layout and intensity scale (a warning says so). |
+| PinPoint project | `.srf`, `.smf`, or a folder with `ScanProject.json` or `.smf`/`.srf` files | Experimental. The manifest (scan names, ids, poses, counts) is read. Points come from the referenced `.bin` files, and colour, intensity and normals are reported only when the file has that channel. A manifest with a scan position list takes the point count from the manifest, else from the data file; a manifest with a data object list always reports 0 because that count is not known. |
+| EdgeWise | `.c3db`, `.c3ptx` | Experimental. A `.c3db` point database lists the scan clusters and a `.c3ptx` is one cluster file; the cluster files give positions only. The scale of the cluster positions is not stored in the files, so it is an assumption of the reader and positions are only as exact as it. |
+
+### Format detection
+
+`PclFile.DetectKind` finds the kind from the content of the file, its extension or the layout of a folder, and returns
+`PclFileKind.Unknown` for anything else; `PclFile.Open` then throws `NotSupportedException`. Extensions are compared without
+regard to case.
+
+- E57, ReCap scan and Leica files are recognised by their content and accepted with any extension; for Leica, `.lgs` selects the
+  older container and any other extension `.lgsx`. EdgeWise files are also recognised by content when the extension is none of its own.
+- A FARO file must be an OLE2 compound file with the extension `.fls`. A ReCap project must be a ZIP archive with the extension
+  `.rcp`. A PinPoint file must be a JSON text file with the extension `.smf` or `.srf`.
+- The extensions `.c3db` and `.c3ptx` select EdgeWise without a content check. A `.c3ptx` file is read as one cluster file and any
+  other EdgeWise file as a point database.
+- A folder is a FARO scan folder or a PinPoint project folder (it holds `ScanProject.json`, or a `.smf` or `.srf` file) by its layout.
+
+So a wrong or damaged file with a recognised extension is reported as unknown, except `.c3db` and `.c3ptx`: those are reported as
+EdgeWise and fail with `InvalidDataException` when they are opened. A path that is neither a file nor a folder throws
+`FileNotFoundException`. The exact rules and their order are covered by the tests.
+
+### Referenced files and path containment
+
+Reading never executes code from a file. File names stored inside project files (ReCap, PinPoint, EdgeWise) are joined to a
+base folder and rejected when they are empty, rooted, contain invalid characters, or resolve outside that folder. This check is
+lexical: the path is normalised and compared with the base folder, and symbolic links and junctions are not resolved, so a link
+inside the project folder counts as part of it. A rejected name is reported as `InvalidDataException`, or as a warning where the
+reader can carry on without the file. The FARO folder reader searches the folder it was given and does not use names from the data.
+
+Where the readers look for the files a project refers to:
+
+- ReCap project: for each scan node, the stored path relative to the project's folder, then the project's support folder, then
+  the project's folder, and last a file named after the scan in the support folder. A scan whose file is not found stays listed,
+  yields no points and adds a warning.
+- PinPoint: the data folder that belongs to the project file, then the folder of the opened project file or folder. Where several
+  data files match a scan, the first one in ordinal path order is used.
+- EdgeWise database: each cluster file is named relative to the database's folder; a missing one is skipped with a warning.
+
+### Data filters
+
+These readers drop data without an error or a warning, so a scan can yield fewer points than `PointCount`.
+
+- Every exporter, and the `points` command with `--format xyz` or `pts`, skips a point with a NaN or infinite coordinate; the count is reported (see Exporters).
+- FARO: a grid cell without a valid return, or with a distance outside 0.1 m to 350 m, is not read.
+- PinPoint: a point with a NaN or infinite coordinate, or a coordinate whose magnitude exceeds 5000 in the file's own unit, is not
+  returned. This is a plausibility rule of the reader, so coordinates in a projected system with large offsets are dropped. A
+  data file without a channel table cannot be read: the project lists it with a warning and reading its points throws
+  `NotSupportedException`.
+- Leica: padding entries and points that coincide with a block's origin can be dropped, a compressed stream above its size limit
+  is skipped, and a block that is not recognised ends the scan. The result can therefore be incomplete.
+- EdgeWise: a database node whose point count is 0 is skipped.
+
+### Limits
+
+A file that exceeds one of these limits, or whose declared sizes and counts do not fit the file, is rejected with
+`InvalidDataException`, with three exceptions. A FARO scan grid above its limit gives `NotSupportedException` when the file is
+opened. An E57 point prototype with more than 1024 fields gives `NotSupportedException` when the points are read; the scan still
+lists. A compressed Leica stream above its size limit is not rejected: its data is skipped, which is one of the Leica data filters
+above. Point data is streamed and there is no limit on the file size, except for FARO container files: each compressed data stream is
+read into memory as a whole, so its size must fit a .NET array (about 2 GB), otherwise reading fails with
+`NotSupportedException`. The XML of E57 and ReCap project files is read with DTDs prohibited, so no entity is expanded and nothing
+outside the file is fetched.
+
+| Format | Limits |
+| --- | --- |
+| E57 | XML section 32 MiB, nesting depth 64, 1,000,000 elements; declared record counts up to 2^40; at most 1024 fields in a point prototype; at most 4096 consecutive packets without points. |
+| ReCap project | Manifest 64 MiB (declared and real size), nesting depth 64, 1,000,000 elements, 65,536 scan nodes. |
+| ReCap scan | 500,000 nodes in the node table, which must fit in the file together with the node payloads. |
+| Leica | 10,000 container entries; per point block a limited number of streams, 10,000,000 compressed bytes per stream, 16 MiB per decompressed stream (checked before allocation) and 128 MiB decompressed in all; over all blocks of one read 1 GiB plus 64 times the file size decompressed. |
+| FARO | Parameters 1 MiB; scan grid of at most 2^27 cells (134,217,728); a distance stream too small for the declared grid is refused; each compressed data stream is held in memory (see above) and is inflated in chunks, and must not inflate beyond its grid size plus 64 KiB. Compound file: 65,536 directory entries, depth 16. |
+| PinPoint | Manifest 64 MiB and the default nesting depth of `System.Text.Json` (64); 100,000 scans. The parsed manifest needs memory of about 15 times its size, so a manifest at the limit needs about 1 GB. |
+| EdgeWise | 1,048,576 characters per database line; 1,000,000 nodes. Patterns that parse a line have a time limit. |
+
+## Exporters
+
+| Output | Class | Notes |
+| --- | --- | --- |
+| LAS 1.2, point format 2 | `PclLasExporter` | Position, intensity, classification, RGB. Fixed 1 mm scale. |
+| XYZ | `PclXyzExporter` | `X Y Z R G B` when the point has a colour, else `X Y Z I` when it has an intensity, else `X Y Z`. |
+| PTS | `PclPtsExporter` | A line with the point count, then `X Y Z Intensity R G B` per point. |
+| JSON | `PclJsonExporter` | Metadata and scans; sample points only when a point limit above zero is given. |
+
+XYZ and PTS output is culture independent (`.` decimal separator) and ends lines with `\n`. JSON output is culture independent; its line ends are those of the platform. Points with a NaN or infinite coordinate are skipped; the overloads with `out long skippedPoints` report how many, and the command line prints `warning: skipped N points with a NaN or infinite coordinate` on standard error when N is not zero. The exception is `pclio points --format json`, which skips nothing and writes such a coordinate as the string `"NaN"`, `"Infinity"` or `"-Infinity"`. Files written by `export` are UTF-8 without a BOM; `info`, `scans` and `points` write to the console with the platform's own line ends and encoding, and control characters in names and messages are printed as `\uXXXX`.
+
+## Command line
+
+```text
+pclio info <file> [--json]
+pclio scans <file> [--json]
+pclio points <file> [--scan <id>] [--limit <n>] [--step <s>] [--format <xyz|pts|json>] [--no-transform]
+pclio export <input> <output> [--format <las|xyz|pts|json>] [--limit <n>] [--step <s>] [--no-transform] [--force]
+pclio <input> [--json]               same as 'info'
+pclio <input> <output> [options]     same as 'export'
+```
+
+- `info` prints the format, file size, scans, point count, bounds, coordinate system, metadata and warnings.
+- `scans` lists the scans with their point counts, channels, bounds and translation.
+- `points` prints points to standard output, at most 1000 unless `--limit` is given. `--scan` selects one scan by 0-based index, id or name. `--format xyz` and `--format pts` print the same lines as the exporters (PTS starts with its count line); `--format json` prints one JSON object per line.
+- `export` writes a file. The format comes from `--format` or from the output extension (`.las`, `.xyz`, `.pts`, `.json`); any other extension needs `--format`. The output is written to a temporary file next to the target and moved into place when complete. Export refuses to write to the input (compared after following links and junctions, and on Windows by file identity, so the verbatim and device prefixes and administrative shares are caught too; hard links are not detected elsewhere), to a path inside an input folder, to a missing folder or to a directory, and refuses to replace an existing file unless `--force` is given.
+- `--limit` and `--step` take integers of at least 1. `--no-transform` returns coordinates as stored. A JSON export rejects `--step` and `--no-transform`, and `--limit` for it is the number of sample points.
+- `--help`, `-h` and `help`, and `--version`, `-v` and `version`, print and exit with code 0.
+
+Errors are one line on standard error, with no stack trace for any exit code.
+
+### Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| 0 | The command succeeded. |
+| 1 | The command line is wrong: unknown option, missing or extra argument, invalid value, output refused. |
+| 2 | The input cannot be read: it is missing, empty or unreadable. A failed write of the output also exits with 2, and the message names the file. |
+| 3 | The input is corrupt, truncated or unsupported. |
+| 4 | Unexpected internal failure. |
+
+## Library
+
+```csharp
+using System;
+using System.IO;
+using PclIO;
+using PclIO.Export;
+
+using PclDocument doc = PclFile.Open("scan.e57");
+Console.WriteLine($"{doc.Kind}: {doc.Scans.Count} scans, {doc.TotalPointCount} points");
+
+foreach (string warning in doc.Warnings)
+{
+    Console.Error.WriteLine(warning);
+}
+
+foreach (PclPoint point in doc.ReadAllPoints(new PclReadOptions { MaxPoints = 1000 }))
+{
+    Console.WriteLine($"{point.X} {point.Y} {point.Z}");
+}
+
+using FileStream output = File.Create("scan.las");
+long written = PclLasExporter.Export(doc, output);
+```
+
+`PclFile.Open` throws `FileNotFoundException` for a missing path, `DirectoryNotFoundException` when a directory it needs disappears while reading, `NotSupportedException` for an unrecognised format or an unsupported feature, and `InvalidDataException` for a malformed or truncated file. The library is silent: problems that do not stop reading are collected in `PclDocument.Warnings`.
+
+See the [public API](docs/public-api.md) for the supported surface and [dependencies](docs/dependencies.md) for package details.
+
+## Documentation
+
+[Getting started](docs/getting-started.md), the [public API](docs/public-api.md), [dependencies](docs/dependencies.md) and [private test fixtures](docs/test-fixtures.md) are in `docs/`. The documentation site with the API reference is at <https://ioextend.github.io/PclIO/>, built from them with DocFX (`docfx.json`). [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/IOExtend/PclIO) offers an automatically generated overview of the repository.
+
+## Limitations
+
+- Version 0.1.0 is a preview. The API can change before 1.0.
+- Only the subsets listed under Supported formats are read. Anything else fails with exit code 3 (`InvalidDataException` or `NotSupportedException` in the library) instead of being guessed, apart from the assumptions named under Supported formats (the FARO folder record layout, the EdgeWise position scale and the ReCap scan channel flags).
+- The decoders other than E57 cover only the file layouts they were written for. Files written by other software versions can be rejected.
+- Readers limit the sizes and counts that a file declares; the numbers are listed under Limits. A file that exceeds a limit is rejected, with the exceptions described there. Some readers drop points that fail a plausibility rule; see Data filters.
+- `SubsampleStep` is applied inside each format's internal blocks, so the spacing is approximate. `MaxPoints` limits one read call.
+- A scan transform is scale and translation, or a 4x4 matrix when the format gives one. Rotation values of a `PclTransform` are stored for information and are not applied by `TransformPoint`.
+- LAS and PTS export read the source twice (the header needs the count), so the source must be re-enumerable; memory does not depend on the number of points. A point without intensity is written with full intensity and a point without colour as white, because these formats have no "missing" value. LAS stores coordinates with a 1 mm scale, so the extent of each axis must not exceed about 2147 km.
+- Normals are read where a format has them, but no exporter writes them.
+- There is no support for writing or modifying scan files.
+
+## Build from source and tests
+
+Use the .NET SDK selected by `global.json`, which specifies 10.0.100 with `latestFeature` roll-forward.
+
+From the repository root:
+
+```sh
+dotnet build PclIO.slnx -c Release
+dotnet test
+```
+
+Tests that need real scan files are skipped with a message unless `PCLIO_TEST_FILES` points to a folder with private fixtures (or an uncommitted `test_files` folder exists). The repository contains no scans. See [private test fixtures](docs/test-fixtures.md).
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) and the [Code of Conduct](CODE_OF_CONDUCT.md). Release changes are recorded in [CHANGELOG.md](CHANGELOG.md).
+
+## Security
+
+Report vulnerabilities through GitHub private vulnerability reporting in the repository's Security tab. Do not open public issues for security vulnerabilities. See [SECURITY.md](SECURITY.md).
+
+## License and trademarks
+
+PclIO is licensed under the [MIT License](LICENSE). Copyright holder: mahach666.
+
+PclIO is not affiliated with, endorsed by or sponsored by Autodesk, Leica Geosystems, FARO, ClearEdge3D, PointCab or any other vendor named in this repository. Autodesk and ReCap are trademarks of Autodesk, Inc.; Leica and Leica Geosystems, FARO, EdgeWise, PointCab and PinPoint are trademarks of their respective holders. These names are used only to say which file formats PclIO reads. LAS is a format of the American Society for Photogrammetry and Remote Sensing (ASPRS), and E57 is an ASTM standard. No vendor code or binaries are included.
