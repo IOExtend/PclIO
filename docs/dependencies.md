@@ -10,17 +10,15 @@ Build settings shared by every project live in `Directory.Build.props`; the SDK 
 
 ## Runtime packages (library)
 
-| Package | Version | License | Used for |
-|---|---|---|---|
-| ZstdSharp.Port | 0.8.8 | MIT | Zstandard decompression of the point blocks in Leica scan containers. |
-
-ZstdSharp.Port is the only runtime dependency. The E57, ReCap, FARO, PinPoint and EdgeWise readers use only the .NET base class library
-(`System.IO.Compression`, `System.Xml`, `System.Text.Json`). The library references no native code.
+None. The library and the command line tool depend on the .NET base class library only (`System.IO.Compression`, `System.Xml`,
+`System.Text.Json`) and reference no native code. A test checks that neither project file references a package.
 
 ### Decisions
 
-- **Decompression bound.** The library decodes each zstd frame with an explicit maximum size, so a frame that declares more than the
-  limit is rejected before memory is allocated.
+- **No dependencies on other packages.** The Zstandard decoder for the point blocks of Leica containers and the Snappy decoder for
+  the channels of PinPoint data files are part of the library, written from the public format specifications.
+- **Decompression bound.** The Zstandard decoder takes an explicit maximum size, so a frame that declares more than the limit is
+  rejected before memory is allocated. The Snappy decoder is streaming; memory use does not depend on the size of the data.
 
 ## Build-time packages
 
@@ -30,7 +28,7 @@ The 11.x line is not used because it pulls `System.IO.Hashing` 11, which does no
 ## Test packages
 
 Pinned to exact versions: Microsoft.NET.Test.Sdk 18.12.0, xunit 2.9.3 and xunit.runner.visualstudio 4.0.1.
-The test project references the library and the CLI project; it takes ZstdSharp.Port from the library.
+The test project references the library and the CLI project.
 
 ## Auditing
 

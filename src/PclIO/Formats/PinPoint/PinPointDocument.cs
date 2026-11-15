@@ -187,7 +187,7 @@ public sealed class PinPointDocument : PclDocument
         _scans.Add(scan);
     }
 
-    // A damaged data file must not hide the other scans: record a warning and leave its channels unknown.
+    // A damaged or unsupported data file must not hide the other scans: record a warning and leave its channels unknown.
     private static ChannelTable? ReadTableOrWarn(PinPointDocument document, string scanName, string? binPath)
     {
         if (binPath == null) return null;
@@ -196,10 +196,10 @@ public sealed class PinPointDocument : PclDocument
             using var fs = File.OpenRead(binPath);
             var table = ChannelTable.TryRead(fs);
             if (table == null)
-                document._warnings.Add($"Scan '{scanName}': the point data file has no channel table; its points cannot be read.");
+                document._warnings.Add($"Scan '{scanName}': the point data file has no recognised channel layout; its points cannot be read.");
             return table;
         }
-        catch (InvalidDataException ex)
+        catch (Exception ex) when (ex is InvalidDataException or NotSupportedException)
         {
             document._warnings.Add($"Scan '{scanName}': {ex.Message}");
             return null;
@@ -310,7 +310,11 @@ public sealed class PinPointDocument : PclDocument
         };
     }
 
-    /// <summary>Channel layout of a point data file that starts with a named channel table.</summary>
+    /// <summary>
+    /// Channel layout of a point data file, in one of two forms: a table of named channels stored as they are, or a list of
+    /// numbered sections with Snappy-compressed channels (see <see cref="PinPointPackedLayout"/>). For the first form an
+    /// offset and length describe the channel payload, for the second the compressed stream.
+    /// </summary>
     internal sealed class ChannelTable
     {
         // Each channel payload starts with a short fixed tag that is skipped.
@@ -323,19 +327,34 @@ public sealed class PinPointDocument : PclDocument
         public long NormalsOffset, NormalsLength;
         public long IntensitiesOffset, IntensitiesLength;
 
-        /// <summary>Number of 3 x float32 positions in the points channel.</summary>
-        public long PointCount => PointsLength / 12;
+        /// <summary>True when the channels are Snappy streams, with the point count stored in <see cref="PackedPoints"/>.</summary>
+        public bool Packed;
 
-        /// <summary>Reads the table, or returns null when the file does not start with one.</summary>
+        /// <summary>Point count stored in the data section of the packed form.</summary>
+        public long PackedPoints;
+
+        /// <summary>Number of 3 x float32 positions in the points channel.</summary>
+        public long PointCount => Packed ? PackedPoints : PointsLength / 12;
+
+        /// <summary>Bytes per colour: RGB in the packed form, RGBA in the table form.</summary>
+        public int ColorSize => Packed ? 3 : 4;
+
+        public bool HasColors => Packed ? PackedPoints > 0 && ColorsLength > 0 : ColorsLength >= ColorSize;
+
+        public bool HasIntensities => Packed ? PackedPoints > 0 && IntensitiesLength > 0 : IntensitiesLength >= 1;
+
+        public bool HasNormals => NormalsLength >= 12;
+
+        /// <summary>Reads the table, or returns null when the file has neither layout.</summary>
         public static ChannelTable? TryRead(FileStream fs)
         {
-            // Container signature: a channel table whose first entry is named "Points" at offset 12.
+            // Table form: a channel table whose first entry is named "Points" at offset 12.
             Span<byte> head = stackalloc byte[22];
             if (fs.Length < head.Length) return null;
             fs.Position = 0;
             fs.ReadExactly(head);
             if (Bytes.ReadInt32LE(head.Slice(12, 4)) != 6 || !head.Slice(16, 6).SequenceEqual("Points"u8))
-                return null;
+                return PinPointPackedLayout.TryRead(fs);
 
             var table = new ChannelTable();
             Span<byte> entry = stackalloc byte[16];
@@ -404,13 +423,13 @@ public sealed class PinPointScan : PclScan
     public string? BinFilePath { get; }
 
     /// <summary>True only when the point data file has a colour channel.</summary>
-    public override bool HasColors => _table is { ColorsLength: >= 4 };
+    public override bool HasColors => _table is { HasColors: true };
 
     /// <summary>True only when the point data file has an intensity channel.</summary>
-    public override bool HasIntensities => _table is { IntensitiesLength: >= 1 };
+    public override bool HasIntensities => _table is { HasIntensities: true };
 
     /// <summary>True only when the point data file has a normals channel.</summary>
-    public override bool HasNormals => _table is { NormalsLength: >= 12 };
+    public override bool HasNormals => _table is { HasNormals: true };
 
     internal PinPointScan(string id, string name, long pointCount, PclTransform transform, string? binFilePath,
         PinPointDocument.ChannelTable? table)
@@ -434,11 +453,15 @@ public sealed class PinPointScan : PclScan
     /// it can be larger than the number of returned points.
     /// </para>
     /// <para>
-    /// A point data file without a channel table is not decoded, because its layout is not described by the file.
+    /// A point data file whose layout is neither a table of named channels nor a list of sections with a property table is
+    /// not decoded, because the file does not describe its layout. Of the channels of the sectioned layout the positions
+    /// ("Points"), colours ("RGB8", three bytes per point) and intensities ("Intensities8") are read; the per-point flags
+    /// and the grid indices stored next to them are not interpreted, so every stored point is returned.
     /// </para>
     /// </remarks>
     /// <exception cref="InvalidDataException">The point data file is damaged.</exception>
-    /// <exception cref="NotSupportedException">The point data file has no channel table.</exception>
+    /// <exception cref="NotSupportedException">The point data file has no recognised channel layout, or uses a feature of the
+    /// sectioned layout that is not supported.</exception>
     public override IEnumerable<PclPoint> ReadPoints(PclReadOptions? options = null)
     {
         options ??= PclReadOptions.Default;
@@ -450,81 +473,121 @@ public sealed class PinPointScan : PclScan
         using var fs = File.OpenRead(BinFilePath);
         var table = PinPointDocument.ChannelTable.TryRead(fs);
 
-        if (table == null) throw FormatError.Unsupported("point data file without a channel table");
+        if (table == null) throw FormatError.Unsupported("point data file without a recognised channel layout");
 
         foreach (var pt in ReadChannels(table, targetCount, step, options.ApplyTransform)) yield return pt;
     }
 
+    // Points are decoded in batches, so that reading cost does not depend on the number of calls into the streams.
+    private const int Batch = 4096;
+
     private IEnumerable<PclPoint> ReadChannels(PinPointDocument.ChannelTable table, long targetCount, int step, bool applyTransform)
     {
+        if (targetCount <= 0) yield break;
+
+        int colorSize = table.ColorSize;
         long pointTotal = table.PointCount;
-        long colorTotal = table.ColorsLength / 4;
-        long normalTotal = table.NormalsLength / 12;
-        long intensityTotal = table.IntensitiesLength;
+        long colorTotal = !table.HasColors ? 0 : table.Packed ? pointTotal : table.ColorsLength / colorSize;
+        long normalTotal = !table.HasNormals ? 0 : table.NormalsLength / 12;
+        long intensityTotal = !table.HasIntensities ? 0 : table.Packed ? pointTotal : table.IntensitiesLength;
 
-        using var ptsFs = File.OpenRead(BinFilePath!);
-        ptsFs.Position = table.PointsOffset;
-        using var colFs = colorTotal > 0 ? File.OpenRead(BinFilePath!) : null;
-        if (colFs != null) colFs.Position = table.ColorsOffset;
-        using var nrmFs = normalTotal > 0 ? File.OpenRead(BinFilePath!) : null;
-        if (nrmFs != null) nrmFs.Position = table.NormalsOffset;
-        using var intFs = intensityTotal > 0 ? File.OpenRead(BinFilePath!) : null;
-        if (intFs != null) intFs.Position = table.IntensitiesOffset;
+        using var points = OpenChannel(table, table.PointsOffset, table.PointsLength, pointTotal > 0);
+        using var colors = OpenChannel(table, table.ColorsOffset, table.ColorsLength, colorTotal > 0);
+        using var normals = OpenChannel(table, table.NormalsOffset, table.NormalsLength, normalTotal > 0);
+        using var intensities = OpenChannel(table, table.IntensitiesOffset, table.IntensitiesLength, intensityTotal > 0);
 
-        byte[] ptBuf = new byte[12];
-        byte[] colBuf = new byte[4];
-        byte[] nrmBuf = new byte[12];
-        byte[] intBuf = new byte[1];
+        byte[] pointBytes = new byte[Batch * 12];
+        byte[] colorBytes = new byte[Batch * colorSize];
+        byte[] normalBytes = new byte[Batch * 12];
+        byte[] intensityBytes = new byte[Batch];
 
         long yielded = 0;
-        for (long i = 0; i < pointTotal && yielded < targetCount; i++)
+        long start = 0;
+        for (; start < pointTotal && yielded < targetCount; start += Batch)
         {
-            ptsFs.ReadExactly(ptBuf, 0, 12);
+            int count = (int)Math.Min(Batch, pointTotal - start);
+            points!.ReadExactly(pointBytes, 0, count * 12);
 
             // Optional channels advance in step with the points; a channel shorter than the points simply ends.
-            bool hasColor = colFs != null && i < colorTotal;
-            if (hasColor) colFs!.ReadExactly(colBuf, 0, 4);
-            bool hasNormal = nrmFs != null && i < normalTotal;
-            if (hasNormal) nrmFs!.ReadExactly(nrmBuf, 0, 12);
-            bool hasIntensity = intFs != null && i < intensityTotal;
-            if (hasIntensity) intFs!.ReadExactly(intBuf, 0, 1);
+            int colorCount = colors == null ? 0 : (int)Math.Clamp(colorTotal - start, 0, count);
+            if (colorCount > 0) colors!.ReadExactly(colorBytes, 0, colorCount * colorSize);
+            int normalCount = normals == null ? 0 : (int)Math.Clamp(normalTotal - start, 0, count);
+            if (normalCount > 0) normals!.ReadExactly(normalBytes, 0, normalCount * 12);
+            int intensityCount = intensities == null ? 0 : (int)Math.Clamp(intensityTotal - start, 0, count);
+            if (intensityCount > 0) intensities!.ReadExactly(intensityBytes, 0, intensityCount);
 
-            if (i % step != 0) continue;
-
-            float x = Bytes.ReadSingleLE(ptBuf.AsSpan(0, 4));
-            float y = Bytes.ReadSingleLE(ptBuf.AsSpan(4, 4));
-            float z = Bytes.ReadSingleLE(ptBuf.AsSpan(8, 4));
-            if (!IsPlausible(x, y, z)) continue;
-
-            PclColor? color = hasColor ? new PclColor(colBuf[0], colBuf[1], colBuf[2]) : null;
-            float? intensity = hasIntensity ? intBuf[0] / 255.0f : null;
-
-            PclVector3? normal = null;
-            if (hasNormal)
+            for (int j = 0; j < count && yielded < targetCount; j++)
             {
-                float nx = Bytes.ReadSingleLE(nrmBuf.AsSpan(0, 4));
-                float ny = Bytes.ReadSingleLE(nrmBuf.AsSpan(4, 4));
-                float nz = Bytes.ReadSingleLE(nrmBuf.AsSpan(8, 4));
-                if (float.IsFinite(nx) && float.IsFinite(ny) && float.IsFinite(nz) &&
-                    (nx != 0 || ny != 0 || nz != 0))
+                if ((start + j) % step != 0) continue;
+
+                var record = pointBytes.AsSpan(j * 12, 12);
+                float x = Bytes.ReadSingleLE(record[..4]);
+                float y = Bytes.ReadSingleLE(record.Slice(4, 4));
+                float z = Bytes.ReadSingleLE(record.Slice(8, 4));
+                if (!IsPlausible(x, y, z)) continue;
+
+                PclColor? color = null;
+                if (j < colorCount)
                 {
-                    var nVec = new PclVector3(nx, ny, nz);
-                    normal = applyTransform ? Transform.TransformVector(nVec) : nVec;
+                    int c = j * colorSize;
+                    color = new PclColor(colorBytes[c], colorBytes[c + 1], colorBytes[c + 2]);
                 }
+
+                float? intensity = j < intensityCount ? intensityBytes[j] / 255.0f : null;
+
+                PclVector3? normal = null;
+                if (j < normalCount)
+                {
+                    var n = normalBytes.AsSpan(j * 12, 12);
+                    float nx = Bytes.ReadSingleLE(n[..4]);
+                    float ny = Bytes.ReadSingleLE(n.Slice(4, 4));
+                    float nz = Bytes.ReadSingleLE(n.Slice(8, 4));
+                    if (float.IsFinite(nx) && float.IsFinite(ny) && float.IsFinite(nz) &&
+                        (nx != 0 || ny != 0 || nz != 0))
+                    {
+                        var nVec = new PclVector3(nx, ny, nz);
+                        normal = applyTransform ? Transform.TransformVector(nVec) : nVec;
+                    }
+                }
+
+                var pt = new PclPoint(
+                    new PclVector3(x, y, z),
+                    Color: color,
+                    Intensity: intensity,
+                    Normal: normal,
+                    Index: (ulong)yielded);
+
+                if (applyTransform)
+                    pt = pt with { Position = Transform.TransformPoint(pt.Position) };
+
+                yield return pt;
+                yielded++;
             }
+        }
 
-            var pt = new PclPoint(
-                new PclVector3(x, y, z),
-                Color: color,
-                Intensity: intensity,
-                Normal: normal,
-                Index: (ulong)yielded);
+        // Once every point has been read, a compressed stream must end there: bytes after its last element are an error.
+        if (table.Packed && start >= pointTotal)
+        {
+            foreach (var stream in new[] { points, colors, intensities })
+                if (stream != null && stream.ReadByte() >= 0) throw FormatError.Corrupted("a compressed channel holds more data than it declares");
+        }
+    }
 
-            if (applyTransform)
-                pt = pt with { Position = Transform.TransformPoint(pt.Position) };
+    // A stream over one channel: the bytes of the file at the offset, or their Snappy decoding for the packed form.
+    private Stream? OpenChannel(PinPointDocument.ChannelTable table, long offset, long length, bool present)
+    {
+        if (!present) return null;
 
-            yield return pt;
-            yielded++;
+        var fs = File.OpenRead(BinFilePath!);
+        try
+        {
+            fs.Position = offset;
+            return table.Packed ? new SnappyReader(fs, length) : fs;
+        }
+        catch
+        {
+            fs.Dispose();
+            throw;
         }
     }
 

@@ -29,7 +29,7 @@ Add the library to a .NET project:
 dotnet add package PclIO
 ```
 
-The library targets .NET 8 and .NET 10. It is managed code with one runtime dependency, [ZstdSharp.Port](THIRD-PARTY-NOTICES.md), and has no native dependencies or Windows-only APIs, and is tested on Windows, Linux and macOS. It does not contact the network and writes nothing to the console.
+The library targets .NET 8 and .NET 10. It is managed code with no dependencies on other packages (see [third-party notices](THIRD-PARTY-NOTICES.md)), has no native dependencies or Windows-only APIs, and is tested on Windows, Linux and macOS. It does not contact the network and writes nothing to the console.
 
 ## Supported formats
 
@@ -40,7 +40,7 @@ The library targets .NET 8 and .NET 10. It is managed code with one runtime depe
 | ReCap project | `.rcp` | Lists the scans of the project manifest and opens the `.rcs` files it finds next to the project. Node transforms are exposed as data and are not applied to points. |
 | Leica scan container | `.lgsx`, `.lgs` | Experimental. Points are decoded from the compressed point blocks: position, and colour, intensity and normals when the block has them. Poses and bounds are not read, all points of a container form one scan (setups are not separated; a warning says so), and the point count is found by decoding the data, which is slow on large files. |
 | FARO scan | `.fls`, or a FARO scan folder | Experimental. The scan grid and angles are read from the stored parameters and points are projected from the range grid; a file without them fails to open. The point count is the grid size, not a count of valid returns. Folder scans are read with an assumed record layout and intensity scale (a warning says so). |
-| PinPoint project | `.srf`, `.smf`, or a folder with `ScanProject.json` or `.smf`/`.srf` files | Experimental. The manifest (scan names, ids, poses, counts) is read. Points come from the referenced `.bin` files, and colour, intensity and normals are reported only when the file has that channel. A manifest with a scan position list takes the point count from the manifest, else from the data file; a manifest with a data object list always reports 0 because that count is not known. |
+| PinPoint project | `.srf`, `.smf`, or a folder with `ScanProject.json` or `.smf`/`.srf` files | Experimental. The manifest (scan names, ids, poses, counts) is read. Points come from the referenced `.bin` files, in either of two layouts: a table of named channels, or numbered sections with a property table and Snappy-compressed channels, which PclIO decodes itself. Colour, intensity and normals are reported only when the file has that channel; in the second layout only positions, colours and intensities are read, and the per-point flags and grid indices stored beside them are not interpreted, so every stored point that passes the plausibility rule below is returned. A manifest with a scan position list takes the point count from the manifest, else from the data file; a manifest with a data object list always reports 0 because that count is not known. |
 | EdgeWise | `.c3db`, `.c3ptx` | Experimental. A `.c3db` point database lists the scan clusters and a `.c3ptx` is one cluster file; the cluster files give positions only. The scale of the cluster positions is not stored in the files, so it is an assumption of the reader and positions are only as exact as it. |
 
 ### Format detection
@@ -86,8 +86,9 @@ These readers drop data without an error or a warning, so a scan can yield fewer
 - FARO: a grid cell without a valid return, or with a distance outside 0.1 m to 350 m, is not read.
 - PinPoint: a point with a NaN or infinite coordinate, or a coordinate whose magnitude exceeds 5000 in the file's own unit, is not
   returned. This is a plausibility rule of the reader, so coordinates in a projected system with large offsets are dropped. A
-  data file without a channel table cannot be read: the project lists it with a warning and reading its points throws
-  `NotSupportedException`.
+  data file in neither layout, or in the sectioned layout with an element type or header value the reader does not support, cannot
+  be read: the project lists it with a warning and reading its points throws `NotSupportedException`. A compressed stream whose
+  copies reach back more than 1 MiB is not decoded either: reading its points throws `NotSupportedException`, without an earlier warning.
 - Leica: padding entries and points that coincide with a block's origin can be dropped, a compressed stream above its size limit
   is skipped, and a block that is not recognised ends the scan. The result can therefore be incomplete.
 - EdgeWise: a database node whose point count is 0 is skipped.
@@ -95,10 +96,10 @@ These readers drop data without an error or a warning, so a scan can yield fewer
 ### Limits
 
 A file that exceeds one of these limits, or whose declared sizes and counts do not fit the file, is rejected with
-`InvalidDataException`, with three exceptions. A FARO scan grid above its limit gives `NotSupportedException` when the file is
+`InvalidDataException`, with the exceptions below. A FARO scan grid above its limit gives `NotSupportedException` when the file is
 opened. An E57 point prototype with more than 1024 fields gives `NotSupportedException` when the points are read; the scan still
 lists. A compressed Leica stream above its size limit is not rejected: its data is skipped, which is one of the Leica data filters
-above. Point data is streamed and there is no limit on the file size, except for FARO container files: each compressed data stream is
+above. An unsupported PinPoint feature (see the data filters) gives `NotSupportedException` when the points are read. Point data is streamed and there is no limit on the file size, except for FARO container files: each compressed data stream is
 read into memory as a whole, so its size must fit a .NET array (about 2 GB), otherwise reading fails with
 `NotSupportedException`. The XML of E57 and ReCap project files is read with DTDs prohibited, so no entity is expanded and nothing
 outside the file is fetched.
@@ -108,9 +109,9 @@ outside the file is fetched.
 | E57 | XML section 32 MiB, nesting depth 64, 1,000,000 elements; declared record counts up to 2^40; at most 1024 fields in a point prototype; at most 4096 consecutive packets without points. |
 | ReCap project | Manifest 64 MiB (declared and real size), nesting depth 64, 1,000,000 elements, 65,536 scan nodes. |
 | ReCap scan | 500,000 nodes in the node table, which must fit in the file together with the node payloads. |
-| Leica | 10,000 container entries; per point block a limited number of streams, 10,000,000 compressed bytes per stream, 16 MiB per decompressed stream (checked before allocation) and 128 MiB decompressed in all; over all blocks of one read 1 GiB plus 64 times the file size decompressed. |
+| Leica | 10,000 container entries; per point block at most 64 compressed streams, 10,000,000 compressed bytes per stream, 16 MiB per decompressed stream (checked before allocation) and 128 MiB decompressed in all; over all blocks of one read 1 GiB plus 64 times the file size decompressed. |
 | FARO | Parameters 1 MiB; scan grid of at most 2^27 cells (134,217,728); a distance stream too small for the declared grid is refused; each compressed data stream is held in memory (see above) and is inflated in chunks, and must not inflate beyond its grid size plus 64 KiB. Compound file: 65,536 directory entries, depth 16. |
-| PinPoint | Manifest 64 MiB and the default nesting depth of `System.Text.Json` (64); 100,000 scans. The parsed manifest needs memory of about 15 times its size, so a manifest at the limit needs about 1 GB. |
+| PinPoint | Manifest 64 MiB and the default nesting depth of `System.Text.Json` (64); 100,000 scans. The parsed manifest needs memory of about 15 times its size, so a manifest at the limit needs about 1 GB. Sectioned data file: at most 16 sections, a property table of at most 1 MiB nested at most 8 levels, copies in a compressed stream at most 1 MiB back; the sections must be contiguous and fill the file, and the `Points`, `RGB8` and `Intensities8` streams must decode to exactly 12, 3 and 1 bytes per stored point. |
 | EdgeWise | 1,048,576 characters per database line; 1,000,000 nodes. Patterns that parse a line have a time limit. |
 
 ## Exporters

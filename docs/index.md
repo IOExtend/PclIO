@@ -15,7 +15,7 @@ PclIO is a .NET library and command line tool that reads point cloud files from 
 - Exports to ASPRS LAS 1.2 (point format 2), ASCII XYZ, ASCII PTS and JSON.
 - Ships the command line tool `pclio` with `info`, `scans`, `points` and `export`.
 
-The library targets .NET 8 and .NET 10, is managed code with one runtime dependency, never writes to the console and never contacts the network. It is tested on Windows, Linux and macOS. PclIO is a preview (0.x).
+The library targets .NET 8 and .NET 10, is managed code with no dependencies on other packages, never writes to the console and never contacts the network. It is tested on Windows, Linux and macOS. PclIO is a preview (0.x).
 
 ## Where to go next
 

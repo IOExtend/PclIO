@@ -2,13 +2,15 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Xml.Linq;
 using Xunit;
 
 namespace PclIO.Tests;
 
 /// <summary>Keeps private data and proprietary material out of the repository. The files checked are the ones git tracks (or
 /// would track), or every file outside build output when git is not available. The patterns are assembled from pieces at
-/// run time so that this file does not contain a literal that would match itself.</summary>
+/// run time so that this file does not contain a literal that would match itself. It also checks that the shipped projects
+/// reference no package.</summary>
 public sealed class RepositoryHygieneTests
 {
     private const long MaxFileBytes = 1024 * 1024;
@@ -365,5 +367,22 @@ public sealed class RepositoryHygieneTests
 
         Assert.True(commits > 0, "git reported no commits");
         Assert.True(problems.Count == 0, "History problems:" + Environment.NewLine + string.Join(Environment.NewLine, problems));
+    }
+
+    [SkippableFact]
+    public void The_Packages_Have_No_Dependencies_On_Other_Packages()
+    {
+        string root = FindRepoRoot();
+
+        // Neither shipped project references a package; the only package any of them gets is the build-time one that
+        // Directory.Build.props adds with PrivateAssets, which never reaches the consumer.
+        foreach (string project in new[] { "src/PclIO/PclIO.csproj", "src/PclIO.Cli/PclIO.Cli.csproj" })
+        {
+            var references = XDocument.Load(Path.Combine(root, project)).Descendants("PackageReference");
+            Assert.Empty(references);
+        }
+
+        var shared = XDocument.Load(Path.Combine(root, "Directory.Build.props")).Descendants("PackageReference");
+        Assert.All(shared, r => Assert.Equal("all", (string?)r.Attribute("PrivateAssets")));
     }
 }

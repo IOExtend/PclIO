@@ -514,13 +514,13 @@ public sealed class FormatTests
     }
 
     [Fact]
-    public void A_PinPoint_Data_File_Without_A_Channel_Table_Is_Listed_With_A_Warning_And_Not_Read()
+    public void A_PinPoint_Data_File_Without_A_Recognised_Channel_Layout_Is_Listed_With_A_Warning_And_Not_Read()
     {
         using var dir = new TempDirectory();
         using var doc = PinPointDocument.Open(SyntheticFixtures.WritePinPointProject(dir, new byte[240]));
 
         var scan = Assert.Single(doc.Scans);
-        Assert.Contains(doc.Warnings, w => w.Contains("no channel table", StringComparison.Ordinal));
+        Assert.Contains(doc.Warnings, w => w.Contains("no recognised channel layout", StringComparison.Ordinal));
         Assert.Throws<NotSupportedException>(() => scan.ReadPoints().ToList());
     }
 

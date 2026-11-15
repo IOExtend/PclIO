@@ -1,7 +1,6 @@
 using System.Text;
 using System.Text.RegularExpressions;
 using PclIO.Internal;
-using ZstdSharp;
 
 namespace PclIO.Formats.Leica;
 
@@ -417,7 +416,6 @@ public sealed class LgsxScan : PclScan
         if (curBlockOffset <= payloadOffset || curBlockOffset >= fileLength)
             throw FormatError.Corrupted("first point block offset is outside the file.");
 
-        using var decompressor = new Decompressor();
         long decodedLimit = DecodedAllowanceBytes + (fileLength * DecodedBytesPerFileByte);
         long decodedBytes = 0;
         byte[] magicBuf = new byte[8];
@@ -464,7 +462,7 @@ public sealed class LgsxScan : PclScan
             if (firstFrame >= 8)
             {
                 long firstFrameOffset = curBlockOffset + firstFrame;
-                var frames = ReadAllFrames(fs, decompressor, firstFrameOffset, blockEnd);
+                var frames = ReadAllFrames(fs, firstFrameOffset, blockEnd);
 
                 // Many small blocks that each expand a lot would otherwise make the file cost unbounded time.
                 foreach (byte[] plane in frames) decodedBytes += plane.Length;
@@ -487,7 +485,7 @@ public sealed class LgsxScan : PclScan
         }
     }
 
-    private static List<byte[]> ReadAllFrames(FileStream fs, Decompressor decompressor, long offset, long maxOffset)
+    private static List<byte[]> ReadAllFrames(FileStream fs, long offset, long maxOffset)
     {
         var list = new List<byte[]>();
         long limit = Math.Min(maxOffset, fs.Length);
@@ -513,16 +511,8 @@ public sealed class LgsxScan : PclScan
             if (list.Count >= MaxFramesPerBlock)
                 throw FormatError.Corrupted($"point block has more than {MaxFramesPerBlock} planes.");
 
-            byte[] plane;
-            try
-            {
-                // The size cap is checked against the frame's declared size before any allocation.
-                plane = decompressor.Unwrap(fData, MaxFrameBytes).ToArray();
-            }
-            catch (Exception ex) when (ex is ZstdException or ArgumentException)
-            {
-                throw FormatError.Corrupted($"a compressed plane is invalid or declares more than {MaxFrameBytes} bytes ({ex.Message}).");
-            }
+            // The size cap is checked against the frame's declared size before any allocation.
+            byte[] plane = ZstdDecoder.Decompress(fData, MaxFrameBytes);
 
             totalBytes += plane.Length;
             if (totalBytes > MaxBlockBytes)

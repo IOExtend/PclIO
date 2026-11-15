@@ -26,11 +26,11 @@ of its own to skip. The skip message names the missing extension and the environ
 
 ## What runs without the private files
 
-The tests that run without private files use synthetic data built in the tests (`SyntheticFixtures`): small files made by code that
+The tests that run without private files use synthetic data built in the tests (`SyntheticFixtures`, `PinPointPackedFixtures`): small files made by code that
 follow the layout each reader accepts, and crafted inputs that must be rejected (truncated, cyclic, oversized, path traversal).
 These cover format detection, the readers' error handling, the exporters and the command line.
 
-`RepositoryHygieneTests` also scans every committed file and the git history for personal data and forbidden wording, and checks that no scan, model or other binary content is committed. The history check is skipped when git or the history is not available.
+`RepositoryHygieneTests` also scans every committed file and the git history for personal data and forbidden wording, and checks that no scan, model or other binary content is committed and that the shipped projects reference no package. The Zstandard and Snappy decoders are also tested with vectors (`ZstdVectors`, `SnappyVectors`) made by reference compressors from fixed rules; they contain no scan data. The history check is skipped when git or the history is not available.
 
 ## Rules for private fixtures
 

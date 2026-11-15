@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <Description>Reads and converts point cloud files in several scanner and project formats (.e57, .rcs/.rcp, .lgsx/.lgs, .fls, .srf/.smf, .c3db/.c3ptx) and exports LAS, XYZ, PTS and JSON. Managed code; the only runtime dependency is ZstdSharp.Port.</Description>
+    <Description>Reads and converts point cloud files in several scanner and project formats (.e57, .rcs/.rcp, .lgsx/.lgs, .fls, .srf/.smf, .c3db/.c3ptx) and exports LAS, XYZ, PTS and JSON. Managed code with no dependencies on other packages.</Description>
     <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
     <RootNamespace>PclIO</RootNamespace>
     <AssemblyName>PclIO</AssemblyName>
@@ -11,10 +11,6 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="PclIO.Tests" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <PackageReference Include="ZstdSharp.Port" />
   </ItemGroup>
 
 </Project>

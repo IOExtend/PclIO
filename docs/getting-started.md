@@ -85,7 +85,7 @@ reading), `NotSupportedException` (unrecognised format or unsupported feature) o
 | ReCap project | `.rcp` | Lists scans; opens the `.rcs` files it finds next to the project. Node transforms are not applied. |
 | Leica scan container | `.lgsx`, `.lgs` | Experimental; poses and bounds are not read, and all points of a container form one scan. |
 | FARO scan | `.fls`, or a FARO scan folder | Experimental; the scan grid comes from the stored parameters. A folder scan is read with an assumed layout, and a warning says so. |
-| PinPoint project | `.srf`, `.smf`, or a folder with `ScanProject.json` or `.smf`/`.srf` files | Experimental; manifest plus point data files; a data file without a channel table is not read. |
+| PinPoint project | `.srf`, `.smf`, or a folder with `ScanProject.json` or `.smf`/`.srf` files | Experimental; manifest plus point data files in one of two layouts (named channels, or sections with Snappy-compressed channels); a data file in neither layout is not read. |
 | EdgeWise | `.c3db`, `.c3ptx` | Experimental; positions only, with a coordinate scale that is an assumption of the reader. |
 
 A file is detected from its content, its extension or, for a folder, its layout. E57, ReCap scan and Leica files are recognised

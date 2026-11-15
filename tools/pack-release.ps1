@@ -34,7 +34,7 @@ function New-Zip([string]$SourceDir, [string]$ZipPath) {
     Compress-Archive -Path (Join-Path $SourceDir '*') -DestinationPath $ZipPath
 }
 
-# 1. PclIO library assemblies (net8.0 and net10.0 with all dependencies)
+# 1. PclIO library assemblies (net8.0 and net10.0)
 Write-Host "Publishing PclIO library..."
 $libStage = Join-Path $stage 'lib'
 $libNet8 = Join-Path $libStage 'net8.0'

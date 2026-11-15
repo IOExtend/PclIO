@@ -983,7 +983,7 @@ public sealed class InputHardeningTests
 
         var exception = AssertRejectedCheaply(() => ReadEverything(p => LgsxDocument.Open(p), path));
 
-        Assert.Contains("declares more than", exception.Message);
+        Assert.Contains("exceeds the allowed", exception.Message);
     }
 
     [Fact]

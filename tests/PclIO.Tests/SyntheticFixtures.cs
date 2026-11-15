@@ -2,7 +2,6 @@ using System.Buffers.Binary;
 using System.IO.Compression;
 using System.Security;
 using System.Text;
-using ZstdSharp;
 
 namespace PclIO.Tests;
 
@@ -231,9 +230,8 @@ internal static class SyntheticFixtures
             }
         }
 
-        using var compressor = new Compressor();
         var frames = new List<byte[]>();
-        foreach (byte[] plane in planes.Concat(extraPlanes)) frames.Add(compressor.Wrap(plane).ToArray());
+        foreach (byte[] plane in planes.Concat(extraPlanes)) frames.Add(RawZstdFrame.Wrap(plane));
 
         int blockLength = 8 + 128 + frames.Sum(f => 8 + f.Length);
         using var ms = new MemoryStream();

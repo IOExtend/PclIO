@@ -10,7 +10,7 @@ public sealed class RealFileTests
 {
     private const int SampleSize = 100;
 
-    private static void AssertReadsPoints(string extension, PclFileKind kind, bool dataMayLackChannelTable = false)
+    private static void AssertReadsPoints(string extension, PclFileKind kind)
     {
         string path = TestFiles.FindByExtension(extension);
 
@@ -22,16 +22,7 @@ public sealed class RealFileTests
         Assert.True(doc.FileSize > 0);
 
         var options = new PclReadOptions { MaxPoints = SampleSize };
-        List<PclPoint> points;
-        try
-        {
-            points = doc.ReadAllPoints(options).ToList();
-        }
-        catch (NotSupportedException) when (dataMayLackChannelTable && doc.Warnings.Any(w => w.Contains("no channel table", StringComparison.Ordinal)))
-        {
-            // Documented limit: the reader does not decode point data files that carry no channel table.
-            throw new SkipException("The available project's point data files have no channel table, which the reader does not decode.");
-        }
+        var points = doc.ReadAllPoints(options).ToList();
 
         // The requested number of points comes back, and every coordinate is a real number.
         Assert.Equal(SampleSize, points.Count);
@@ -73,10 +64,10 @@ public sealed class RealFileTests
     public void Read_Real_Faro_Scan_Points() => AssertReadsPoints(".fls", PclFileKind.FaroFls);
 
     [SkippableFact]
-    public void Read_Real_PinPoint_Project_Points() => AssertReadsPoints(".srf", PclFileKind.PinPoint, dataMayLackChannelTable: true);
+    public void Read_Real_PinPoint_Project_Points() => AssertReadsPoints(".srf", PclFileKind.PinPoint);
 
     [SkippableFact]
-    public void Read_Real_PinPoint_Manifest_Points() => AssertReadsPoints(".smf", PclFileKind.PinPoint, dataMayLackChannelTable: true);
+    public void Read_Real_PinPoint_Manifest_Points() => AssertReadsPoints(".smf", PclFileKind.PinPoint);
 
     [SkippableFact]
     public void Read_Real_EdgeWise_Database_Points() => AssertReadsPoints(".c3db", PclFileKind.EdgeWise);
