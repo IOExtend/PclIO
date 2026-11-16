@@ -34,6 +34,15 @@ public sealed class PinPointDocument : PclDocument
         _metadata["ProjectName"] = projectName;
     }
 
+    /// <summary>
+    /// Adds a warning to the document. The same message is added only once, so that reading the same scan twice
+    /// does not repeat it.
+    /// </summary>
+    internal void AddWarning(string message)
+    {
+        if (!_warnings.Contains(message, StringComparer.Ordinal)) _warnings.Add(message);
+    }
+
     /// <summary>Opens a PinPoint project from a manifest file, a .srf file with its data folder, or a project folder.</summary>
     /// <param name="path">
     /// Manifest (.smf, ScanProject.json), .srf file or project directory. When a directory holds several candidates and no
@@ -134,7 +143,7 @@ public sealed class PinPointDocument : PclDocument
                     if (binPath == null)
                         document._warnings.Add($"Scan '{name}': point data file not found.");
 
-                    document.AddScan(new PinPointScan(hash, name, pointCount, transform, binPath, table));
+                    document.AddScan(new PinPointScan(hash, name, pointCount, transform, binPath, table, document));
                 }
             }
             else if (TryProp(root, "DataObjects", out var dataObjs) && dataObjs.ValueKind == JsonValueKind.Array)
@@ -164,7 +173,7 @@ public sealed class PinPointDocument : PclDocument
                             document._warnings.Add($"Location '{locHash}': point data file not found.");
                         var table = ReadTableOrWarn(document, locHash, binPath);
 
-                        document.AddScan(new PinPointScan(locHash, locHash, 0, transform, binPath, table));
+                        document.AddScan(new PinPointScan(locHash, locHash, 0, transform, binPath, table, document));
                     }
                 }
             }
@@ -409,10 +418,8 @@ public sealed class PinPointDocument : PclDocument
 /// <summary>Scan representation in a PinPoint project.</summary>
 public sealed class PinPointScan : PclScan
 {
-    // Coordinates with a larger magnitude (metres) are dropped; see ReadPoints for what this means.
-    private const float MaxCoordinate = 5000.0f;
-
     private readonly PinPointDocument.ChannelTable? _table;
+    private readonly PinPointDocument? _document;
 
     /// <inheritdoc/>
     public override string Id { get; }
@@ -439,7 +446,7 @@ public sealed class PinPointScan : PclScan
     public bool HasFilterBits => _table is { HasFilterBits: true };
 
     internal PinPointScan(string id, string name, long pointCount, PclTransform transform, string? binFilePath,
-        PinPointDocument.ChannelTable? table)
+        PinPointDocument.ChannelTable? table, PinPointDocument? document)
     {
         Id = id;
         Name = name;
@@ -447,17 +454,20 @@ public sealed class PinPointScan : PclScan
         Transform = transform;
         BinFilePath = binFilePath;
         _table = table;
+        _document = document;
     }
 
     /// <summary>Streams points from the point data file; yields nothing when the file was not found.</summary>
     /// <remarks>
     /// <para>
-    /// Points are positions as float32 triples. Points with a NaN or infinite coordinate, or with any coordinate whose
-    /// magnitude exceeds 5000 in the file's own unit, are not returned and
-    /// are not counted; the remaining points keep consecutive <see cref="PclPoint.Index"/> values. The magnitude limit
-    /// is a plausibility rule of this reader, not a property of the file format, so positions in a projected coordinate
-    /// system with large offsets are dropped. <see cref="PointCount"/> reports the manifest or channel-table count, so
-    /// it can be larger than the number of returned points.
+    /// Points are positions as float32 triples. Points with a NaN or infinite coordinate are never returned. A point
+    /// with a coordinate whose magnitude exceeds <see cref="PclReadOptions.MaxCoordinateMagnitude"/> in the file's own
+    /// unit is not returned either, unless the limit is switched off; the default of 5000 is a plausibility rule of
+    /// this reader, not a property of the file format, so positions in a projected coordinate system with large offsets
+    /// are dropped by default. Dropped points are not counted; the remaining points keep consecutive
+    /// <see cref="PclPoint.Index"/> values, and the document gains a warning that tells how many were dropped.
+    /// <see cref="PointCount"/> reports the manifest or channel-table count, so it can be larger than the number of
+    /// returned points.
     /// </para>
     /// <para>
     /// A point data file whose layout is neither a table of named channels nor a list of sections with a property table is
@@ -503,6 +513,13 @@ public sealed class PinPointScan : PclScan
         // A point whose flag byte is not zero is marked as filtered; it is only skipped when the caller asks for it.
         bool skipFiltered = options.ExcludeFilteredPoints && table.HasFilterBits;
 
+        // Coordinates that are NaN or infinite are never returned; coordinates beyond the magnitude limit are not
+        // returned either, unless the caller switched the limit off.
+        double? magnitudeLimit = options.MaxCoordinateMagnitude;
+
+        long droppedNonFinite = 0;
+        long droppedOutOfRange = 0;
+
         int colorSize = table.ColorSize;
         long pointTotal = table.PointCount;
         long colorTotal = !table.HasColors ? 0 : table.Packed ? pointTotal : table.ColorsLength / colorSize;
@@ -546,7 +563,18 @@ public sealed class PinPointScan : PclScan
                 float x = Bytes.ReadSingleLE(record[..4]);
                 float y = Bytes.ReadSingleLE(record.Slice(4, 4));
                 float z = Bytes.ReadSingleLE(record.Slice(8, 4));
-                if (!IsPlausible(x, y, z)) continue;
+                if (!float.IsFinite(x) || !float.IsFinite(y) || !float.IsFinite(z))
+                {
+                    droppedNonFinite++;
+                    continue;
+                }
+
+                if (magnitudeLimit != null &&
+                    (Math.Abs(x) > magnitudeLimit || Math.Abs(y) > magnitudeLimit || Math.Abs(z) > magnitudeLimit))
+                {
+                    droppedOutOfRange++;
+                    continue;
+                }
 
                 PclColor? color = null;
                 if (j < colorCount)
@@ -593,6 +621,25 @@ public sealed class PinPointScan : PclScan
             foreach (var stream in new[] { points, colors, normals, intensities, filters })
                 if (stream != null && stream.ReadByte() >= 0) throw FormatError.Corrupted("a compressed channel holds more data than it declares");
         }
+
+        ReportDroppedPoints(options, magnitudeLimit, droppedNonFinite, droppedOutOfRange);
+    }
+
+    /// <summary>
+    /// Reports the points that the plausibility rule dropped: a warning tells how many had non-finite coordinates and
+    /// how many were beyond the magnitude limit. In strict mode the read fails instead.
+    /// </summary>
+    private void ReportDroppedPoints(PclReadOptions options, double? magnitudeLimit, long nonFinite, long outOfRange)
+    {
+        if (nonFinite == 0 && outOfRange == 0) return;
+
+        string message = magnitudeLimit == null
+            ? $"The coordinate plausibility rule dropped {nonFinite} points with non-finite coordinates."
+            : $"The coordinate plausibility rule dropped {nonFinite + outOfRange} points " +
+              $"({nonFinite} with non-finite coordinates, {outOfRange} beyond the magnitude limit of {magnitudeLimit}).";
+
+        if (options.Strict) throw FormatError.Corrupted(message);
+        _document?.AddWarning(message);
     }
 
     // A stream over one channel: the bytes of the file at the offset, or their Snappy decoding for the packed form.
@@ -612,9 +659,4 @@ public sealed class PinPointScan : PclScan
             throw;
         }
     }
-
-    // Finite coordinates of at most MaxCoordinate in magnitude; everything else is dropped by the callers.
-    private static bool IsPlausible(float x, float y, float z) =>
-        float.IsFinite(x) && float.IsFinite(y) && float.IsFinite(z) &&
-        Math.Abs(x) <= MaxCoordinate && Math.Abs(y) <= MaxCoordinate && Math.Abs(z) <= MaxCoordinate;
 }

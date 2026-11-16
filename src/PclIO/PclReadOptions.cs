@@ -24,6 +24,24 @@ public sealed record PclReadOptions
         }
     }
 
+    private readonly double? _maxCoordinateMagnitude = 5000.0;
+
+    /// <summary>
+    /// Maximum allowed magnitude of a point coordinate in the file's own unit; a point with a larger coordinate is not
+    /// returned. Null means no magnitude limit. Coordinates that are NaN or infinite are never returned. Currently only
+    /// the PinPoint reader applies this rule; other readers ignore this option. The default is 5000.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">The value is negative.</exception>
+    public double? MaxCoordinateMagnitude
+    {
+        get => _maxCoordinateMagnitude;
+        init
+        {
+            ArgumentOutOfRangeException.ThrowIfNegative(value ?? 0, nameof(value));
+            _maxCoordinateMagnitude = value;
+        }
+    }
+
     /// <summary>
     /// Subsampling step: 1 keeps every point, N keeps one point in N. Readers apply the step inside their own
     /// internal blocks (packets, chunks, clusters), so the spacing is approximate and depends on the format's block layout.

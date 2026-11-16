@@ -33,6 +33,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `PclReadOptions.ExcludeFilteredPoints` excludes the points with a non-zero flag; by default every stored point is returned.
 - The normals (`Normals`) of the PinPoint sectioned layout are read when the file holds them, and `HasNormals` reports
   what the file contains.
+- The PinPoint coordinate plausibility rule is now `PclReadOptions.MaxCoordinateMagnitude` (default 5000, null for no
+  limit); non-finite coordinates are still never returned. A full read reports how many points it dropped in the warnings
+  of the document, and fails instead with `PclReadOptions.Strict`.
 
 ## [0.1.0] - 2026-11-15
 

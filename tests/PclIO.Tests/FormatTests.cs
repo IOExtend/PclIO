@@ -1028,6 +1028,43 @@ public sealed class FormatTests
         Assert.Equal(new PclVector3(1, 2, 3), point.Position);
     }
 
+    [Fact]
+    public void PinPoint_Magnitude_Limit_Can_Be_Raised_Or_Switched_Off()
+    {
+        using var dir = new TempDirectory();
+        byte[] bin = SyntheticFixtures.CreateSyntheticPinPointBin([(1, 2, 3), (1e9f, 0, 0), (float.NaN, 0, 0)]);
+        using var doc = PinPointDocument.Open(SyntheticFixtures.WritePinPointProject(dir, bin));
+
+        // A raised limit keeps the large coordinate; a missing limit keeps it too, but never the NaN.
+        var raised = doc.Scans[0].ReadPoints(new PclReadOptions { ApplyTransform = false, MaxCoordinateMagnitude = 2e9 }).ToList();
+        Assert.Equal(2, raised.Count);
+        Assert.Equal(new PclVector3(1e9f, 0, 0), raised[1].Position);
+
+        var unlimited = doc.Scans[0].ReadPoints(new PclReadOptions { ApplyTransform = false, MaxCoordinateMagnitude = null }).ToList();
+        Assert.Equal(2, unlimited.Count);
+    }
+
+    [Fact]
+    public void PinPoint_Dropped_Points_Are_Reported_With_A_Count()
+    {
+        using var dir = new TempDirectory();
+        byte[] bin = SyntheticFixtures.CreateSyntheticPinPointBin([(1, 2, 3), (1e9f, 0, 0), (float.NaN, 0, 0)]);
+        using var doc = PinPointDocument.Open(SyntheticFixtures.WritePinPointProject(dir, bin));
+
+        Assert.Single(doc.Scans[0].ReadPoints(NoTransform));
+        Assert.Contains(doc.Warnings, w => w.Contains("dropped 2 points", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void PinPoint_Dropped_Points_Fail_In_Strict_Mode()
+    {
+        using var dir = new TempDirectory();
+        byte[] bin = SyntheticFixtures.CreateSyntheticPinPointBin([(1, 2, 3), (1e9f, 0, 0)]);
+        using var doc = PinPointDocument.Open(SyntheticFixtures.WritePinPointProject(dir, bin));
+
+        Assert.Throws<InvalidDataException>(() => doc.Scans[0].ReadPoints(new PclReadOptions { Strict = true }).ToList());
+    }
+
     // ---- EdgeWise --------------------------------------------------------------------------------------------
 
     private static readonly C3Cluster[] Clusters =
