@@ -504,6 +504,71 @@ public sealed class FormatTests
     }
 
     [Fact]
+    public void A_Lgsx_Container_Reports_The_Points_That_Were_Dropped()
+    {
+        // The second point has the code of the origin of the block, so it is dropped as padding.
+        var points = new List<LeicaSamplePoint>
+        {
+            new(1, 2, 3),
+            new(0, 0, 0),
+            new(4, 5, 6),
+            new(0, 0, 0),
+        };
+
+        using var dir = new TempDirectory();
+        using var doc = LgsxDocument.Open(dir.Write("site.lgsx", SyntheticFixtures.CreateSyntheticLgsx(points)));
+
+        var scan = Assert.Single(doc.Scans);
+        Assert.Equal(2, scan.ReadPoints().Count());
+        Assert.Contains(doc.Warnings, w => w.Contains("2 points were dropped", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void A_Lgsx_Container_Reports_The_Compressed_Streams_That_Were_Skipped()
+    {
+        using var dir = new TempDirectory();
+        using var doc = LgsxDocument.Open(dir.Write("site.lgsx", SyntheticFixtures.CreateSyntheticLgsx(oversizedFrame: true)));
+
+        var scan = Assert.Single(doc.Scans);
+
+        // The frames before the oversized one are read, the rest of the block is lost with it.
+        Assert.Equal(5, scan.ReadPoints().Count());
+        Assert.Contains(doc.Warnings, w => w.Contains("1 compressed streams were skipped", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void A_Lgsx_Container_Reports_Point_Data_That_Ends_At_A_Block_It_Does_Not_Know()
+    {
+        using var dir = new TempDirectory();
+        using var doc = LgsxDocument.Open(dir.Write("site.lgsx", SyntheticFixtures.CreateSyntheticLgsx(unknownBlock: true)));
+
+        var scan = Assert.Single(doc.Scans);
+        Assert.Equal(5, scan.ReadPoints().Count());
+        Assert.Contains(doc.Warnings, w => w.Contains("ends after 1 blocks", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void A_Lgsx_Container_Fails_In_Strict_Mode_When_Its_Point_Data_Is_Incomplete()
+    {
+        using var dir = new TempDirectory();
+        using var doc = LgsxDocument.Open(dir.Write("site.lgsx", SyntheticFixtures.CreateSyntheticLgsx(unknownBlock: true)));
+
+        var scan = Assert.Single(doc.Scans);
+        Assert.Throws<InvalidDataException>(() => scan.ReadPoints(new PclReadOptions { Strict = true }).ToList());
+    }
+
+    [Fact]
+    public void A_Lgsx_Container_With_Complete_Point_Data_Reports_Nothing()
+    {
+        using var dir = new TempDirectory();
+        using var doc = LgsxDocument.Open(dir.Write("site.lgsx", SyntheticFixtures.CreateSyntheticLgsx()));
+
+        var scan = Assert.Single(doc.Scans);
+        Assert.Equal(5, scan.ReadPoints().Count());
+        Assert.DoesNotContain(doc.Warnings, w => w.Contains("incomplete", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void A_Lgsx_Block_Is_Not_Cut_At_65536_Points()
     {
         // Codes are never zero, because a point at the block origin is dropped as padding.

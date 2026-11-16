@@ -45,4 +45,11 @@ public sealed record PclReadOptions
     /// or the 4x4 matrix when the format supplies one. Rotation values are not applied.
     /// </summary>
     public bool ApplyTransform { get; init; } = true;
+
+    /// <summary>
+    /// Whether a reader that finds incomplete data fails instead of reporting it: a reader that would add a warning
+    /// about dropped or skipped data throws <see cref="InvalidDataException"/> then. Readers that cannot detect
+    /// incomplete data ignore this option. The default is false, so that a read never fails because of it.
+    /// </summary>
+    public bool Strict { get; init; }
 }

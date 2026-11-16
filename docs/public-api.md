@@ -15,7 +15,7 @@ format-specific members can change when the support for that format changes.
 |---|---|
 | `PclFile` | Static entry point. `DetectKind(path)` and `DetectKind(stream, extension)` return a `PclFileKind`; `Open(path, options)` detects the format and returns a `PclDocument`. |
 | `PclFileKind` | `Unknown`, `E57`, `RecapProject`, `RecapScan`, `LeicaLgsx`, `LeicaLgs`, `FaroFls`, `PinPoint` and `EdgeWise`. |
-| `PclReadOptions` | `MaxPoints` (limit of one read call, null for all, 0 for none), `SubsampleStep` (1 keeps every point, N keeps about one in N) and `ApplyTransform` (default true). Negative `MaxPoints` and a step below 1 throw `ArgumentOutOfRangeException`. `PclReadOptions.Default` has no limit. |
+| `PclReadOptions` | `MaxPoints` (limit of one read call, null for all, 0 for none), `SubsampleStep` (1 keeps every point, N keeps about one in N), `ApplyTransform` (default true) and `Strict` (default false: a reader that finds incomplete data fails with `InvalidDataException` instead of adding a warning). Negative `MaxPoints` and a step below 1 throw `ArgumentOutOfRangeException`. `PclReadOptions.Default` has no limit. |
 
 `Open` throws `FileNotFoundException` for a missing path, `DirectoryNotFoundException` when a directory the reader needs is
 missing or disappears while reading, `NotSupportedException` for an unrecognised format or an unsupported feature, and
