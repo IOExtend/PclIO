@@ -45,7 +45,20 @@ public sealed class KindDetectionTests
         Assert.Equal(PclFileKind.FaroFls, Detect(bytes, "scanner.fls"));
     }
 
+    [Theory]
+    [InlineData("sample.las")]
+    [InlineData("SAMPLE.LAS")]
+    [InlineData("sample.bin")]
+    public void Detects_Las_By_Signature(string name) =>
+        Assert.Equal(PclFileKind.Las, Detect(SyntheticFixtures.CreateSyntheticLas(), name));
+
     [Fact]
+    public void Las_Needs_The_Signature_Not_Just_The_Extension() =>
+        Assert.Equal(PclFileKind.Unknown, Detect(new byte[100], "sample.las"));
+
+    [Fact]
+    public void A_Laz_File_Is_Not_Detected_As_Las() =>
+        Assert.Equal(PclFileKind.Unknown, Detect(SyntheticFixtures.CreateSyntheticLas(), "sample.laz"));    [Fact]
     public void Faro_Needs_The_Container_Signature_Not_Just_The_Extension() =>
         Assert.Equal(PclFileKind.Unknown, Detect(new byte[100], "scanner.fls"));
 

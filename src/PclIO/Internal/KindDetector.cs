@@ -14,6 +14,9 @@ internal static class KindDetector
     // Leading bytes of the EdgeWise text database.
     private static readonly byte[] EdgeWiseTextMagic = "2\r\n _Tr"u8.ToArray();
     private static readonly byte[] EdgeWiseTreeMagic = "_Tree"u8.ToArray();
+    // First bytes of an ASPRS LAS file. LAZ files share the signature but need their own reader, so the .laz
+    // extension below stays unknown until that reader exists.
+    private static readonly byte[] LasMagic = "LASF"u8.ToArray();
 
     public static PclFileKind Detect(string path)
     {
@@ -89,6 +92,10 @@ internal static class KindDetector
 
         if (head.StartsWith(EdgeWiseTextMagic) || head.StartsWith(EdgeWiseTreeMagic))
             return PclFileKind.EdgeWise;
+
+        // LAS files are recognised by content; a compressed LAZ file shares the signature and stays unknown.
+        if (head.StartsWith(LasMagic))
+            return extension == ".laz" ? PclFileKind.Unknown : PclFileKind.Las;
 
         return PclFileKind.Unknown;
     }

@@ -1,6 +1,8 @@
+using PclIO.Export;
 using PclIO.Formats.E57;
 using PclIO.Formats.EdgeWise;
 using PclIO.Formats.Faro;
+using PclIO.Formats.Las;
 using PclIO.Formats.Leica;
 using PclIO.Formats.PinPoint;
 using PclIO.Formats.Recap;
@@ -2151,4 +2153,304 @@ public sealed class FormatTests
     }
 
     internal static bool IsFormatError(Exception? exception) => exception is InvalidDataException or NotSupportedException;
+
+    // ---- LAS ----------------------------------------------------------------------------------------------------
+
+    private static readonly IReadOnlyList<LasSamplePoint> LasPoints =
+    [
+        new(1, 2, 3, 0.25f, new PclColor(10, 20, 30), 5),
+        new(-4.5, 5.25, 6.125, 0.5f, null, 2),
+        new(7, 8, 9, 1.0f, new PclColor(255, 255, 255), 0),
+    ];
+
+    [Fact]
+    public void PclFile_Opens_Las_With_Count_Channels_Bounds_And_Metadata()
+    {
+        using var dir = new TempDirectory();
+        using var doc = PclFile.Open(dir.Write("sample.las", SyntheticFixtures.CreateSyntheticLas(LasPoints)));
+
+        Assert.Equal(PclFileKind.Las, doc.Kind);
+        var scan = Assert.Single(doc.Scans);
+        Assert.Equal("0", scan.Id);
+        Assert.Equal("sample", scan.Name);
+        Assert.Equal(3, scan.PointCount);
+        Assert.Equal(3, doc.TotalPointCount);
+        Assert.True(scan.HasColors);
+        Assert.True(scan.HasIntensities);
+        Assert.False(scan.HasNormals);
+        Assert.Equal(new PclBounds(new PclVector3(-4.5, 2, 3), new PclVector3(7, 8, 9)), scan.Bounds);
+        Assert.Equal(new PclBounds(new PclVector3(-4.5, 2, 3), new PclVector3(7, 8, 9)), doc.OverallBounds);
+        Assert.Equal("1.2", ((LasDocument)doc).Version);
+        Assert.Equal(2, ((LasDocument)doc).PointFormat);
+        Assert.Equal("ASPRS LAS", doc.Metadata["Format"]);
+        Assert.Equal("1.2", doc.Metadata["Version"]);
+        Assert.Null(doc.CoordinateSystem);
+        Assert.Empty(doc.Warnings);
+    }
+
+    [Fact]
+    public void Las_Round_Trip_Positions_Intensity_Colour_And_Classification()
+    {
+        using var dir = new TempDirectory();
+        using var doc = LasDocument.Open(dir.Write("sample.las", SyntheticFixtures.CreateSyntheticLas(LasPoints)));
+
+        var points = doc.Scans[0].ReadPoints(NoTransform).ToList();
+
+        Assert.Equal(3, points.Count);
+        Assert.Equal([0UL, 1UL, 2UL], points.Select(p => p.Index));
+        AssertNear(new PclVector3(1, 2, 3), points[0].Position);
+        AssertNear(new PclVector3(-4.5, 5.25, 6.125), points[1].Position);
+        AssertNear(new PclVector3(7, 8, 9), points[2].Position);
+        Assert.Equal(0.25, (double)points[0].Intensity!.Value, 4);
+        Assert.Equal(0.5, (double)points[1].Intensity!.Value, 4);
+        Assert.Equal(1.0, (double)points[2].Intensity!.Value, 4);
+        Assert.Equal(new PclColor(10, 20, 30), points[0].Color);
+        Assert.Equal(new PclColor(255, 255, 255), points[1].Color);
+        Assert.Equal(new PclColor(255, 255, 255), points[2].Color);
+        Assert.Equal((byte)5, points[0].Classification);
+        Assert.Equal((byte)2, points[1].Classification);
+        Assert.All(points, p => Assert.Null(p.Normal));
+    }
+
+    [Fact]
+    public void Las14_Reads_Extended_Counts_Scale_Offset_And_Epsg()
+    {
+        var points = new[]
+        {
+            new LasSamplePoint(1, 2, 3, 0.25f, new PclColor(10, 20, 30), 5),
+            new LasSamplePoint(-4.5, 5.25, 6.12, 0.5f, null, 2),
+        };
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticLas(points, versionMinor: 4, pointFormat: 7,
+            scale: 0.01, offset: (10, 20, 30),
+            vlrs: [SyntheticFixtures.LasEpsgVlr(3857)],
+            legacyCountOverride: 0, extendedCountOverride: (ulong)points.Length);
+        using var doc = LasDocument.Open(dir.Write("sample.las", bytes));
+
+        // The legacy count is zero, so the extended count decides.
+        var scan = Assert.Single(doc.Scans);
+        Assert.Equal(2, scan.PointCount);
+        Assert.Equal("EPSG:3857", doc.CoordinateSystem);
+
+        var read = scan.ReadPoints(NoTransform).ToList();
+        Assert.Equal(2, read.Count);
+        AssertNear(new PclVector3(1, 2, 3), read[0].Position);
+        AssertNear(new PclVector3(-4.5, 5.25, 6.12), read[1].Position);
+        Assert.Equal(new PclColor(10, 20, 30), read[0].Color);
+    }
+
+    [Theory]
+    [InlineData(0, 2, false)]
+    [InlineData(1, 2, false)]
+    [InlineData(2, 2, true)]
+    [InlineData(3, 2, true)]
+    [InlineData(4, 2, false)]
+    [InlineData(5, 2, true)]
+    [InlineData(6, 4, false)]
+    [InlineData(7, 4, true)]
+    [InlineData(8, 4, true)]
+    [InlineData(9, 4, false)]
+    [InlineData(10, 4, true)]
+    public void Las_Point_Formats_Zero_To_Ten_Decode_Positions(int pointFormat, int versionMinor, bool colored)
+    {
+        var points = new[] { new LasSamplePoint(1, 2, 3, 0.5f, new PclColor(10, 20, 30), 7) };
+        using var dir = new TempDirectory();
+        using var doc = LasDocument.Open(dir.Write("sample.las",
+            SyntheticFixtures.CreateSyntheticLas(points, versionMinor: versionMinor, pointFormat: pointFormat)));
+
+        var scan = Assert.Single(doc.Scans);
+        Assert.Equal(colored, scan.HasColors);
+        Assert.True(scan.HasIntensities);
+        Assert.False(scan.HasNormals);
+
+        var point = Assert.Single(scan.ReadPoints(NoTransform));
+        AssertNear(new PclVector3(1, 2, 3), point.Position);
+        Assert.Equal(0.5, (double)point.Intensity!.Value, 4);
+        Assert.Equal((byte)7, point.Classification);
+        Assert.Equal(colored ? new PclColor(10, 20, 30) : null, point.Color);
+    }
+
+    [Fact]
+    public void Las_Honours_Limit_And_Step_And_Ignores_Blocks_And_Parallelism()
+    {
+        var points = Enumerable.Range(0, 8).Select(i => new LasSamplePoint(i, 0, 0)).ToList();
+        using var dir = new TempDirectory();
+        using var doc = LasDocument.Open(dir.Write("sample.las", SyntheticFixtures.CreateSyntheticLas(points)));
+        var scan = doc.Scans[0];
+
+        Assert.Equal(3, scan.ReadPoints(new PclReadOptions { MaxPoints = 3 }).Count());
+        Assert.Equal(4, scan.ReadPoints(new PclReadOptions { SubsampleStep = 2 }).Count());
+        Assert.Empty(scan.ReadPoints(new PclReadOptions { MaxPoints = 0 }));
+
+        // The point stream has no independent blocks: the range and the parallelism are ignored.
+        var ranged = scan.ReadPoints(new PclReadOptions
+        {
+            Blocks = new BlockRange { StartBlock = 1, BlockCount = 1 },
+            MaxDegreeOfParallelism = 4,
+        }).ToList();
+        Assert.Equal(8, ranged.Count);
+        Assert.Equal([0UL, 1UL, 2UL, 3UL, 4UL, 5UL, 6UL, 7UL], ranged.Select(p => p.Index));
+    }
+
+    [Fact]
+    public void Las_Of_Exporter_Output_Reads_Back()
+    {
+        var source = new[]
+        {
+            new PclPoint(new PclVector3(1, 2, 3), new PclColor(10, 20, 30), 0.25f, null, 5),
+            new PclPoint(new PclVector3(-4.5, 5.25, 6.125), null, 0.5f),
+        };
+        using var exported = FakeDocument.Of(source);
+        byte[] bytes;
+        using (var ms = new MemoryStream())
+        {
+            PclLasExporter.Export(exported, ms);
+            bytes = ms.ToArray();
+        }
+
+        using var dir = new TempDirectory();
+        using var doc = PclFile.Open(dir.Write("exported.las", bytes));
+
+        Assert.Equal(PclFileKind.Las, doc.Kind);
+        var points = doc.Scans[0].ReadPoints(NoTransform).ToList();
+        Assert.Equal(2, points.Count);
+        AssertNear(new PclVector3(1, 2, 3), points[0].Position);
+        AssertNear(new PclVector3(-4.5, 5.25, 6.125), points[1].Position);
+        Assert.Equal(new PclColor(10, 20, 30), points[0].Color);
+        Assert.Equal(new PclColor(255, 255, 255), points[1].Color);
+        Assert.Equal(0.25, (double)points[0].Intensity!.Value, 4);
+        Assert.Equal((byte)5, points[0].Classification);
+    }
+
+    [Fact]
+    public void Las_Coordinate_System_Comes_From_Wkt_When_No_Geotiff_Names_One()
+    {
+        const string wkt = "PROJCS[\"WGS 84 / Test\",GEOGCS[\"WGS 84\"]]";
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticLas(LasPoints,
+            vlrs: [SyntheticFixtures.LasWktVlr(wkt), ("LASF_Something", 42, new byte[] { 1, 2, 3 })]);
+        using var doc = LasDocument.Open(dir.Write("sample.las", bytes));
+
+        Assert.Equal(wkt, doc.CoordinateSystem);
+    }
+
+    [Fact]
+    public void Las_Without_A_Recognised_Crs_Leaves_It_Unknown()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticLas(LasPoints,
+            vlrs: [("LASF_Something", 42, new byte[] { 1, 2, 3 })]);
+        using var doc = LasDocument.Open(dir.Write("sample.las", bytes));
+
+        Assert.Null(doc.CoordinateSystem);
+        Assert.Equal(LasPoints.Count, doc.Scans[0].ReadPoints().Count());
+    }
+
+    [Fact]
+    public void Las_Wrong_Signature_Is_Rejected()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticLas(LasPoints);
+        bytes[0] = (byte)'X';
+
+        Assert.Throws<InvalidDataException>(() => LasDocument.Open(dir.Write("sample.las", bytes)));
+        Assert.Equal(PclFileKind.Unknown, PclFile.DetectKind(dir.Write("other.las", bytes)));
+        Assert.Throws<NotSupportedException>(() => PclFile.Open(dir.PathOf("other.las")));
+    }
+
+    [Fact]
+    public void Las_Unsupported_Version_Is_Rejected()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticLas(LasPoints, versionMinor: 2);
+        bytes[25] = 5;
+
+        Assert.Throws<NotSupportedException>(() => LasDocument.Open(dir.Write("future.las", bytes)));
+
+        byte[] major = SyntheticFixtures.CreateSyntheticLas(LasPoints);
+        major[24] = 2;
+        Assert.Throws<NotSupportedException>(() => LasDocument.Open(dir.Write("major.las", major)));
+    }
+
+    [Theory]
+    [InlineData(11, 2)]
+    [InlineData(6, 2)]
+    public void Las_Unsupported_Point_Format_Is_Rejected(int pointFormat, int versionMinor)
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = pointFormat > 10
+            ? SyntheticFixtures.CreateSyntheticLas([], versionMinor: versionMinor, pointFormat: pointFormat)
+            : SyntheticFixtures.CreateSyntheticLas(LasPoints, versionMinor: versionMinor, pointFormat: pointFormat);
+
+        Assert.Throws<NotSupportedException>(() => LasDocument.Open(dir.Write("sample.las", bytes)));
+    }
+
+    [Fact]
+    public void Las_Truncated_Points_Are_Rejected_When_Read()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticLas(LasPoints);
+        byte[] cut = bytes[..(bytes.Length - 10)];
+        using var doc = LasDocument.Open(dir.Write("cut.las", cut));
+
+        Assert.Equal(3, doc.Scans[0].PointCount);
+        Assert.Throws<InvalidDataException>(() => doc.Scans[0].ReadPoints().ToList());
+    }
+
+    [Fact]
+    public void Las_Record_Length_Smaller_Than_The_Format_Needs_Is_Rejected()
+    {
+        using var dir = new TempDirectory();
+        int @base = SyntheticFixtures.LasBaseRecordSize(2);
+        byte[] bytes = SyntheticFixtures.CreateSyntheticLas(LasPoints, pointFormat: 2, recordLengthOverride: @base - 1);
+
+        Assert.Throws<InvalidDataException>(() => LasDocument.Open(dir.Write("sample.las", bytes)));
+    }
+
+    [Fact]
+    public void Las_Oversized_Vlr_Is_Rejected()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticLas(LasPoints,
+            vlrs: [("LASF_Projection", 34735, new byte[8])]);
+        // The data length of the first VLR lives at header size + 20.
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(227 + 20, 4), uint.MaxValue);
+
+        Assert.Throws<InvalidDataException>(() => LasDocument.Open(dir.Write("sample.las", bytes)));
+    }
+
+    [Fact]
+    public void Las_Vlr_Overrunning_Point_Data_Is_Rejected()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticLas(LasPoints,
+            vlrs: [("LASF_Projection", 34735, new byte[8])]);
+        // The point data is declared to start right after the header, inside the VLR.
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(96, 4), 227);
+
+        Assert.Throws<InvalidDataException>(() => LasDocument.Open(dir.Write("sample.las", bytes)));
+    }
+
+    [Fact]
+    public void Las_Too_Many_Vlrs_Are_Rejected()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticLas(LasPoints);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(100, 4), 5000);
+
+        Assert.Throws<InvalidDataException>(() => LasDocument.Open(dir.Write("sample.las", bytes)));
+    }
+
+    [Fact]
+    public void Las_Extra_Bytes_Per_Record_Are_Skipped()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticLas(LasPoints, pointFormat: 2, extraBytesPerRecord: 4);
+        using var doc = LasDocument.Open(dir.Write("sample.las", bytes));
+
+        var points = doc.Scans[0].ReadPoints(NoTransform).ToList();
+        Assert.Equal(3, points.Count);
+        AssertNear(new PclVector3(1, 2, 3), points[0].Position);
+        Assert.Equal(new PclColor(10, 20, 30), points[0].Color);
+    }
 }
