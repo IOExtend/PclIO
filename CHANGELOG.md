@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Leica containers that assign their points to their setups now open as one scan per setup, with the id and the name of the
+  setup. A container that does not assign its points to its setups still opens as one scan, with a warning.
+
 ## [0.1.0] - 2026-11-15
 
 First release.

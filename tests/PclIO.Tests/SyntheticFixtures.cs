@@ -146,8 +146,13 @@ internal static class SyntheticFixtures
     /// <param name="withPointData">False leaves the point data entry out.</param>
     /// <param name="extraPlanes">Raw plane contents appended to the block after its position (and colour and intensity) planes.</param>
     /// <param name="setupCount">Number of setup entries written before the point data entry.</param>
+    /// <param name="assignPointsToSetups">
+    /// True gives every setup its own point block and declares the range of that block in the point data, so that
+    /// the container assigns its points to its setups. False leaves the setup entries without a range.
+    /// </param>
+    /// <param name="overlappingSetupRanges">True lets every setup declare the range of the first block.</param>
     public static byte[] CreateSyntheticLgsx(IReadOnlyList<LeicaSamplePoint>? points = null, bool withColorAndIntensity = false, bool withPointData = true,
-        IReadOnlyList<byte[]>? extraPlanes = null, int setupCount = 1)
+        IReadOnlyList<byte[]>? extraPlanes = null, int setupCount = 1, bool assignPointsToSetups = false, bool overlappingSetupRanges = false)
     {
         points ??= DefaultLeicaPoints;
         using var ms = new MemoryStream();
@@ -155,16 +160,33 @@ internal static class SyntheticFixtures
 
         bw.Write("wild::geosystems"u8.ToArray());
 
+        // The groups of points, one per block of the point data.
+        var groups = assignPointsToSetups
+            ? SplitPoints(points, setupCount)
+            : new List<IReadOnlyList<LeicaSamplePoint>> { points };
+
+        (byte[] payload, List<(long Start, long Length)> blocks) =
+            BuildLeicaPayload(groups, withColorAndIntensity, extraPlanes ?? []);
+
+        // The point data follows the container entries, so its start is known before they are written.
+        var setupNames = Enumerable.Range(0, setupCount).Select(i => "SETUP-" + (3 + i)).ToList();
+        long payloadStart = ms.Position + setupNames.Sum(EntrySize) + EntrySize("PointCloud");
+
         // Container entries as the reader expects them.
         var setupEntries = new List<long>();
         for (int i = 0; i < setupCount; i++)
         {
             setupEntries.Add(ms.Position);
-            WriteEntry(bw, "SETUP-" + (3 + i), 0, 0);
+
+            // A setup owns the block it declares; without a range the setup has no points of its own.
+            bool hasBlock = assignPointsToSetups && i < blocks.Count;
+            int blockIndex = overlappingSetupRanges ? 0 : i;
+            WriteEntry(bw, setupNames[i],
+                hasBlock ? (ulong)(payloadStart + blocks[blockIndex].Start) : 0,
+                hasBlock ? (ulong)blocks[blockIndex].Length : 0);
         }
+
         long pointEntry = ms.Position;
-        long payloadStart = pointEntry + (withPointData ? 12 + "PointCloud".Length + 17 : 0);
-        byte[] payload = withPointData ? BuildLeicaPayload(points, withColorAndIntensity, extraPlanes ?? []) : [];
         if (withPointData) WriteEntry(bw, "PointCloud", (ulong)payloadStart, (ulong)payload.Length);
         bw.Write(payload);
 
@@ -176,6 +198,25 @@ internal static class SyntheticFixtures
         bw.Write(Encoding.ASCII.GetBytes("build 2024.1.0 {12345678-1234-1234-1234-123456789abc}"));
         bw.Write((ulong)tocOffset);
         return ms.ToArray();
+    }
+
+    // Distributes the points over the setups; a setup without points gets no block.
+    private static List<IReadOnlyList<LeicaSamplePoint>> SplitPoints(IReadOnlyList<LeicaSamplePoint> points, int setupCount)
+    {
+        var groups = new List<IReadOnlyList<LeicaSamplePoint>>();
+        if (setupCount <= 0) return groups;
+
+        int perGroup = points.Count / setupCount;
+        int extra = points.Count % setupCount;
+        int index = 0;
+        for (int g = 0; g < setupCount; g++)
+        {
+            int take = perGroup + (g < extra ? 1 : 0);
+            groups.Add([.. points.Skip(index).Take(take)]);
+            index += take;
+        }
+
+        return groups;
     }
 
     public static readonly IReadOnlyList<LeicaSamplePoint> DefaultLeicaPoints =
@@ -192,6 +233,9 @@ internal static class SyntheticFixtures
     public const double LeicaOriginY = 200.0;
     public const double LeicaOriginZ = 300.0;
 
+    // The bytes a container entry of the given name takes.
+    private static int EntrySize(string name) => 29 + name.Length;
+
     private static void WriteEntry(BinaryWriter bw, string name, ulong payloadOffset, ulong payloadLength)
     {
         bw.Write(new byte[10]);
@@ -202,7 +246,50 @@ internal static class SyntheticFixtures
         bw.Write(payloadLength);
     }
 
-    private static byte[] BuildLeicaPayload(IReadOnlyList<LeicaSamplePoint> points, bool full, IReadOnlyList<byte[]> extraPlanes)
+    // Builds the point data payload: a header, then one block per group of points.
+    private static (byte[] Payload, List<(long Start, long Length)> Blocks) BuildLeicaPayload(
+        IReadOnlyList<IReadOnlyList<LeicaSamplePoint>> groups, bool full, IReadOnlyList<byte[]> extraPlanes)
+    {
+        using var ms = new MemoryStream();
+        using var bw = new BinaryWriter(ms);
+
+        // Payload header: signature and the offset of the first block.
+        byte[] header = new byte[64];
+        "mMPK"u8.CopyTo(header);
+        BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(0x20, 4), 64);
+        bw.Write(header);
+
+        var blocks = new List<(long Start, long Length)>();
+        foreach (var group in groups)
+        {
+            // A setup without points has no block of its own.
+            if (group.Count == 0) continue;
+
+            var frames = BuildFrames(group, full, extraPlanes);
+            int blockLength = 8 + 128 + frames.Sum(f => 8 + f.Length);
+            long start = ms.Position;
+
+            bw.Write("APRN"u8.ToArray());
+            bw.Write((uint)blockLength);
+            byte[] blockHeader = new byte[128];
+            double[] frame = [LeicaScale, LeicaScale, LeicaScale, LeicaOriginX, LeicaOriginY, LeicaOriginZ];
+            for (int i = 0; i < frame.Length; i++)
+                BinaryPrimitives.WriteDoubleLittleEndian(blockHeader.AsSpan(0x34 + (i * 8), 8), frame[i]);
+            bw.Write(blockHeader);
+            foreach (byte[] f in frames)
+            {
+                bw.Write((ulong)f.Length);
+                bw.Write(f);
+            }
+
+            blocks.Add((start, blockLength));
+        }
+
+        return (ms.ToArray(), blocks);
+    }
+
+    // The compressed planes of one point block: the four position planes and the optional ones.
+    private static List<byte[]> BuildFrames(IReadOnlyList<LeicaSamplePoint> points, bool full, IReadOnlyList<byte[]> extraPlanes)
     {
         int planeCount = full ? 16 : 4;
         int n = points.Count;
@@ -232,31 +319,7 @@ internal static class SyntheticFixtures
 
         var frames = new List<byte[]>();
         foreach (byte[] plane in planes.Concat(extraPlanes)) frames.Add(RawZstdFrame.Wrap(plane));
-
-        int blockLength = 8 + 128 + frames.Sum(f => 8 + f.Length);
-        using var ms = new MemoryStream();
-        using var bw = new BinaryWriter(ms);
-
-        // Payload header: signature and the offset of the first block.
-        byte[] header = new byte[64];
-        "mMPK"u8.CopyTo(header);
-        BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(0x20, 4), 64);
-        bw.Write(header);
-
-        bw.Write("APRN"u8.ToArray());
-        bw.Write((uint)blockLength);
-        byte[] blockHeader = new byte[128];
-        double[] frame = [LeicaScale, LeicaScale, LeicaScale, LeicaOriginX, LeicaOriginY, LeicaOriginZ];
-        for (int i = 0; i < frame.Length; i++)
-            BinaryPrimitives.WriteDoubleLittleEndian(blockHeader.AsSpan(0x34 + (i * 8), 8), frame[i]);
-        bw.Write(blockHeader);
-        foreach (byte[] f in frames)
-        {
-            bw.Write((ulong)f.Length);
-            bw.Write(f);
-        }
-
-        return ms.ToArray();
+        return frames;
     }
 
     // ---- PinPoint -------------------------------------------------------------------------------------------------
