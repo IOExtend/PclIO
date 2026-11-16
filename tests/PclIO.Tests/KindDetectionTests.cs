@@ -61,6 +61,17 @@ public sealed class KindDetectionTests
         Assert.Equal(PclFileKind.Unknown, Detect(SyntheticFixtures.CreateSyntheticLas(), "sample.laz"));
 
     [Theory]
+    [InlineData("sample.ply")]
+    [InlineData("SAMPLE.PLY")]
+    [InlineData("sample.dat")]
+    public void Detects_Ply_By_Header_Structure(string name) =>
+        Assert.Equal(PclFileKind.Ply, Detect(SyntheticFixtures.CreateSyntheticPly(), name));
+
+    [Fact]
+    public void Ply_Needs_The_Header_Structure_Not_Just_The_Extension() =>
+        Assert.Equal(PclFileKind.Unknown, Detect("just some text"u8.ToArray(), "sample.ply"));
+
+    [Theory]
     [InlineData("sample.pcd")]
     [InlineData("SAMPLE.PCD")]
     [InlineData("sample.dat")]

@@ -2896,4 +2896,258 @@ public sealed class FormatTests
 
         Assert.Equal(PclFileKind.Pcd, PclFile.DetectKind(dir.Write("sample.pcd", bytes)));
     }
+
+    // ---- PLY ----------------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void PclFile_Opens_Ply_With_Count_Channels_And_Metadata()
+    {
+        using var dir = new TempDirectory();
+        using var doc = PclFile.Open(dir.Write("sample.ply", SyntheticFixtures.CreateSyntheticPly()));
+
+        Assert.Equal(PclFileKind.Ply, doc.Kind);
+        var scan = Assert.Single(doc.Scans);
+        Assert.Equal("0", scan.Id);
+        Assert.Equal("sample", scan.Name);
+        Assert.Equal(3, scan.PointCount);
+        Assert.Equal(3, doc.TotalPointCount);
+        Assert.True(scan.HasColors);
+        Assert.True(scan.HasIntensities);
+        Assert.True(scan.HasNormals);
+        Assert.True(scan.Bounds.IsEmpty);
+        Assert.Equal("1.0", ((PlyDocument)doc).Version);
+        Assert.Equal("ascii", ((PlyDocument)doc).Data);
+        Assert.Equal("Stanford PLY", doc.Metadata["Format"]);
+        Assert.Null(doc.CoordinateSystem);
+        Assert.Empty(doc.Warnings);
+    }
+
+    [Theory]
+    [InlineData("ascii")]
+    [InlineData("binary_little_endian")]
+    [InlineData("binary_big_endian")]
+    public void Ply_Round_Trip_Positions_Intensity_Colour_And_Normals(string format)
+    {
+        using var dir = new TempDirectory();
+        using var doc = PlyDocument.Open(dir.Write("sample.ply", SyntheticFixtures.CreateSyntheticPly(format: format)));
+
+        var points = doc.Scans[0].ReadPoints(NoTransform).ToList();
+
+        Assert.Equal(3, points.Count);
+        Assert.Equal([0UL, 1UL, 2UL], points.Select(p => p.Index));
+        AssertNear(new PclVector3(1, 2, 3), points[0].Position);
+        AssertNear(new PclVector3(-4.5, 5.25, 6.125), points[1].Position);
+        AssertNear(new PclVector3(7, 8, 9), points[2].Position);
+        Assert.Equal(0.25f, points[0].Intensity);
+        Assert.Equal(0.5f, points[1].Intensity);
+        Assert.Equal(0f, points[2].Intensity);
+        Assert.Equal(new PclColor(10, 20, 30), points[0].Color);
+        Assert.Equal(new PclColor(255, 255, 255), points[1].Color);
+        Assert.Equal(new PclColor(255, 255, 255), points[2].Color);
+        Assert.Equal(new PclVector3(0, 0, 1), points[0].Normal);
+        Assert.Equal(new PclVector3(0, 0, 0), points[1].Normal);
+        Assert.All(points, p => Assert.Null(p.Classification));
+    }
+
+    [Fact]
+    public void Ply_Faces_Are_Ignored()
+    {
+        foreach (string format in new[] { "ascii", "binary_little_endian", "binary_big_endian" })
+        {
+            using var dir = new TempDirectory();
+            using var doc = PlyDocument.Open(dir.Write("sample.ply",
+                SyntheticFixtures.CreateSyntheticPly(format: format, withFaces: true)));
+
+            Assert.Equal(3, doc.Scans[0].ReadPoints(NoTransform).Count());
+        }
+    }
+
+    [Fact]
+    public void Ply_Points_Without_Finite_Coordinates_Are_Not_Returned()
+    {
+        var points = new[]
+        {
+            new PlySamplePoint(1, 2, 3),
+            new PlySamplePoint(double.NaN, 0, 0),
+            new PlySamplePoint(4, 5, 6),
+        };
+        foreach (string format in new[] { "ascii", "binary_little_endian", "binary_big_endian" })
+        {
+            using var dir = new TempDirectory();
+            using var doc = PlyDocument.Open(dir.Write("sample.ply",
+                SyntheticFixtures.CreateSyntheticPly(points, format: format)));
+
+            var read = doc.Scans[0].ReadPoints(NoTransform).ToList();
+            Assert.Equal(2, read.Count);
+            Assert.Equal([0UL, 1UL], read.Select(p => p.Index));
+        }
+    }
+
+    [Fact]
+    public void Ply_Honours_Limit_And_Step_And_Ignores_Blocks_And_Parallelism()
+    {
+        var points = Enumerable.Range(0, 8).Select(i => new PlySamplePoint(i, 0, 0)).ToList();
+        using var dir = new TempDirectory();
+        using var doc = PlyDocument.Open(dir.Write("sample.ply", SyntheticFixtures.CreateSyntheticPly(points)));
+        var scan = doc.Scans[0];
+
+        Assert.Equal(3, scan.ReadPoints(new PclReadOptions { MaxPoints = 3 }).Count());
+        Assert.Equal(4, scan.ReadPoints(new PclReadOptions { SubsampleStep = 2 }).Count());
+        Assert.Empty(scan.ReadPoints(new PclReadOptions { MaxPoints = 0 }));
+
+        var ranged = scan.ReadPoints(new PclReadOptions
+        {
+            Blocks = new BlockRange { StartBlock = 1, BlockCount = 1 },
+            MaxDegreeOfParallelism = 4,
+        }).ToList();
+        Assert.Equal(8, ranged.Count);
+    }
+
+    [Fact]
+    public void Ply_Without_X_Y_Or_Z_Is_Not_Read()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticPly(
+            properties: [("y", "float"), ("z", "float"), ("red", "uchar")]);
+
+        Assert.Throws<NotSupportedException>(() => PlyDocument.Open(dir.Write("sample.ply", bytes)));
+    }
+
+    [Fact]
+    public void Ply_Without_A_Vertex_Element_Is_Not_Read()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreatePlyFile(
+        [
+            "ply",
+            "format ascii 1.0",
+            "element face 1",
+            "property list uchar int vertex_indices",
+            "end_header",
+            "3 0 1 2",
+        ], []);
+
+        Assert.Throws<NotSupportedException>(() => PlyDocument.Open(dir.Write("sample.ply", bytes)));
+    }
+
+    [Fact]
+    public void Ply_Unsupported_Version_Is_Rejected()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticPly();
+        byte[] patched = System.Text.Encoding.ASCII.GetBytes(
+            System.Text.Encoding.ASCII.GetString(bytes).Replace("format ascii 1.0", "format ascii 2.0"));
+
+        Assert.Throws<NotSupportedException>(() => PlyDocument.Open(dir.Write("sample.ply", patched)));
+    }
+
+    [Fact]
+    public void Ply_Elements_Before_Vertices_Are_Skipped()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreatePlyFile(
+        [
+            "ply",
+            "format ascii 1.0",
+            "comment Skipped elements come first",
+            "element range_grid 2",
+            "property int min",
+            "property int max",
+            "element vertex 1",
+            "property float x",
+            "property float y",
+            "property float z",
+            "end_header",
+            "0 10",
+            "20 30",
+            "1 2 3",
+        ], []);
+
+        var point = Assert.Single(PlyDocument.Open(dir.Write("sample.ply", bytes)).Scans[0].ReadPoints(NoTransform));
+        AssertNear(new PclVector3(1, 2, 3), point.Position);
+    }
+
+    [Fact]
+    public void Ply_Variable_Element_Before_Vertices_Is_Not_Read()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreatePlyFile(
+        [
+            "ply",
+            "format ascii 1.0",
+            "element face 1",
+            "property list uchar int vertex_indices",
+            "element vertex 1",
+            "property float x",
+            "property float y",
+            "property float z",
+            "end_header",
+            "3 0 1 2",
+            "1 2 3",
+        ], []);
+
+        Assert.Throws<NotSupportedException>(() => PlyDocument.Open(dir.Write("sample.ply", bytes)));
+    }
+
+    [Theory]
+    [InlineData("ascii")]
+    [InlineData("binary_little_endian")]
+    [InlineData("binary_big_endian")]
+    public void Ply_Truncated_Vertex_Data_Is_Rejected_When_Read(string format)
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticPly(format: format);
+        // Binary layouts state their size up front, so a short file is rejected at open.
+        if (format != "ascii")
+        {
+            Assert.Throws<InvalidDataException>(() => PlyDocument.Open(dir.Write("cut.ply", bytes[..(bytes.Length - 5)])));
+            return;
+        }
+
+        using var doc = PlyDocument.Open(dir.Write("cut.ply", bytes[..(bytes.Length - 5)]));
+        Assert.Equal(3, doc.Scans[0].PointCount);
+        Assert.Throws<InvalidDataException>(() => doc.Scans[0].ReadPoints().ToList());
+    }
+
+    [Fact]
+    public void Ply_Vertex_Line_With_The_Wrong_Value_Count_Is_Rejected()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreatePlyFile(
+        [
+            "ply",
+            "format ascii 1.0",
+            "element vertex 1",
+            "property float x",
+            "property float y",
+            "property float z",
+            "end_header",
+            "1 2",
+        ], []);
+        using var doc = PlyDocument.Open(dir.Write("sample.ply", bytes));
+
+        Assert.Throws<InvalidDataException>(() => doc.Scans[0].ReadPoints().ToList());
+    }
+
+    [Fact]
+    public void Ply_Unknown_Property_Type_Is_Rejected()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticPly(
+            properties: [("x", "float"), ("y", "float"), ("z", "float"), ("label", "string")]);
+
+        Assert.Throws<InvalidDataException>(() => PlyDocument.Open(dir.Write("sample.ply", bytes)));
+    }
+
+    [Fact]
+    public void Ply_Wrong_Signature_Is_Rejected()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticPly();
+        bytes[0] = (byte)'X';
+
+        Assert.Throws<InvalidDataException>(() => PlyDocument.Open(dir.Write("sample.ply", bytes)));
+        Assert.Equal(PclFileKind.Unknown, PclFile.DetectKind(dir.Write("other.ply", bytes)));
+        Assert.Throws<NotSupportedException>(() => PclFile.Open(dir.PathOf("other.ply")));
+    }
 }

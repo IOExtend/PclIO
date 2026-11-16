@@ -20,6 +20,9 @@ public readonly record struct LasSamplePoint(double X, double Y, double Z, float
 /// <summary>One point of a synthetic PCD file: position, intensity, colour and normal.</summary>
 public readonly record struct PcdSamplePoint(double X, double Y, double Z, float? Intensity = null, PclColor? Color = null, PclVector3? Normal = null);
 
+/// <summary>One vertex of a synthetic PLY file: position, colour, intensity and normal.</summary>
+public readonly record struct PlySamplePoint(double X, double Y, double Z, PclColor? Color = null, float? Intensity = null, PclVector3? Normal = null, byte Alpha = 255);
+
 /// <summary>Generates small synthetic scan files for the tests. Every layout is written from what the readers implement;
 /// no byte of any of them comes from a real scan.</summary>
 internal static class SyntheticFixtures
@@ -1027,5 +1030,177 @@ internal static class SyntheticFixtures
 
         FlushLiterals(i - literals, literals);
         return [.. output];
+    }
+
+    // ---- PLY (.ply) ---------------------------------------------------------------------------------------------------
+
+    /// <summary>Default PLY vertex properties: positions, 8-bit colour, intensity and normals.</summary>
+    public static IReadOnlyList<(string Name, string Type)> DefaultPlyProperties =>
+    [
+        ("x", "float"), ("y", "float"), ("z", "float"),
+        ("red", "uchar"), ("green", "uchar"), ("blue", "uchar"),
+        ("intensity", "float"), ("nx", "float"), ("ny", "float"), ("nz", "float"),
+    ];
+
+    /// <summary>Default PLY vertices: three points with mixed channels.</summary>
+    public static IReadOnlyList<PlySamplePoint> DefaultPlyPoints =>
+    [
+        new(1, 2, 3, new PclColor(10, 20, 30), 0.25f, new PclVector3(0, 0, 1)),
+        new(-4.5, 5.25, 6.125, null, 0.5f),
+        new(7, 8, 9, new PclColor(255, 255, 255)),
+    ];
+
+    /// <summary>A synthetic PLY file with one vertex element.</summary>
+    /// <param name="points">Vertices to store.</param>
+    /// <param name="properties">Vertex properties; null uses <see cref="DefaultPlyProperties"/>.</param>
+    /// <param name="format">Storage: ascii, binary_little_endian or binary_big_endian.</param>
+    /// <param name="withFaces">True appends a face element with one triangle after the vertices.</param>
+    public static byte[] CreateSyntheticPly(IReadOnlyList<PlySamplePoint>? points = null,
+        IReadOnlyList<(string Name, string Type)>? properties = null, string format = "ascii", bool withFaces = false)
+    {
+        points ??= DefaultPlyPoints;
+        properties ??= DefaultPlyProperties;
+
+        var header = new List<string>
+        {
+            "ply",
+            $"format {format} 1.0",
+            "comment Created by PclIO tests",
+            $"element vertex {points.Count}",
+        };
+        header.AddRange(properties.Select(p => $"property {p.Type} {p.Name}"));
+        if (withFaces)
+        {
+            header.Add("element face 1");
+            header.Add("property list uchar int vertex_indices");
+        }
+
+        header.Add("end_header");
+
+        byte[] body = format switch
+        {
+            "ascii" => PlyAsciiBody(points, properties),
+            "binary_little_endian" => PlyBinaryBody(points, properties, littleEndian: true, withFaces),
+            "binary_big_endian" => PlyBinaryBody(points, properties, littleEndian: false, withFaces),
+            _ => throw new ArgumentException($"Unknown PLY format '{format}'.", nameof(format)),
+        };
+
+        byte[] headerBytes = System.Text.Encoding.ASCII.GetBytes(string.Join('\n', header) + "\n");
+        return [.. headerBytes, .. body];
+    }
+
+    /// <summary>A PLY file from raw header lines and a body.</summary>
+    public static byte[] CreatePlyFile(IEnumerable<string> headerLines, byte[] body)
+    {
+        byte[] headerBytes = System.Text.Encoding.ASCII.GetBytes(string.Join('\n', headerLines) + "\n");
+        return [.. headerBytes, .. body];
+    }
+
+    private static int PlyTypeSize(string type) => type switch
+    {
+        "char" or "int8" or "uchar" or "uint8" => 1,
+        "short" or "int16" or "ushort" or "uint16" => 2,
+        "int" or "int32" or "uint" or "uint32" or "float" or "float32" => 4,
+        "double" or "float64" => 8,
+        _ => 0,
+    };
+
+    private static byte[] PlyAsciiBody(IReadOnlyList<PlySamplePoint> points,
+        IReadOnlyList<(string Name, string Type)> properties)
+    {
+        var sb = new StringBuilder();
+        foreach (var p in points)
+        {
+            sb.Append(string.Join(' ', properties.Select(prop => PlyAsciiValue(p, prop))));
+            sb.Append('\n');
+        }
+
+        return System.Text.Encoding.ASCII.GetBytes(sb.ToString());
+    }
+
+    private static string PlyAsciiValue(PlySamplePoint p, (string Name, string Type) property)
+    {
+        double value = PlyPropertyValue(p, property.Name);
+        if (property.Type is "float" or "float32" or "double" or "float64")
+            return double.IsNaN(value) ? "nan" : value.ToString("R", System.Globalization.CultureInfo.InvariantCulture);
+        return ((long)value).ToString(System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    private static byte[] PlyBinaryBody(IReadOnlyList<PlySamplePoint> points,
+        IReadOnlyList<(string Name, string Type)> properties, bool littleEndian, bool withFaces)
+    {
+        using var ms = new MemoryStream();
+        foreach (var p in points)
+            foreach (var prop in properties)
+                ms.Write(PlyPropertyBytes(p, prop, littleEndian));
+
+        if (withFaces)
+        {
+            // One triangle over the first three vertices.
+            ms.WriteByte(3);
+            foreach (int index in new[] { 0, 1, 2 })
+            {
+                byte[] indexBytes = new byte[4];
+                if (littleEndian)
+                    BinaryPrimitives.WriteInt32LittleEndian(indexBytes, index);
+                else
+                    BinaryPrimitives.WriteInt32BigEndian(indexBytes, index);
+                ms.Write(indexBytes);
+            }
+        }
+
+        return ms.ToArray();
+    }
+
+    private static double PlyPropertyValue(PlySamplePoint p, string name) => name switch
+    {
+        "x" => p.X,
+        "y" => p.Y,
+        "z" => p.Z,
+        "red" => p.Color?.R ?? 255,
+        "green" => p.Color?.G ?? 255,
+        "blue" => p.Color?.B ?? 255,
+        "alpha" => p.Alpha,
+        "intensity" => p.Intensity ?? 0,
+        "nx" => p.Normal?.X ?? 0,
+        "ny" => p.Normal?.Y ?? 0,
+        "nz" => p.Normal?.Z ?? 0,
+        _ => 0,
+    };
+
+    private static byte[] PlyPropertyBytes(PlySamplePoint p, (string Name, string Type) property, bool littleEndian)
+    {
+        double value = PlyPropertyValue(p, property.Name);
+        int size = PlyTypeSize(property.Type);
+        byte[] bytes = new byte[size];
+        bool signed = property.Type is "char" or "int8" or "short" or "int16" or "int" or "int32";
+        if (property.Type is "float" or "float32")
+        {
+            if (littleEndian)
+                BinaryPrimitives.WriteSingleLittleEndian(bytes, (float)value);
+            else
+                BinaryPrimitives.WriteSingleBigEndian(bytes, (float)value);
+        }
+        else if (property.Type is "double" or "float64")
+        {
+            if (littleEndian)
+                BinaryPrimitives.WriteDoubleLittleEndian(bytes, value);
+            else
+                BinaryPrimitives.WriteDoubleBigEndian(bytes, value);
+        }
+        else if (signed)
+        {
+            long signedValue = (long)value;
+            for (int i = 0; i < size; i++)
+                bytes[littleEndian ? i : size - 1 - i] = (byte)(signedValue >> (8 * i));
+        }
+        else
+        {
+            ulong unsigned = (ulong)(long)value;
+            for (int i = 0; i < size; i++)
+                bytes[littleEndian ? i : size - 1 - i] = (byte)(unsigned >> (8 * i));
+        }
+
+        return bytes;
     }
 }

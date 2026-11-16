@@ -101,6 +101,10 @@ internal static class KindDetector
         if (IsPcdHeader(stream, origin))
             return PclFileKind.Pcd;
 
+        // PLY files start with the magic word; the header structure decides, like PCD.
+        if (IsPlyHeader(stream, origin))
+            return PclFileKind.Ply;
+
         return PclFileKind.Unknown;
     }
 
@@ -177,4 +181,84 @@ internal static class KindDetector
             stream.Position = origin;
         }
     }
+
+    // True when the stream starts with a PLY header: the magic word, a format line and end_header in order.
+    // At most the first 256 KiB are inspected; the position is restored.
+    private static bool IsPlyHeader(Stream stream, long origin)
+    {
+        const int maxProbeBytes = 256 * 1024;
+
+        long length = stream.CanSeek ? stream.Length : long.MaxValue;
+        int toRead = (int)Math.Min(maxProbeBytes, Math.Max(0, length - origin));
+        if (toRead < 7) return false;
+
+        byte[] buffer = new byte[toRead];
+        stream.Position = origin;
+        try
+        {
+            int got = 0;
+            while (got < toRead)
+            {
+                int n = stream.Read(buffer, got, toRead - got);
+                if (n == 0) break;
+                got += n;
+            }
+
+            int position = 0;
+            int lines = 0;
+            bool first = true;
+            bool format = false;
+            while (position < got)
+            {
+                int end = Array.IndexOf(buffer, (byte)'\n', position, got - position);
+                if (end < 0) return false;
+                int lineLength = end - position;
+                if (lineLength > 0 && buffer[end - 1] == (byte)'\r') lineLength--;
+                if (lineLength > 4096) return false;
+
+                string line = System.Text.Encoding.ASCII.GetString(buffer, position, lineLength);
+                if (first)
+                {
+                    if (!line.Equals("ply", StringComparison.Ordinal)) return false;
+                    first = false;
+                }
+                else if (line.Length != 0 && !line.StartsWith("comment", StringComparison.Ordinal) &&
+                    !line.StartsWith("obj_info", StringComparison.Ordinal))
+                {
+                    if (!format)
+                    {
+                        if (!IsPlyFormatLine(line)) return false;
+                        format = true;
+                    }
+                    else if (line.Equals("end_header", StringComparison.Ordinal))
+                    {
+                        return true;
+                    }
+                    else if (!IsPlyHeaderLine(line))
+                    {
+                        return false;
+                    }
+                }
+
+                position = end + 1;
+                if (++lines > 4096) return false;
+            }
+
+            return false;
+        }
+        finally
+        {
+            stream.Position = origin;
+        }
+    }
+
+    private static bool IsPlyFormatLine(string line)
+    {
+        string[] parts = line.Split([' ', '\t'], StringSplitOptions.RemoveEmptyEntries);
+        return parts is ["format", "ascii" or "binary_little_endian" or "binary_big_endian", _];
+    }
+
+    private static bool IsPlyHeaderLine(string line) =>
+        line.StartsWith("element ", StringComparison.Ordinal) ||
+        line.StartsWith("property ", StringComparison.Ordinal);
 }

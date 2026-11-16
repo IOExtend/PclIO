@@ -35,4 +35,7 @@ public enum PclFileKind
 
     /// <summary>Point Cloud Library point cloud file (.pcd).</summary>
     Pcd = 10,
+
+    /// <summary>Stanford polygon file with point cloud data (.ply).</summary>
+    Ply = 11,
 }

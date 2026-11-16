@@ -83,6 +83,7 @@ public static class Program
           EdgeWise      the extension .c3db or .c3ptx, or a text or tree signature in another file
           LAS           by signature (.las)
           PCD           by header structure (.pcd)
+          PLY           by header structure (.ply)
 
         Output formats (--format, or the output extension; any other extension needs --format):
           las    ASPRS LAS 1.2, point data record format 2 (XYZ, intensity, RGB)
