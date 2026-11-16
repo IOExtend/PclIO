@@ -20,8 +20,11 @@ public sealed class LgsxDocument : PclDocument
     private const int TailBytes = 4096;
 
     // Size of the record of a setup: the translation and the bounds of the setup as six doubles, then the offset
-    // and the length of the range of the point data that belongs to it.
-    private const int SetupRecordSize = 88;
+    // and the length of the range of the point data that belongs to it and the number of its points.
+    private const int SetupRecordSize = 96;
+
+    // Offset of the number of points of the point data in the header of the payload; zero when it is not stored.
+    private const int PayloadPointCountOffset = 0x28;
 
     private static readonly TimeSpan RegexTimeout = TimeSpan.FromSeconds(1);
 
@@ -202,6 +205,7 @@ public sealed class LgsxDocument : PclDocument
                             Bounds = record.Bounds,
                             PointOffset = record.PointOffset,
                             PointLength = record.PointLength,
+                            PointCount = record.PointCount,
                         };
                     }
 
@@ -216,6 +220,9 @@ public sealed class LgsxDocument : PclDocument
             ? AssignBlocksToSetups(path, pointCloudEntry, document._setups)
             : null;
 
+        // The number of points is read from the container when it states it; otherwise it is counted by decoding.
+        long? declaredCount = pointCloudEntry != null ? ReadDeclaredPointCount(fs, pointCloudEntry) : null;
+
         if (assignments != null)
         {
             foreach (var (setup, blockStarts) in assignments)
@@ -227,7 +234,8 @@ public sealed class LgsxDocument : PclDocument
                     pointCloudEntry: pointCloudEntry!,
                     blockStarts: blockStarts,
                     transform: setup.Translation is { } translation ? new PclTransform { Translation = translation } : null,
-                    bounds: setup.Bounds));
+                    bounds: setup.Bounds,
+                    declaredPointCount: setup.PointCount >= 0 ? setup.PointCount : null));
             }
 
             document._warnings.Add(
@@ -242,7 +250,8 @@ public sealed class LgsxDocument : PclDocument
                     id: "unified-cloud",
                     name: Path.GetFileNameWithoutExtension(path),
                     path: path,
-                    pointCloudEntry: pointCloudEntry));
+                    pointCloudEntry: pointCloudEntry,
+                    declaredPointCount: declaredCount));
             }
 
             if (scanSetups.Count > 0)
@@ -264,16 +273,16 @@ public sealed class LgsxDocument : PclDocument
     }
 
     /// <summary>
-    /// The record of a setup: the translation of the setup, the bounds of its points and the range of the point
-    /// blocks it owns inside the point data.
+    /// The record of a setup: the translation of the setup, the bounds of its points, the range of the point
+    /// blocks it owns inside the point data and the number of its points.
     /// </summary>
-    private sealed record SetupRecord(PclVector3 Translation, PclBounds Bounds, ulong PointOffset, ulong PointLength);
+    private sealed record SetupRecord(PclVector3 Translation, PclBounds Bounds, ulong PointOffset, ulong PointLength, long PointCount);
 
     /// <summary>
     /// Reads the record of a setup from the payload of its container entry. The record holds the translation of the
     /// setup and the bounds of its points as six doubles, then the offset and the length of the range of the point
-    /// blocks it owns. A record that is too short or holds values that are not usable is left unread, so that the
-    /// setup keeps an unknown pose instead of a wrong one.
+    /// blocks it owns and the number of its points. A record that is too short or holds values that are not usable is
+    /// left unread, so that the setup keeps an unknown pose instead of a wrong one.
     /// </summary>
     private static SetupRecord? ReadSetupRecord(FileStream fs, LgsxSetup setup)
     {
@@ -304,8 +313,33 @@ public sealed class LgsxDocument : PclDocument
 
         ulong pointOffset = Bytes.ReadUInt64LE(data.AsSpan(72, 8));
         ulong pointLength = Bytes.ReadUInt64LE(data.AsSpan(80, 8));
+        ulong pointCount = Bytes.ReadUInt64LE(data.AsSpan(88, 8));
 
-        return new SetupRecord(new PclVector3(tx, ty, tz), bounds, pointOffset, pointLength);
+        return new SetupRecord(
+            new PclVector3(tx, ty, tz),
+            bounds,
+            pointOffset,
+            pointLength,
+            pointCount > long.MaxValue ? -1 : (long)pointCount);
+    }
+
+    /// <summary>
+    /// Reads the number of points that the header of the point data declares, or null when it declares none.
+    /// A damaged header yields no count, so that the points are counted by decoding them.
+    /// </summary>
+    private static long? ReadDeclaredPointCount(FileStream fs, LgsxEntry entry)
+    {
+        long payloadOffset = (long)entry.Offset;
+        if (payloadOffset < 0 || payloadOffset > fs.Length - 64) return null;
+
+        fs.Position = payloadOffset;
+        byte[] header = new byte[64];
+        fs.ReadExactly(header);
+        if (!header.AsSpan(0, 4).SequenceEqual(PointDataMagic)) return null;
+
+        ulong count = Bytes.ReadUInt64LE(header.AsSpan(PayloadPointCountOffset, 8));
+        if (count == 0 || count > long.MaxValue) return null;
+        return (long)count;
     }
 
     /// <summary>
@@ -457,6 +491,9 @@ public sealed record LgsxSetup(string Id, string Name, ulong Offset, ulong Size)
 
     /// <summary>Length of the range of the point data that belongs to the setup, in bytes.</summary>
     public ulong PointLength { get; init; }
+
+    /// <summary>Number of points of the setup, or -1 when the container does not state it.</summary>
+    public long PointCount { get; init; } = -1;
 }
 
 /// <summary>
@@ -489,6 +526,9 @@ public sealed class LgsxScan : PclScan
     // Start offsets of the blocks that belong to this scan; null when the scan holds all blocks of the container.
     private readonly long[]? _blockStarts;
 
+    // Number of points the container states for this scan; null when it states none.
+    private readonly long? _declaredPointCount;
+
     private long _pointCount = -1;
     private (bool Colors, bool Intensities, bool Normals)? _channels;
 
@@ -499,11 +539,12 @@ public sealed class LgsxScan : PclScan
     public override string Name { get; }
 
     /// <summary>
-    /// Number of points this scan yields. The container does not store it, so the first access decodes
-    /// the whole point data and caches the result; this can be slow for large files.
+    /// Number of points this scan yields. The number the container states is used when it states one; otherwise the
+    /// first access decodes the whole point data and caches the result, which can be slow for large files.
     /// </summary>
     /// <exception cref="InvalidDataException">The point data is malformed; the exception is thrown by the first access.</exception>
-    public override long PointCount => _pointCount >= 0 ? _pointCount : _pointCount = CountPoints();
+    public override long PointCount =>
+        _declaredPointCount ?? (_pointCount >= 0 ? _pointCount : _pointCount = CountPoints());
 
     /// <summary>True when the first point block carries colour planes.</summary>
     public override bool HasColors => Channels.Colors;
@@ -517,13 +558,14 @@ public sealed class LgsxScan : PclScan
     private (bool Colors, bool Intensities, bool Normals) Channels => _channels ??= DetectChannels();
 
     internal LgsxScan(string id, string name, string path, LgsxEntry? pointCloudEntry, long[]? blockStarts = null,
-        PclTransform? transform = null, PclBounds? bounds = null)
+        PclTransform? transform = null, PclBounds? bounds = null, long? declaredPointCount = null)
     {
         Id = id;
         Name = name;
         _filePath = path;
         _entry = pointCloudEntry;
         _blockStarts = blockStarts;
+        _declaredPointCount = declaredPointCount;
         if (transform != null) Transform = transform;
         if (bounds != null) Bounds = bounds.Value;
     }

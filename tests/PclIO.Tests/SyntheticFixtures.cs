@@ -153,9 +153,11 @@ internal static class SyntheticFixtures
     /// <param name="overlappingSetupRanges">True lets every setup declare the range of the first block.</param>
     /// <param name="collidingSetupNames">True names the second setup so its id after the last dash equals the first's.</param>
     /// <param name="damagedSetupRecord">True writes a setup record whose translation is not a number.</param>
+    /// <param name="damagedPointData">True writes point blocks whose compressed frames cannot be decoded.</param>
+    /// <param name="withPointCount">False leaves the number of points out of the header of the point data.</param>
     public static byte[] CreateSyntheticLgsx(IReadOnlyList<LeicaSamplePoint>? points = null, bool withColorAndIntensity = false, bool withPointData = true,
         IReadOnlyList<byte[]>? extraPlanes = null, int setupCount = 1, bool assignPointsToSetups = false, bool overlappingSetupRanges = false,
-        bool collidingSetupNames = false, bool damagedSetupRecord = false)
+        bool collidingSetupNames = false, bool damagedSetupRecord = false, bool damagedPointData = false, bool withPointCount = true)
     {
         points ??= DefaultLeicaPoints;
         using var ms = new MemoryStream();
@@ -169,7 +171,7 @@ internal static class SyntheticFixtures
             : new List<IReadOnlyList<LeicaSamplePoint>> { points };
 
         (byte[] payload, List<(long Start, long Length)> blocks) =
-            BuildLeicaPayload(groups, withColorAndIntensity, extraPlanes ?? []);
+            BuildLeicaPayload(groups, withColorAndIntensity, extraPlanes ?? [], damagedPointData, withPointCount);
 
         // The point data follows the container entries and their records, so its start is known before they are written.
         var setupNames = Enumerable.Range(0, setupCount).Select(i => "SETUP-" + (3 + i)).ToList();
@@ -203,7 +205,9 @@ internal static class SyntheticFixtures
             bool hasBlock = i < blocks.Count;
             int blockIndex = overlappingSetupRanges ? 0 : i;
             WriteSetupRecord(bw, i, hasBlock ? payloadStart + blocks[blockIndex].Start : 0,
-                hasBlock ? (ulong)blocks[blockIndex].Length : 0, damaged: damagedSetupRecord);
+                hasBlock ? (ulong)blocks[blockIndex].Length : 0,
+                hasBlock ? groups[blockIndex].Count : 0,
+                damaged: damagedSetupRecord);
         }
 
         long pointEntry = ms.Position;
@@ -221,10 +225,12 @@ internal static class SyntheticFixtures
     }
 
     // The size of the record of a setup.
-    public const int SetupRecordSize = 88;
+    public const int SetupRecordSize = 96;
 
-    // Writes the record of a setup: the translation and the bounds of the setup, then the range of its points.
-    private static void WriteSetupRecord(BinaryWriter bw, int setupIndex, long pointOffset, ulong pointLength, bool damaged)
+    // Writes the record of a setup: the translation and the bounds of the setup, then the range of its points
+    // and the number of them.
+    private static void WriteSetupRecord(BinaryWriter bw, int setupIndex, long pointOffset, ulong pointLength,
+        long pointCount, bool damaged)
     {
         double[] translation = damaged
             ? [double.NaN, 2 + setupIndex, 3 + setupIndex]
@@ -241,6 +247,7 @@ internal static class SyntheticFixtures
 
         bw.Write((ulong)pointOffset);
         bw.Write(pointLength);
+        bw.Write((ulong)pointCount);
     }
 
     // Distributes the points over the setups; a setup without points gets no block.
@@ -291,15 +298,18 @@ internal static class SyntheticFixtures
 
     // Builds the point data payload: a header, then one block per group of points.
     private static (byte[] Payload, List<(long Start, long Length)> Blocks) BuildLeicaPayload(
-        IReadOnlyList<IReadOnlyList<LeicaSamplePoint>> groups, bool full, IReadOnlyList<byte[]> extraPlanes)
+        IReadOnlyList<IReadOnlyList<LeicaSamplePoint>> groups, bool full, IReadOnlyList<byte[]> extraPlanes, bool damaged = false,
+        bool withPointCount = true)
     {
         using var ms = new MemoryStream();
         using var bw = new BinaryWriter(ms);
 
-        // Payload header: signature and the offset of the first block.
+        // Payload header: signature, the offset of the first block and the number of points.
         byte[] header = new byte[64];
         "mMPK"u8.CopyTo(header);
         BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(0x20, 4), 64);
+        if (withPointCount)
+            BinaryPrimitives.WriteUInt64LittleEndian(header.AsSpan(0x28, 8), (ulong)groups.Sum(g => g.Count));
         bw.Write(header);
 
         var blocks = new List<(long Start, long Length)>();
@@ -309,6 +319,11 @@ internal static class SyntheticFixtures
             if (group.Count == 0) continue;
 
             var frames = BuildFrames(group, full, extraPlanes);
+            if (damaged)
+            {
+                // A frame whose descriptor is not valid: the header of the block stays readable, the data does not.
+                foreach (byte[] broken in frames) broken[4] = 0x5A;
+            }
             int blockLength = 8 + 128 + frames.Sum(f => 8 + f.Length);
             long start = ms.Position;
 
