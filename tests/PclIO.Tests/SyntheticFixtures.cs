@@ -547,15 +547,27 @@ internal static class SyntheticFixtures
     }
 
     /// <summary>A synthetic scan folder with a parameter file and one data stream.</summary>
-    public static string WriteFaroFolder(TempDirectory dir, string? parameters = null, ushort millimetres = 2000, int invalidCells = 0)
+    /// <param name="dir">Folder to write into.</param>
+    /// <param name="parameters">Content of the parameter file.</param>
+    /// <param name="millimetres">The distance of the cells that hold a return.</param>
+    /// <param name="invalidCells">Number of cells at the start of the grid that hold no return.</param>
+    /// <param name="intensity">The stored intensity of every cell.</param>
+    /// <param name="recordBytes">Bytes that one sample takes.</param>
+    /// <param name="extraBytes">Bytes after the samples, so that the sizes do not fit the grid.</param>
+    /// <param name="samples">Number of samples that are written; fewer than the grid leaves the stream short.</param>
+    public static string WriteFaroFolder(TempDirectory dir, string? parameters = null, ushort millimetres = 2000, int invalidCells = 0,
+        ushort intensity = 1024, int recordBytes = 8, int extraBytes = 0, int samples = FaroRows * FaroCols)
     {
         dir.WriteText(Path.Combine("scan", "Scans", "1", "Params"), parameters ?? FaroParams());
-        byte[] records = new byte[FaroRows * FaroCols * 8];
+        byte[] records = new byte[(samples * recordBytes) + extraBytes];
         byte[] distances = FaroDistances(millimetres, invalidCells);
-        for (int i = 0; i < FaroRows * FaroCols; i++)
+        for (int i = 0; i < samples; i++)
         {
-            Array.Copy(distances, i * 2, records, i * 8, 2);
-            BinaryPrimitives.WriteUInt16LittleEndian(records.AsSpan((i * 8) + 2, 2), 1024);
+            int off = i * recordBytes;
+            Array.Copy(distances, i * 2, records, off, 2);
+            // A record smaller than four bytes holds the distance only; there is no room for the intensity.
+            if (recordBytes >= 4)
+                BinaryPrimitives.WriteUInt16LittleEndian(records.AsSpan(off + 2, 2), intensity);
         }
 
         dir.Write(Path.Combine("scan", "Scans", "1", "ScanDataStream0"), records);
