@@ -37,17 +37,17 @@ public sealed class RcsScanDocument : PclDocument
     /// <summary>Point count declared in the header; it is not cross-checked against the node table.</summary>
     public long DeclaredPointCount { get; }
 
-    /// <summary>Always true: a constant of the supported layout, whose point record always has colour fields. It is not read from the file.</summary>
-    public bool HasColorData { get; }
+    /// <summary>True when the file holds colour for its points; it is read from the node table.</summary>
+    public bool HasColorData => _scans.Count > 0 && _scans[0].HasColors;
 
     /// <summary>
-    /// Always true: a constant of the supported layout, which can carry normals. It is not read from the file; each
-    /// node decides whether its points have one, so single points may have none.
+    /// True when the file can hold normals for its points; it is read from the node table, and a single point may still
+    /// have none.
     /// </summary>
-    public bool HasNormalData { get; }
+    public bool HasNormalData => _scans.Count > 0 && _scans[0].HasNormals;
 
-    /// <summary>Always true: a constant of the supported layout, whose point record always has an intensity field. It is not read from the file.</summary>
-    public bool HasIntensityData { get; }
+    /// <summary>True when the file holds an intensity for its points; it is read from the node table.</summary>
+    public bool HasIntensityData => _scans.Count > 0 && _scans[0].HasIntensities;
 
     /// <inheritdoc />
     public override IReadOnlyList<PclScan> Scans => _scans;
@@ -74,9 +74,6 @@ public sealed class RcsScanDocument : PclDocument
         LocalBounds = localBounds;
         OctreeBounds = octreeBounds;
         DeclaredPointCount = pointCount;
-        HasColorData = true;
-        HasNormalData = true;
-        HasIntensityData = true;
 
         var scan = new RcsScan(this, path);
         _scans.Add(scan);
@@ -211,12 +208,18 @@ public sealed class RcsScan : PclScan
     // Layout of major version 3: the node table starts at a fixed offset and the node
     // payloads occupy the end of the file. Both are verified against the file length before use.
     private const ulong MaxNodes = 500_000;
+
+    // Bytes of one point record: the position of the point and, when the node holds them, the intensity and the
+    // colour. A record without them is shorter.
     private const int PointRecordSize = 16;
+    private const int PositionRecordSize = 10;
     private const int NormalRecordSize = 4;
     private const double Quantization = 0.0001;
 
     private readonly RcsScanDocument _document;
     private readonly string _filePath;
+
+    private (bool Colors, bool Intensities, bool Normals)? _channels;
 
     /// <inheritdoc />
     public override string Id => _document.ScanGuid;
@@ -233,14 +236,14 @@ public sealed class RcsScan : PclScan
     /// <inheritdoc />
     public override PclTransform Transform => _document.ScanTransform;
 
-    /// <summary>Always true: a fixed constant of the supported layout, not read from the file.</summary>
-    public override bool HasColors => _document.HasColorData;
+    /// <summary>True when the file holds colour for its points; it is read from the node table.</summary>
+    public override bool HasColors => Channels.Colors;
 
-    /// <summary>Always true: a fixed constant of the supported layout, not read from the file; single points may still have no normal.</summary>
-    public override bool HasNormals => _document.HasNormalData;
+    /// <summary>True when the file holds normals for its points; it is read from the node table.</summary>
+    public override bool HasNormals => Channels.Normals;
 
-    /// <summary>Always true: a fixed constant of the supported layout, not read from the file.</summary>
-    public override bool HasIntensities => _document.HasIntensityData;
+    /// <summary>True when the file holds an intensity for its points; it is read from the node table.</summary>
+    public override bool HasIntensities => Channels.Intensities;
 
     internal RcsScan(RcsScanDocument document, string filePath)
     {
@@ -249,6 +252,37 @@ public sealed class RcsScan : PclScan
     }
 
     private readonly record struct Node(PclVector3 TightMin, uint Points, uint Bytes);
+
+    // The channels of the points follow from the size of the payload of the nodes.
+    private (bool Colors, bool Intensities, bool Normals) Channels => _channels ??= DetectChannels();
+
+    private (bool, bool, bool) DetectChannels()
+    {
+        var layout = RcsLayout.ForVersion(_document.MajorVersion);
+        if (layout == null) return (false, false, false);
+
+        try
+        {
+            using var fs = File.OpenRead(_filePath);
+            var nodes = ReadNodeTable(fs, layout, out _);
+
+            bool colors = false, intensities = false, normals = false;
+            foreach (var node in nodes)
+            {
+                if (node.Points == 0) continue;
+                long bytesPerPoint = node.Bytes / node.Points;
+                if (bytesPerPoint >= PointRecordSize) { colors = true; intensities = true; }
+                if (node.Bytes >= (long)node.Points * (PointRecordSize + NormalRecordSize)) normals = true;
+            }
+
+            return (colors, intensities, normals);
+        }
+        catch (InvalidDataException)
+        {
+            // A damaged node table leaves the channels unknown.
+            return (false, false, false);
+        }
+    }
 
     /// <summary>
     /// Streams points from the node table (experimental, major version 3 only). Throws
@@ -286,12 +320,18 @@ public sealed class RcsScan : PclScan
                 continue;
             }
 
+            // The size of the payload tells which channels the points of the node hold: a record with the intensity
+            // and the colour is longer than one with the position only.
+            long bytesPerPoint = node.Bytes / node.Points;
+            bool hasColor = bytesPerPoint >= PointRecordSize;
+            int recordSize = hasColor ? PointRecordSize : PositionRecordSize;
+
             // The optional normal plane follows the point records.
             bool hasNormals = node.Bytes >= (long)node.Points * (PointRecordSize + NormalRecordSize);
-            long normalStart = curOffset + ((long)node.Points * PointRecordSize);
+            long normalStart = curOffset + ((long)node.Points * recordSize);
 
             fs.Position = curOffset;
-            long remaining = (long)node.Points * PointRecordSize;
+            long remaining = (long)node.Points * recordSize;
             long pointIdx = 0;
 
             while (remaining > 0)
@@ -300,7 +340,7 @@ public sealed class RcsScan : PclScan
                 fs.ReadExactly(chunkBuf, 0, toRead);
                 remaining -= toRead;
 
-                int ptsInBlock = toRead / PointRecordSize;
+                int ptsInBlock = toRead / recordSize;
                 if (hasNormals)
                 {
                     long resume = fs.Position;
@@ -313,15 +353,10 @@ public sealed class RcsScan : PclScan
                 {
                     if (pointIdx % step != 0) continue;
 
-                    int off = p * PointRecordSize;
+                    int off = p * recordSize;
                     ushort v1 = Bytes.ReadUInt16LE(chunkBuf.AsSpan(off + 4, 2));
                     ushort v2 = Bytes.ReadUInt16LE(chunkBuf.AsSpan(off + 6, 2));
                     ushort v3 = Bytes.ReadUInt16LE(chunkBuf.AsSpan(off + 8, 2));
-
-                    byte intensityByte = chunkBuf[off + 12];
-                    byte red = chunkBuf[off + 13];
-                    byte green = chunkBuf[off + 14];
-                    byte blue = chunkBuf[off + 15];
 
                     // Fixed-step quantization relative to the node minimum.
                     double x = node.TightMin.X + (v1 * Quantization);
@@ -344,10 +379,19 @@ public sealed class RcsScan : PclScan
                         }
                     }
 
+                    // A node without colour and intensity holds the position of the point only.
+                    PclColor? color = null;
+                    float? intensity = null;
+                    if (hasColor)
+                    {
+                        color = new PclColor(chunkBuf[off + 13], chunkBuf[off + 14], chunkBuf[off + 15]);
+                        intensity = chunkBuf[off + 12] / 255.0f;
+                    }
+
                     var pt = new PclPoint(
                         new PclVector3(x, y, z),
-                        Color: new PclColor(red, green, blue),
-                        Intensity: intensityByte / 255.0f,
+                        Color: color,
+                        Intensity: intensity,
                         Normal: normal,
                         Index: (ulong)yielded);
 
@@ -403,7 +447,7 @@ public sealed class RcsScan : PclScan
                     tMinX > tMaxX || tMinY > tMaxY || tMinZ > tMaxZ)
                     throw FormatError.Corrupted("RCS node bounds are invalid.");
 
-                if (nbytes < (long)npts * PointRecordSize)
+                if (nbytes < (long)npts * PositionRecordSize)
                     throw FormatError.Unsupported("RCS node payload is smaller than the known point record layout.");
             }
 

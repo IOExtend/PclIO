@@ -91,6 +91,62 @@ public sealed class FormatTests
     }
 
     [Fact]
+    public void An_Rcs_Without_Colour_Reports_No_Colour_And_No_Intensity()
+    {
+        using var dir = new TempDirectory();
+        using var doc = RcsScanDocument.Open(dir.Write("plain.rcs",
+            SyntheticFixtures.CreateSyntheticRcsWithPoints(RcsPoints, (0, 0, 0), withColor: false)));
+
+        var scan = Assert.Single(doc.Scans);
+        Assert.False(scan.HasColors);
+        Assert.False(scan.HasIntensities);
+        Assert.False(scan.HasNormals);
+        Assert.False(doc.HasColorData);
+
+        var points = scan.ReadPoints(NoTransform).ToList();
+        Assert.Equal(3, points.Count);
+        Assert.All(points, p =>
+        {
+            Assert.Null(p.Color);
+            Assert.Null(p.Intensity);
+            Assert.Null(p.Normal);
+        });
+    }
+
+    [Fact]
+    public void An_Rcs_With_Colour_And_Normals_Reports_Them()
+    {
+        using var dir = new TempDirectory();
+        using var doc = RcsScanDocument.Open(dir.Write("full.rcs",
+            SyntheticFixtures.CreateSyntheticRcsWithPoints(RcsPoints, (0, 0, 0), withNormals: true)));
+
+        var scan = Assert.Single(doc.Scans);
+        Assert.True(scan.HasColors);
+        Assert.True(scan.HasIntensities);
+        Assert.True(scan.HasNormals);
+        Assert.True(doc.HasColorData);
+        Assert.True(doc.HasNormalData);
+
+        var points = scan.ReadPoints(NoTransform).ToList();
+        Assert.Equal(3, points.Count);
+        Assert.All(points, p => Assert.NotNull(p.Color));
+    }
+
+    [Fact]
+    public void An_Rcs_Without_Normals_Reports_No_Normal()
+    {
+        using var dir = new TempDirectory();
+        using var doc = RcsScanDocument.Open(dir.Write("flat.rcs",
+            SyntheticFixtures.CreateSyntheticRcsWithPoints(RcsPoints, (0, 0, 0))));
+
+        var scan = Assert.Single(doc.Scans);
+        Assert.True(scan.HasColors);
+        Assert.True(scan.HasIntensities);
+        Assert.False(scan.HasNormals);
+        Assert.All(scan.ReadPoints(NoTransform), p => Assert.Null(p.Normal));
+    }
+
+    [Fact]
     public void Read_Synthetic_Rcs_Points_Honours_Limit_And_Step()
     {
         using var dir = new TempDirectory();
