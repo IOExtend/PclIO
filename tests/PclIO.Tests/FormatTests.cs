@@ -1087,6 +1087,61 @@ public sealed class FormatTests
         Assert.Throws<InvalidDataException>(() => scan.ReadPoints(new PclReadOptions { ApplyTransform = false, Strict = true }).ToList());
     }
 
+    [Fact]
+    public void A_Data_Object_Location_Takes_Its_Point_Count_From_The_Data_File()
+    {
+        using var dir = new TempDirectory();
+        const string manifest = """{ "DataObjects": [ { "HashId": "h1", "Locations": [ { "HashId": "loc1" } ] } ] }""";
+        dir.Write("h1.bin", SyntheticFixtures.CreateSyntheticPinPointBin([(1, 2, 3), (4, 5, 6)]));
+        using var doc = PinPointDocument.Open(dir.WriteText("project.smf", manifest));
+
+        var scan = Assert.Single(doc.Scans);
+        Assert.Equal("loc1", scan.Id);
+        Assert.Equal(2, scan.PointCount);
+        Assert.Equal(2, doc.TotalPointCount);
+        Assert.Equal(2, scan.ReadPoints(NoTransform).Count());
+    }
+
+    [Fact]
+    public void Locations_That_Share_A_Data_File_Each_Report_Its_Full_Count()
+    {
+        // The shares of one file are not recorded, so every location reports the whole file.
+        using var dir = new TempDirectory();
+        const string manifest = """{ "DataObjects": [ { "HashId": "h1", "Locations": [ { "HashId": "a" }, { "HashId": "b" } ] } ] }""";
+        dir.Write("h1.bin", SyntheticFixtures.CreateSyntheticPinPointBin([(1, 2, 3), (4, 5, 6)]));
+        using var doc = PinPointDocument.Open(dir.WriteText("project.smf", manifest));
+
+        Assert.Equal([2L, 2L], doc.Scans.Select(s => s.PointCount));
+        Assert.Equal(4, doc.TotalPointCount);
+    }
+
+    [Fact]
+    public void A_Data_Object_Location_Without_A_Data_File_Reports_Zero_Points()
+    {
+        using var dir = new TempDirectory();
+        const string manifest = """{ "DataObjects": [ { "HashId": "h1", "Locations": [ { "HashId": "loc1" } ] } ] }""";
+        using var doc = PinPointDocument.Open(dir.WriteText("project.smf", manifest));
+
+        var scan = Assert.Single(doc.Scans);
+        Assert.Equal(0, scan.PointCount);
+        Assert.Contains(doc.Warnings, w => w.Contains("not found", StringComparison.Ordinal));
+        Assert.Empty(scan.ReadPoints());
+    }
+
+    [Fact]
+    public void A_Data_Object_Location_With_A_Damaged_Data_File_Reports_Zero_Points_And_Fails_When_Read()
+    {
+        using var dir = new TempDirectory();
+        const string manifest = """{ "DataObjects": [ { "HashId": "h1", "Locations": [ { "HashId": "loc1" } ] } ] }""";
+        dir.Write("h1.bin", new byte[240]);
+        using var doc = PinPointDocument.Open(dir.WriteText("project.smf", manifest));
+
+        var scan = Assert.Single(doc.Scans);
+        Assert.Equal(0, scan.PointCount);
+        Assert.Contains(doc.Warnings, w => w.Contains("no recognised channel layout", StringComparison.Ordinal));
+        Assert.Throws<NotSupportedException>(() => scan.ReadPoints().ToList());
+    }
+
     // ---- EdgeWise --------------------------------------------------------------------------------------------
 
     private static readonly C3Cluster[] Clusters =
