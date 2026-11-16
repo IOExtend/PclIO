@@ -86,6 +86,17 @@ internal ref struct ZstdBackwardBits
         return (uint)(value & ((1UL << bits) - 1));
     }
 
+    /// <summary>Returns the next <paramref name="bits"/> bits (at most 32) without consuming them, masking with a
+    /// caller-provided mask of <c>(1 &lt;&lt; bits) - 1</c> so that hot loops do not recompute it per symbol.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public uint PeekMasked(int bits, ulong mask)
+    {
+        if (_count < bits) Refill();
+        int shift = _count - bits;
+        ulong value = shift >= 0 ? _container >> shift : _container << -shift;
+        return (uint)(value & mask);
+    }
+
     /// <summary>Consumes bits that a preceding <see cref="Peek"/> returned.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void Skip(int bits) => _count -= bits;
@@ -98,6 +109,8 @@ internal ref struct ZstdBackwardBits
         return value;
     }
 
+    // The refill path stays out of line so that the hot Peek and Read stay small enough to inline.
+    [MethodImpl(MethodImplOptions.NoInlining)]
     private void Refill()
     {
         if (_bytePosition >= 8)

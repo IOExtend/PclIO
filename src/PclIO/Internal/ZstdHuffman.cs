@@ -58,14 +58,79 @@ internal sealed class ZstdHuffmanTable
         var bits = new ZstdBackwardBits(stream);
         ushort[] table = _table;
         int tableBits = _tableBits;
+        ulong mask = (1UL << tableBits) - 1;
         for (int i = 0; i < destination.Length; i++)
         {
-            ushort entry = table[bits.Peek(tableBits)];
+            ushort entry = table[bits.PeekMasked(tableBits, mask)];
             destination[i] = (byte)(entry >> 4);
             bits.Skip(entry & 0xF);
         }
 
         if (!bits.IsExhausted) throw FormatError.Corrupted("Zstandard Huffman stream was not consumed exactly.");
+    }
+
+    /// <summary>
+    /// Decodes four interleaved Huffman streams, round-robin, so that independent bit readers overlap in the
+    /// processor: where the single-stream loop waits on each bit read, this one decodes four symbols per pass.
+    /// The first three destinations hold a quarter of the symbols each, the fourth the rest.
+    /// </summary>
+    public void DecodeInterleaved(ReadOnlySpan<byte> first, ReadOnlySpan<byte> second, ReadOnlySpan<byte> third, ReadOnlySpan<byte> fourth,
+        Span<byte> firstOut, Span<byte> secondOut, Span<byte> thirdOut, Span<byte> fourthOut)
+    {
+        var b0 = new ZstdBackwardBits(first);
+        var b1 = new ZstdBackwardBits(second);
+        var b2 = new ZstdBackwardBits(third);
+        var b3 = new ZstdBackwardBits(fourth);
+        ushort[] table = _table;
+        int tableBits = _tableBits;
+        ulong mask = (1UL << tableBits) - 1;
+
+        int i = 0;
+        int rest = fourthOut.Length;
+        while (i < rest)
+        {
+            ushort e0 = table[b0.PeekMasked(tableBits, mask)];
+            firstOut[i] = (byte)(e0 >> 4);
+            b0.Skip(e0 & 0xF);
+
+            ushort e1 = table[b1.PeekMasked(tableBits, mask)];
+            secondOut[i] = (byte)(e1 >> 4);
+            b1.Skip(e1 & 0xF);
+
+            ushort e2 = table[b2.PeekMasked(tableBits, mask)];
+            thirdOut[i] = (byte)(e2 >> 4);
+            b2.Skip(e2 & 0xF);
+
+            ushort e3 = table[b3.PeekMasked(tableBits, mask)];
+            fourthOut[i] = (byte)(e3 >> 4);
+            b3.Skip(e3 & 0xF);
+
+            i++;
+        }
+
+        for (int j = rest; j < firstOut.Length; j++)
+        {
+            ushort entry = table[b0.PeekMasked(tableBits, mask)];
+            firstOut[j] = (byte)(entry >> 4);
+            b0.Skip(entry & 0xF);
+        }
+
+        for (int j = rest; j < secondOut.Length; j++)
+        {
+            ushort entry = table[b1.PeekMasked(tableBits, mask)];
+            secondOut[j] = (byte)(entry >> 4);
+            b1.Skip(entry & 0xF);
+        }
+
+        for (int j = rest; j < thirdOut.Length; j++)
+        {
+            ushort entry = table[b2.PeekMasked(tableBits, mask)];
+            thirdOut[j] = (byte)(entry >> 4);
+            b2.Skip(entry & 0xF);
+        }
+
+        if (!b0.IsExhausted || !b1.IsExhausted || !b2.IsExhausted || !b3.IsExhausted)
+            throw FormatError.Corrupted("Zstandard Huffman stream was not consumed exactly.");
     }
 
     /// <summary>Decodes the weights with two interleaved FSE states that share one table, until the stream runs dry.</summary>

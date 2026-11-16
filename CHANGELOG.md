@@ -49,6 +49,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   integer are decoded; other shapes stay unread.
 - The E57 reader decodes plain bit-packing only and names any other codec of the scan in the rejection message. The point
   prototype limit is the packet header bound of 65535 fields.
+- The Zstandard decoder is faster on Huffman-heavy data: the four Huffman streams of a block now decode interleaved
+  instead of one after another, so independent bit readers overlap in the processor; the per-symbol mask is hoisted out
+  of the bit reader loop. No unsafe code, no weakened checks; the benchmark in `ZstdBenchmarkTests` shows the speed
+  next to the reference decoder (about 1.7 times slower on the benchmark payload, down from about 2).
 - The EdgeWise cluster position scale is now `PclReadOptions.EdgeWiseCoordinateScale`, so the caller states it; the
   default keeps the long-standing assumption (32768 units = 0.128 m).
 - The LAS exporter writes 1.4 with point formats 6 to 8 (`PclLasOptions` selects version, format, scale and offset);

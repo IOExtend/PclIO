@@ -2,7 +2,8 @@
 
 PclIO has no third-party runtime components: the published packages depend on no other package, and no third-party source code or binaries are included. The Zstandard and Snappy decoders it needs are its own code, written from the public format specifications (RFC 8878 for Zstandard, including its XXH64 content checksum, and the Snappy format description).
 
-Development and build-time packages (xunit, xunit.runner.visualstudio, Microsoft.NET.Test.Sdk, Microsoft.SourceLink.GitHub) are not part of the published packages.
+Development and build-time packages (xunit, xunit.runner.visualstudio, Microsoft.NET.Test.Sdk, Microsoft.SourceLink.GitHub,
+and ZstdSharp.Port, a test-only benchmark reference for the Zstandard decoder) are not part of the published packages.
 
 ASTM E57, ASPRS LAS, Zstandard, Snappy and the compound file (OLE2) container are names of file formats and standards. They are used only to say which formats PclIO reads or writes.
 
