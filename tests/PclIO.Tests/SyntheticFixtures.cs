@@ -528,35 +528,49 @@ internal static class SyntheticFixtures
         """;
 
     /// <summary>Little-endian uint16 distances in millimetres for the whole grid.</summary>
-    public static byte[] FaroDistances(ushort millimetres)
+    /// <param name="millimetres">The distance of every cell that holds a return.</param>
+    /// <param name="invalidCells">
+    /// Number of cells at the start of the grid that hold no return: the first half of them hold the value 0 and
+    /// the second half the value 0xFFFF.
+    /// </param>
+    public static byte[] FaroDistances(ushort millimetres, int invalidCells = 0)
     {
         byte[] data = new byte[FaroRows * FaroCols * 2];
-        for (int i = 0; i < FaroRows * FaroCols; i++) BinaryPrimitives.WriteUInt16LittleEndian(data.AsSpan(i * 2, 2), millimetres);
+        for (int i = 0; i < FaroRows * FaroCols; i++)
+        {
+            ushort value = millimetres;
+            if (i < invalidCells) value = i < (invalidCells / 2) ? (ushort)0 : (ushort)0xFFFF;
+            BinaryPrimitives.WriteUInt16LittleEndian(data.AsSpan(i * 2, 2), value);
+        }
+
         return data;
     }
 
     /// <summary>A synthetic scan folder with a parameter file and one data stream.</summary>
-    public static string WriteFaroFolder(TempDirectory dir, string? parameters = null, ushort millimetres = 2000)
+    public static string WriteFaroFolder(TempDirectory dir, string? parameters = null, ushort millimetres = 2000, int invalidCells = 0)
     {
         dir.WriteText(Path.Combine("scan", "Scans", "1", "Params"), parameters ?? FaroParams());
         byte[] records = new byte[FaroRows * FaroCols * 8];
+        byte[] distances = FaroDistances(millimetres, invalidCells);
         for (int i = 0; i < FaroRows * FaroCols; i++)
         {
-            BinaryPrimitives.WriteUInt16LittleEndian(records.AsSpan(i * 8, 2), millimetres);
+            Array.Copy(distances, i * 2, records, i * 8, 2);
             BinaryPrimitives.WriteUInt16LittleEndian(records.AsSpan((i * 8) + 2, 2), 1024);
         }
+
         dir.Write(Path.Combine("scan", "Scans", "1", "ScanDataStream0"), records);
         return dir.PathOf("scan");
     }
 
     /// <summary>A single-file container (.fls) with the parameter, distance and grey streams of one scan.</summary>
-    public static byte[] CreateSyntheticFlsContainer(string? parameters = null, ushort millimetres = 2000, bool withGrey = true)
+    public static byte[] CreateSyntheticFlsContainer(string? parameters = null, ushort millimetres = 2000, bool withGrey = true,
+        int invalidCells = 0)
     {
         var builder = new Ole2Builder();
         int scans = builder.AddStorage(0, "Scans");
         int one = builder.AddStorage(scans, "1");
         builder.AddStream(one, "Params", Encoding.ASCII.GetBytes(parameters ?? FaroParams()));
-        builder.AddStream(one, "Dist0", FaroDistances(millimetres));
+        builder.AddStream(one, "Dist0", FaroDistances(millimetres, invalidCells));
         if (withGrey) builder.AddStream(one, "Grey0", Enumerable.Range(0, FaroRows * FaroCols).Select(i => (byte)(i * 8)).ToArray());
         return builder.Build();
     }

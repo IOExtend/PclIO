@@ -930,6 +930,31 @@ public sealed class FormatTests
     }
 
     [Fact]
+    public void A_Faro_Scan_Reports_The_Number_Of_Points_That_A_Full_Read_Returns()
+    {
+        // Six of the 32 cells of the grid hold no return.
+        using var dir = new TempDirectory();
+        using var doc = PclFile.Open(dir.Write("scan.fls", SyntheticFixtures.CreateSyntheticFlsContainer(invalidCells: 6)));
+
+        var scan = Assert.IsType<FaroScan>(Assert.Single(doc.Scans));
+        Assert.Equal(32, scan.GridSize);
+        Assert.Equal(26, scan.PointCount);
+        Assert.Equal(scan.PointCount, scan.ReadPoints().LongCount());
+    }
+
+    [Fact]
+    public void A_Faro_Scan_Folder_Reports_The_Number_Of_Points_That_A_Full_Read_Returns()
+    {
+        using var dir = new TempDirectory();
+        using var doc = FaroFlsDocument.Open(SyntheticFixtures.WriteFaroFolder(dir, invalidCells: 6));
+
+        var scan = Assert.IsType<FaroScan>(Assert.Single(doc.Scans));
+        Assert.Equal(32, scan.GridSize);
+        Assert.Equal(26, scan.PointCount);
+        Assert.Equal(scan.PointCount, scan.ReadPoints().LongCount());
+    }
+
+    [Fact]
     public void Faro_Without_Stored_Model_And_Serial_Reports_Them_As_Unknown_With_A_Warning()
     {
         string parameters = """

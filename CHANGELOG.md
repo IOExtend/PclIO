@@ -18,6 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The Leica reader counts the data it cannot use (the points that are dropped as padding, the compressed streams that are
   skipped and the point data that ends at an unknown block) and reports it in the warnings of the document. The new
   `PclReadOptions.Strict` makes such a read fail with `InvalidDataException` instead.
+- The point count of a FARO scan is now the number of valid returns, which is what a full read returns. The size of the
+  scan grid is available as `FaroScan.GridSize`.
 
 ## [0.1.0] - 2026-11-15
 
