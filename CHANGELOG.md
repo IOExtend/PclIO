@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Leica containers that assign their points to their setups now open as one scan per setup, with the id and the name of the
   setup. A container that does not assign its points to its setups still opens as one scan, with a warning.
+- The pose and the bounds of a Leica setup are read from the record of the setup and applied to its points, unless
+  `ApplyTransform` is false. A record that does not hold usable values is left unread, and the setup keeps an unknown pose.
 
 ## [0.1.0] - 2026-11-15
 

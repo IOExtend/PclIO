@@ -352,8 +352,9 @@ public sealed class FormatTests
         Assert.Equal(5, doc.ReadAllPoints().Count());
         Assert.Equal([2L, 2L, 1L], doc.Scans.Select(s => s.PointCount));
 
-        // Every setup holds the points of its own block.
+        // Every setup holds the points of its own block, in the frame of the container.
         var expected = new List<PclVector3>();
+        int setup = 0;
         foreach (var group in new[] { 2, 2, 1 })
         {
             for (int i = 0; i < group; i++)
@@ -364,10 +365,58 @@ public sealed class FormatTests
                     SyntheticFixtures.LeicaOriginY + (written.Y * SyntheticFixtures.LeicaScale),
                     SyntheticFixtures.LeicaOriginZ + (written.Z * SyntheticFixtures.LeicaScale)));
             }
+
+            setup++;
         }
 
-        var all = doc.ReadAllPoints().Select(p => p.Position).ToList();
+        var all = doc.ReadAllPoints(NoTransform).Select(p => p.Position).ToList();
         for (int i = 0; i < expected.Count; i++) AssertNear(expected[i], all[i]);
+    }
+
+    [Fact]
+    public void A_Lgsx_Setup_Reads_Its_Pose_And_Its_Bounds_And_Applies_The_Pose()
+    {
+        using var dir = new TempDirectory();
+        using var doc = LgsxDocument.Open(dir.Write("site.lgsx",
+            SyntheticFixtures.CreateSyntheticLgsx(setupCount: 2, assignPointsToSetups: true)));
+
+        var first = doc.Scans[0];
+        var second = doc.Scans[1];
+
+        // Every setup record holds the translation and the bounds of its setup.
+        Assert.Equal(new PclVector3(1, 2, 3), first.Transform.Translation);
+        Assert.Equal(new PclVector3(2, 3, 4), second.Transform.Translation);
+        Assert.Equal(new PclBounds(
+            new PclVector3(SyntheticFixtures.LeicaOriginX, SyntheticFixtures.LeicaOriginY, SyntheticFixtures.LeicaOriginZ),
+            new PclVector3(
+                SyntheticFixtures.LeicaOriginX + (1023 * SyntheticFixtures.LeicaScale),
+                SyntheticFixtures.LeicaOriginY + (1023 * SyntheticFixtures.LeicaScale),
+                SyntheticFixtures.LeicaOriginZ + (1023 * SyntheticFixtures.LeicaScale))), first.Bounds);
+
+        // The pose moves the points; without it they stay as they are stored.
+        var moved = first.ReadPoints().ToList();
+        var raw = first.ReadPoints(NoTransform).ToList();
+        Assert.Equal(3, moved.Count);
+        for (int i = 0; i < moved.Count; i++)
+        {
+            AssertNear(new PclVector3(raw[i].X + 1, raw[i].Y + 2, raw[i].Z + 3), moved[i].Position);
+        }
+    }
+
+    [Fact]
+    public void A_Lgsx_Setup_With_A_Damaged_Record_Keeps_An_Unknown_Pose()
+    {
+        using var dir = new TempDirectory();
+        using var doc = LgsxDocument.Open(dir.Write("site.lgsx",
+            SyntheticFixtures.CreateSyntheticLgsx(setupCount: 2, assignPointsToSetups: true, damagedSetupRecord: true)));
+
+        // The record of the first setup holds a value that is not a number, so it is not read; the setups keep no
+        // points of their own and the container stays one scan.
+        var scan = Assert.Single(doc.Scans);
+        Assert.Equal("unified-cloud", scan.Id);
+        Assert.Equal(PclTransform.Identity, scan.Transform);
+        Assert.True(scan.Bounds.IsEmpty);
+        Assert.Contains(doc.Warnings, w => w.Contains("points are not assigned to them", StringComparison.Ordinal));
     }
 
     [Fact]
