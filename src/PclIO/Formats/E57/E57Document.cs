@@ -11,11 +11,12 @@ namespace PclIO.Formats.E57;
 /// Supported: the file header, the checksummed page layout, the XML section, scan names, ids, Cartesian bounds and
 /// poses (translation and rotation quaternion), and points stored as uncompressed bit-packed streams where
 /// Cartesian X/Y/Z are single or double precision floats or scaled integers (raw value times scale plus offset),
-/// or spherical range, azimuth and elevation converted to Cartesian points, and colour or intensity are Integer
-/// fields in the range 0..255.
+/// or spherical range, azimuth and elevation converted to Cartesian points. Colour and intensity are Integer fields
+/// with a range from zero (8, 16 or 32 bits), Float fields, or scaled-integer intensity; per-point validity flags
+/// skip invalid points and clear invalid channels. Images are not read.
 /// Not supported (reported with <see cref="NotSupportedException"/> when points are read): integer coordinates,
 /// other codecs, and packets whose streams hold different record counts.
-/// Spherical coordinates, per-point invalid-state flags, images and 2D data are not interpreted.
+/// Per-point validity flags of another shape, images and 2D data are not interpreted.
 /// </summary>
 public sealed class E57Document : PclDocument
 {
@@ -318,8 +319,32 @@ internal sealed class E57PointLayout
     /// <summary>Stream index of red, green and blue, or all -1 when colour is not decoded.</summary>
     public int[] Color { get; } = [-1, -1, -1];
 
+    /// <summary>Bytes per record of the colour streams: 1, 2 or 4 for Integer ranges from zero.</summary>
+    public int[] ColorSize { get; } = [1, 1, 1];
+
+    /// <summary>Maximum of the colour ranges; an 8-bit channel holds the raw value times 255 divided by it.</summary>
+    public ulong[] ColorMax { get; } = [255, 255, 255];
+
     /// <summary>Stream index of intensity, or -1 when intensity is not decoded.</summary>
     public int Intensity { get; private set; } = -1;
+
+    /// <summary>Bytes per record of the intensity stream.</summary>
+    public int IntensitySize { get; private set; } = 1;
+
+    /// <summary>True when intensity is an integer (raw value times scale plus offset); false for Float.</summary>
+    public bool IntensityScaled { get; private set; } = true;
+
+    /// <summary>True when the integer intensity range is not negative.</summary>
+    public bool IntensityUnsigned { get; private set; } = true;
+
+    /// <summary>Scale of an integer intensity (1 divided by the maximum for a plain Integer); 1 for Float.</summary>
+    public double IntensityScale { get; private set; } = 1.0 / 255.0;
+
+    /// <summary>Offset of a scaled integer intensity; 0 otherwise.</summary>
+    public double IntensityOffset { get; private set; }
+
+    /// <summary>Stream index of the validity flags (Cartesian point, spherical point, colour, intensity), or -1.</summary>
+    public int[] Invalid { get; } = [-1, -1, -1, -1];
 
     public bool HasColor => Color[0] >= 0;
 
@@ -366,6 +391,15 @@ internal sealed class E57PointLayout
                 "sphericalRange" => 0,
                 "sphericalAzimuth" => 1,
                 "sphericalElevation" => 2,
+                _ => -1,
+            };
+
+            int invalidKind = field.Name.LocalName switch
+            {
+                "cartesianInvalidState" => 0,
+                "sphericalInvalidState" => 1,
+                "isColorInvalid" => 2,
+                "isIntensityInvalid" => 3,
                 _ => -1,
             };
 
@@ -429,17 +463,35 @@ internal sealed class E57PointLayout
                 layout.SphericalScale[spherical] = scale;
                 layout.SphericalOffset[spherical] = offset;
             }
-            else if (IsByteRange(field))
+            else if (invalidKind >= 0)
+            {
+                // Validity flags hold one flag byte per record; any other shape stays unread like an unknown field.
+                if (layout.Invalid[invalidKind] < 0 && TryValidityField(field)) layout.Invalid[invalidKind] = i;
+            }
+            else if (field.Name.LocalName is "colorRed" or "colorGreen" or "colorBlue")
             {
                 int channel = field.Name.LocalName switch
                 {
                     "colorRed" => 0,
                     "colorGreen" => 1,
-                    "colorBlue" => 2,
-                    _ => -1,
+                    _ => 2,
                 };
-                if (channel >= 0 && layout.Color[channel] < 0) layout.Color[channel] = i;
-                else if (field.Name.LocalName == "intensity" && layout.Intensity < 0) layout.Intensity = i;
+                if (layout.Color[channel] < 0 && TryColorField(field, out int size, out ulong max))
+                {
+                    layout.Color[channel] = i;
+                    layout.ColorSize[channel] = size;
+                    layout.ColorMax[channel] = max;
+                }
+            }
+            else if (field.Name.LocalName == "intensity" && layout.Intensity < 0 &&
+                TryIntensityField(field, out int size, out bool isFloat, out bool unsigned, out double scale, out double offset))
+            {
+                layout.Intensity = i;
+                layout.IntensitySize = size;
+                layout.IntensityScaled = !isFloat;
+                layout.IntensityUnsigned = unsigned;
+                layout.IntensityScale = scale;
+                layout.IntensityOffset = offset;
             }
         }
 
@@ -462,8 +514,9 @@ internal sealed class E57PointLayout
 
         layout.IsSpherical = hasSpherical;
 
-        // Colour is all-or-nothing.
-        if (layout.Color.Any(c => c < 0)) Array.Fill(layout.Color, -1);
+        // Colour is all-or-nothing with one shared encoding.
+        if (layout.Color.Any(c => c < 0) || layout.ColorSize.Distinct().Count() > 1 || layout.ColorMax.Distinct().Count() > 1)
+            Array.Fill(layout.Color, -1);
         return layout;
     }
 
@@ -504,6 +557,31 @@ internal sealed class E57PointLayout
             (!double.TryParse(offsetText, NumberStyles.Float, CultureInfo.InvariantCulture, out offset) || !double.IsFinite(offset)))
             throw FormatError.Corrupted("E57 scaled integer offset is not a finite number.");
 
+        return IntegerByteSize(min, max, out unsigned);
+    }
+
+    // The binary size of an Integer field follows from its range like a ScaledInteger's: the smallest of 1, 2, 4 or
+    // 8 bytes that holds it. 0 when the field is no Integer or its range is invalid; auxiliary fields with such a
+    // range stay unread instead of failing the whole file.
+    private static int IntegerSize(XElement field, out long min, out long max, out bool unsigned)
+    {
+        min = 0;
+        max = 0;
+        unsigned = true;
+        if ((string?)field.Attribute("type") != "Integer") return 0;
+        if (!long.TryParse((string?)field.Attribute("minimum"), NumberStyles.Integer, CultureInfo.InvariantCulture, out min) ||
+            !long.TryParse((string?)field.Attribute("maximum"), NumberStyles.Integer, CultureInfo.InvariantCulture, out max) ||
+            min > max)
+            return 0;
+
+        return IntegerByteSize(min, max, out unsigned);
+    }
+
+    // The smallest of 1, 2, 4 or 8 bytes that holds every value from minimum to maximum, unsigned when the minimum
+    // is not negative and signed otherwise.
+    private static int IntegerByteSize(long min, long max, out bool unsigned)
+    {
+        unsigned = true;
         if (min >= 0)
         {
             if ((ulong)max <= 0xFF) return 1;
@@ -519,11 +597,68 @@ internal sealed class E57PointLayout
         return 8;
     }
 
-    // An Integer in 0..255 is bit-packed into exactly one byte per record.
-    private static bool IsByteRange(XElement field) =>
-        (string?)field.Attribute("type") == "Integer" &&
-        long.TryParse((string?)field.Attribute("minimum"), NumberStyles.Integer, CultureInfo.InvariantCulture, out long min) && min == 0 &&
-        long.TryParse((string?)field.Attribute("maximum"), NumberStyles.Integer, CultureInfo.InvariantCulture, out long max) && max == 255;
+    // A colour channel is an Integer range from zero with a byte-aligned maximum, decoded to 8 bits.
+    private static bool TryColorField(XElement field, out int size, out ulong max)
+    {
+        size = 0;
+        max = 0;
+        if (IntegerSize(field, out long min, out long rangeMax, out _) != 0 && min == 0 &&
+            (rangeMax == 0xFF || rangeMax == 0xFFFF || rangeMax == 0xFFFFFFFFL))
+        {
+            size = IntegerByteSize(min, rangeMax, out _);
+            max = (ulong)rangeMax;
+            return true;
+        }
+
+        return false;
+    }
+
+    // Intensity is a Float used as-is, a ScaledInteger decoded with its scale and offset, or an Integer range from
+    // zero normalized by its maximum. A malformed scaled intensity leaves the channel unread instead of failing the file.
+    private static bool TryIntensityField(XElement field, out int size, out bool isFloat, out bool unsigned, out double scale, out double offset)
+    {
+        size = 1;
+        isFloat = false;
+        unsigned = true;
+        scale = 1.0 / 255.0;
+        offset = 0;
+
+        int floatSize = FloatSize(field);
+        if (floatSize != 0)
+        {
+            size = floatSize;
+            isFloat = true;
+            scale = 1;
+            return true;
+        }
+
+        try
+        {
+            int scaledSize = ScaledIntegerSize(field, out scale, out offset, out unsigned);
+            if (scaledSize != 0)
+            {
+                size = scaledSize;
+                return true;
+            }
+        }
+        catch (InvalidDataException)
+        {
+            return false;
+        }
+
+        if (IntegerSize(field, out long min, out long max, out _) == 0 || min != 0 ||
+            (max != 0xFF && max != 0xFFFF && max != 0xFFFFFFFFL))
+            return false;
+
+        size = IntegerByteSize(min, max, out _);
+        scale = 1.0 / max;
+        return true;
+    }
+
+    // A validity flag is an Integer field that holds one flag byte per record. Any other shape stays unread like an
+    // unknown field, so files the reader cannot interpret keep today's behaviour instead of failing.
+    private static bool TryValidityField(XElement field) =>
+        IntegerSize(field, out _, out _, out _) == 1;
 }
 
 /// <summary>An individual scan inside an ASTM E57 file.</summary>
@@ -549,10 +684,10 @@ public sealed class E57Scan : PclScan
     /// <summary>Physical file offset of the compressed-vector section that holds the points, or 0 when there is none.</summary>
     public ulong FileOffset { get; }
 
-    /// <summary>True when the prototype has red, green and blue fields in the range 0..255.</summary>
+    /// <summary>True when the prototype has red, green and blue fields with a supported encoding.</summary>
     public override bool HasColors => _layout?.HasColor == true;
 
-    /// <summary>True when the prototype has an intensity field in the range 0..255.</summary>
+    /// <summary>True when the prototype has an intensity field with a supported encoding.</summary>
     public override bool HasIntensities => _layout is { Intensity: >= 0 };
 
     internal E57Scan(string id, string name, long pointCount, ulong fileOffset, PclBounds bounds, PclTransform transform, ulong pageSize, string filePath, E57PointLayout? layout, string? unsupportedReason)
@@ -570,7 +705,9 @@ public sealed class E57Scan : PclScan
     }
 
     /// <summary>
-    /// Streams the points of this scan. Intensity is the stored byte divided by 255.
+    /// Streams the points of this scan. Points flagged invalid by the validity fields of the standard are skipped;
+    /// a flagged colour or intensity leaves the point without that channel. Intensity is the stored value divided by
+    /// the maximum of its range, or the decoded value for Float and scaled fields.
     /// <see cref="PclReadOptions.SubsampleStep"/> is applied to the record index across the whole scan.
     /// </summary>
     /// <param name="options">Read options, or null for <see cref="PclReadOptions.Default"/>.</param>
@@ -647,21 +784,33 @@ public sealed class E57Scan : PclScan
             {
                 if ((consumed + i) % step != 0) continue;
 
+                // A validity stream holds one flag byte per record of its packet; any other shape is not interpreted.
+                int pointInvalid = layout.IsSpherical ? layout.Invalid[1] : layout.Invalid[0];
+                bool skipInvalid = HonorsFlags(lengths, pointInvalid, records);
+                if (skipInvalid && pkt[starts[pointInvalid] + i] != 0) continue;
+
                 var coords = layout.IsSpherical
                     ? ReadSpherical(layout, pkt, starts, i)
                     : new PclVector3(ReadAxis(layout, pkt, starts, 0, i), ReadAxis(layout, pkt, starts, 1, i), ReadAxis(layout, pkt, starts, 2, i));
 
+                bool colorInvalid = HonorsFlags(lengths, layout.Invalid[2], records) && pkt[starts[layout.Invalid[2]] + i] != 0;
                 PclColor? color = null;
-                if (layout.HasColor)
+                if (layout.HasColor && !colorInvalid)
                 {
                     color = new PclColor(
-                        pkt[starts[layout.Color[0]] + i],
-                        pkt[starts[layout.Color[1]] + i],
-                        pkt[starts[layout.Color[2]] + i]);
+                        ReadColorChannel(pkt, starts[layout.Color[0]], i, layout.ColorSize[0], layout.ColorMax[0]),
+                        ReadColorChannel(pkt, starts[layout.Color[1]], i, layout.ColorSize[1], layout.ColorMax[1]),
+                        ReadColorChannel(pkt, starts[layout.Color[2]], i, layout.ColorSize[2], layout.ColorMax[2]));
                 }
 
+                bool intensityInvalid = HonorsFlags(lengths, layout.Invalid[3], records) && pkt[starts[layout.Invalid[3]] + i] != 0;
                 float? intensity = null;
-                if (layout.Intensity >= 0) intensity = pkt[starts[layout.Intensity] + i] / 255.0f;
+                if (layout.Intensity >= 0 && !intensityInvalid)
+                {
+                    intensity = layout.IntensityScaled
+                        ? (float)(ReadRawInteger(pkt, starts[layout.Intensity], layout.IntensitySize, i, layout.IntensityUnsigned) * layout.IntensityScale + layout.IntensityOffset)
+                        : (float)ReadCoordinate(pkt, starts[layout.Intensity], layout.IntensitySize, i);
+                }
 
                 var pt = new PclPoint(coords, Color: color, Intensity: intensity, Index: (ulong)yielded);
                 if (applyTransform) pt = pt with { Position = Transform.TransformPoint(pt.Position) };
@@ -702,10 +851,21 @@ public sealed class E57Scan : PclScan
 
         if (layout.HasColor)
         {
-            foreach (int stream in layout.Color) Agree(ref records, lengths[stream]);
+            for (int c = 0; c < 3; c++)
+            {
+                int size = layout.ColorSize[c];
+                int length = lengths[layout.Color[c]];
+                if (length % size != 0) throw FormatError.Corrupted("E57 colour stream holds a partial record.");
+                Agree(ref records, length / size);
+            }
         }
 
-        if (layout.Intensity >= 0) Agree(ref records, lengths[layout.Intensity]);
+        if (layout.Intensity >= 0)
+        {
+            int length = lengths[layout.Intensity];
+            if (length % layout.IntensitySize != 0) throw FormatError.Corrupted("E57 intensity stream holds a partial record.");
+            Agree(ref records, length / layout.IntensitySize);
+        }
         return records;
     }
 
@@ -749,10 +909,24 @@ public sealed class E57Scan : PclScan
             ? Bytes.ReadSingleLE(packet.AsSpan(start + index * 4, 4))
             : Bytes.ReadDoubleLE(packet.AsSpan(start + index * 8, 8));
 
-    // A raw value of the sized width, signed or unsigned as the range requires; the value is raw times scale plus offset.
-    private static double ReadScaledInteger(byte[] packet, int start, int size, int index, bool unsigned, double scale, double offset)
+    // A validity stream holds one flag byte per record of its packet; any other shape is not interpreted.
+    private static bool HonorsFlags(int[] lengths, int stream, int records) =>
+        stream >= 0 && lengths[stream] == records;
+
+    // An 8-bit channel holds the raw value times 255 divided by the maximum of its range.
+    private static byte ReadColorChannel(byte[] packet, int start, int index, int size, ulong max)
     {
-        double raw = (size, unsigned) switch
+        double raw = ReadRawInteger(packet, start, size, index, unsigned: true);
+        return (byte)Math.Round(raw * 255.0 / max);
+    }
+
+    // A raw value of the sized width, signed or unsigned as the range requires; the value is raw times scale plus offset.
+    private static double ReadScaledInteger(byte[] packet, int start, int size, int index, bool unsigned, double scale, double offset) =>
+        ReadRawInteger(packet, start, size, index, unsigned) * scale + offset;
+
+    // A raw value of the sized width, signed or unsigned as the range requires.
+    private static double ReadRawInteger(byte[] packet, int start, int size, int index, bool unsigned) =>
+        (size, unsigned) switch
         {
             (1, true) => packet[start + index],
             (1, false) => (sbyte)packet[start + index],
@@ -763,6 +937,4 @@ public sealed class E57Scan : PclScan
             (8, true) => Bytes.ReadUInt64LE(packet.AsSpan(start + index * 8, 8)),
             _ => Bytes.ReadInt64LE(packet.AsSpan(start + index * 8, 8)),
         };
-        return raw * scale + offset;
-    }
 }

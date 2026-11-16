@@ -44,6 +44,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from the range of the field).
 - Spherical coordinates of E57 scans are converted to Cartesian points as the standard defines; scaled integers work for
   the spherical components too.
+- Points that the E57 validity flags mark as invalid are skipped, and flagged colour or intensity channels are left empty.
+  Colour with a wider Integer range from zero (16 or 32 bits) and intensity as a wider Integer, a Float or a scaled
+  integer are decoded; other shapes stay unread.
 
 ## [0.1.0] - 2026-11-15
 

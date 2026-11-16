@@ -59,7 +59,7 @@ drop points that fail a plausibility rule (see the README), so a scan can yield 
 
 | Reader | `PointCount` |
 |---|---|
-| E57 | Declared by the file. It is not checked against the point data until the points are read. |
+| E57 | Declared by the file. It is not checked against the point data until the points are read. Points that the validity flags mark as invalid are skipped, so a read can yield fewer points. |
 | ReCap scan | Declared in the header. It is not checked against the node table. The node layout of major version 3 is decoded; a file of another version is listed but its points cannot be read (`RcsScanDocument.DecodedNodeLayoutVersions` names the decoded versions). |
 | ReCap project | Declared by the project manifest; 0 when the manifest states none. |
 | Leica | The number of points the container states, when it states one; otherwise it is computed. The computed value needs the first access to decode all of the point data and caches the result, which can be slow on large files; the access throws `InvalidDataException` for corrupt data. A container that assigns its points to its setups has one scan per setup, each with the id and the name of its setup; otherwise the container is one scan with the id `unified-cloud`. The `Transform` and the `Bounds` of a setup are read from its record and are empty when the record does not hold them. |

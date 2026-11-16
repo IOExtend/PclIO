@@ -703,6 +703,271 @@ public sealed class FormatTests
         Assert.Throws<InvalidDataException>(() => doc.Scans[0].ReadPoints().ToList());
     }
 
+    [Fact]
+    public void E57_With_Validity_Flags_Skips_Invalid_Points_And_Channels()
+    {
+        const string prototype = """
+            <prototype type="Structure">
+              <cartesianX type="Float" precision="single"/>
+              <cartesianY type="Float" precision="single"/>
+              <cartesianZ type="Float" precision="single"/>
+              <cartesianInvalidState type="Integer" minimum="0" maximum="1"/>
+              <colorRed type="Integer" minimum="0" maximum="255"/>
+              <colorGreen type="Integer" minimum="0" maximum="255"/>
+              <colorBlue type="Integer" minimum="0" maximum="255"/>
+              <intensity type="Integer" minimum="0" maximum="255"/>
+              <isColorInvalid type="Integer" minimum="0" maximum="1"/>
+              <isIntensityInvalid type="Integer" minimum="0" maximum="1"/>
+            </prototype>
+            """;
+        byte[] floats(float a, float b, float c) => [.. BitConverter.GetBytes(a), .. BitConverter.GetBytes(b), .. BitConverter.GetBytes(c)];
+        var spec = new E57Spec
+        {
+            PrototypeXml = prototype,
+            Points = [],
+            RecordCount = 3,
+            RawPackets = E57Spec.DataPacket([
+                floats(1, 2, 3), floats(4, 5, 6), floats(7, 8, 9),
+                [0, 1, 0],
+                [10, 40, 70], [20, 50, 80], [30, 60, 90],
+                [100, 110, 120],
+                [0, 0, 1],
+                [1, 0, 0],
+            ]),
+        };
+        using var dir = new TempDirectory();
+        using var doc = E57Document.Open(dir.Write("flags.e57", spec.Build()));
+
+        var points = doc.Scans[0].ReadPoints(NoTransform).ToList();
+
+        Assert.Equal(2, points.Count);
+        Assert.Equal([0UL, 1UL], points.Select(p => p.Index));
+        AssertNear(new PclVector3(1, 4, 7), points[0].Position);
+        AssertNear(new PclVector3(3, 6, 9), points[1].Position);
+        Assert.Equal(new PclColor(10, 20, 30), points[0].Color);
+        Assert.Null(points[0].Intensity);
+        Assert.Null(points[1].Color);
+        Assert.Equal(120 / 255.0f, points[1].Intensity);
+    }
+
+    [Fact]
+    public void E57_With_A_Spherical_Validity_Flag_Skips_Invalid_Points()
+    {
+        const string prototype = """
+            <prototype type="Structure">
+              <sphericalRange type="Float" precision="single"/>
+              <sphericalAzimuth type="Float" precision="single"/>
+              <sphericalElevation type="Float" precision="single"/>
+              <sphericalInvalidState type="Integer" minimum="0" maximum="1"/>
+            </prototype>
+            """;
+        byte[] rs = [.. BitConverter.GetBytes(2.0f), .. BitConverter.GetBytes(2.0f)];
+        byte[] azs = [.. BitConverter.GetBytes(0.0f), .. BitConverter.GetBytes(0.0f)];
+        byte[] els = [.. BitConverter.GetBytes(0.0f), .. BitConverter.GetBytes(0.0f)];
+        var spec = new E57Spec { PrototypeXml = prototype, Points = [], RecordCount = 2, RawPackets = E57Spec.DataPacket([rs, azs, els, [1, 0]]) };
+        using var dir = new TempDirectory();
+        using var doc = E57Document.Open(dir.Write("spherical-flags.e57", spec.Build()));
+
+        var point = Assert.Single(doc.Scans[0].ReadPoints(NoTransform));
+        AssertNear(new PclVector3(0, 2, 0), point.Position);
+    }
+
+    [Fact]
+    public void E57_With_Sixteen_Bit_Colour_Is_Decoded()
+    {
+        const string prototype = """
+            <prototype type="Structure">
+              <cartesianX type="Float" precision="single"/>
+              <cartesianY type="Float" precision="single"/>
+              <cartesianZ type="Float" precision="single"/>
+              <colorRed type="Integer" minimum="0" maximum="65535"/>
+              <colorGreen type="Integer" minimum="0" maximum="65535"/>
+              <colorBlue type="Integer" minimum="0" maximum="65535"/>
+            </prototype>
+            """;
+        byte[] floats(float a, float b) => [.. BitConverter.GetBytes(a), .. BitConverter.GetBytes(b)];
+        byte[] words(ushort a, ushort b) => [.. BitConverter.GetBytes(a), .. BitConverter.GetBytes(b)];
+        var spec = new E57Spec
+        {
+            PrototypeXml = prototype,
+            Points = [],
+            RecordCount = 2,
+            RawPackets = E57Spec.DataPacket([floats(1, 2), floats(1, 2), floats(1, 2), words(0, 257), words(0, 257), words(0, 65535)]),
+        };
+        using var dir = new TempDirectory();
+        using var doc = E57Document.Open(dir.Write("color16.e57", spec.Build()));
+
+        var scan = Assert.Single(doc.Scans);
+        Assert.True(scan.HasColors);
+
+        var points = scan.ReadPoints(NoTransform).ToList();
+        Assert.Equal(new PclColor(0, 0, 0), points[0].Color);
+        Assert.Equal(new PclColor(1, 1, 255), points[1].Color);
+    }
+
+    [Fact]
+    public void E57_With_Float_And_Scaled_Integer_Intensity_Is_Decoded()
+    {
+        const string floatPrototype = """
+            <prototype type="Structure">
+              <cartesianX type="Float" precision="single"/>
+              <cartesianY type="Float" precision="single"/>
+              <cartesianZ type="Float" precision="single"/>
+              <intensity type="Float" precision="single"/>
+            </prototype>
+            """;
+        byte[] floats(float a, float b) => [.. BitConverter.GetBytes(a), .. BitConverter.GetBytes(b)];
+        var floatSpec = new E57Spec
+        {
+            PrototypeXml = floatPrototype,
+            Points = [],
+            RecordCount = 2,
+            RawPackets = E57Spec.DataPacket([floats(1, 2), floats(1, 2), floats(1, 2), floats(0.5f, 1.0f)]),
+        };
+
+        const string scaledPrototype = """
+            <prototype type="Structure">
+              <cartesianX type="Float" precision="single"/>
+              <cartesianY type="Float" precision="single"/>
+              <cartesianZ type="Float" precision="single"/>
+              <intensity type="ScaledInteger" minimum="0" maximum="1000" scale="0.001"/>
+            </prototype>
+            """;
+        byte[] words(ushort a, ushort b) => [.. BitConverter.GetBytes(a), .. BitConverter.GetBytes(b)];
+        var scaledSpec = new E57Spec
+        {
+            PrototypeXml = scaledPrototype,
+            Points = [],
+            RecordCount = 2,
+            RawPackets = E57Spec.DataPacket([floats(1, 2), floats(1, 2), floats(1, 2), words(0, 500)]),
+        };
+
+        using var dir = new TempDirectory();
+        using var floatDoc = E57Document.Open(dir.Write("float-intensity.e57", floatSpec.Build()));
+        using var scaledDoc = E57Document.Open(dir.Write("scaled-intensity.e57", scaledSpec.Build()));
+
+        Assert.True(floatDoc.Scans[0].HasIntensities);
+        Assert.True(scaledDoc.Scans[0].HasIntensities);
+
+        var floatPoints = floatDoc.Scans[0].ReadPoints(NoTransform).ToList();
+        Assert.Equal(0.5f, floatPoints[0].Intensity);
+        Assert.Equal(1.0f, floatPoints[1].Intensity);
+
+        var scaledPoints = scaledDoc.Scans[0].ReadPoints(NoTransform).ToList();
+        Assert.Equal(0.0f, scaledPoints[0].Intensity);
+        Assert.Equal(0.5f, scaledPoints[1].Intensity);
+    }
+
+    [Fact]
+    public void E57_With_Mixed_Colour_Encodings_Reports_No_Colour()
+    {
+        const string prototype = """
+            <prototype type="Structure">
+              <cartesianX type="Float" precision="single"/>
+              <cartesianY type="Float" precision="single"/>
+              <cartesianZ type="Float" precision="single"/>
+              <colorRed type="Integer" minimum="0" maximum="255"/>
+              <colorGreen type="Integer" minimum="0" maximum="65535"/>
+              <colorBlue type="Integer" minimum="0" maximum="255"/>
+            </prototype>
+            """;
+        byte[] floats(float a, float b) => [.. BitConverter.GetBytes(a), .. BitConverter.GetBytes(b)];
+        var spec = new E57Spec
+        {
+            PrototypeXml = prototype,
+            Points = [],
+            RecordCount = 2,
+            RawPackets = E57Spec.DataPacket([floats(1, 2), floats(1, 2), floats(1, 2), [0, 0], [0, 0], [0, 0]]),
+        };
+        using var dir = new TempDirectory();
+        using var doc = E57Document.Open(dir.Write("mixed.e57", spec.Build()));
+
+        // The colour encodings differ, so the scan is listed without colour and reads its positions.
+        var scan = Assert.Single(doc.Scans);
+        Assert.False(scan.HasColors);
+        Assert.Equal(2, scan.ReadPoints(NoTransform).Count());
+    }
+
+    [Fact]
+    public void E57_With_A_Validity_Stream_Of_Another_Shape_Returns_All_Points()
+    {
+        // A validity stream that does not hold one flag byte per record is not interpreted.
+        const string prototype = """
+            <prototype type="Structure">
+              <cartesianX type="Float" precision="single"/>
+              <cartesianY type="Float" precision="single"/>
+              <cartesianZ type="Float" precision="single"/>
+              <cartesianInvalidState type="Integer" minimum="0" maximum="1"/>
+            </prototype>
+            """;
+        byte[] floats(float a, float b) => [.. BitConverter.GetBytes(a), .. BitConverter.GetBytes(b)];
+        var spec = new E57Spec
+        {
+            PrototypeXml = prototype,
+            Points = [],
+            RecordCount = 2,
+            RawPackets = E57Spec.DataPacket([floats(1, 2), floats(1, 2), floats(1, 2), [1]]),
+        };
+        using var dir = new TempDirectory();
+        using var doc = E57Document.Open(dir.Write("flags.e57", spec.Build()));
+
+        Assert.Equal(2, doc.Scans[0].ReadPoints(NoTransform).Count());
+    }
+
+    [Fact]
+    public void E57_With_A_Multi_Byte_Validity_Range_Returns_All_Points()
+    {
+        // Only one-byte validity flags are honoured.
+        const string prototype = """
+            <prototype type="Structure">
+              <cartesianX type="Float" precision="single"/>
+              <cartesianY type="Float" precision="single"/>
+              <cartesianZ type="Float" precision="single"/>
+              <cartesianInvalidState type="Integer" minimum="0" maximum="1000"/>
+            </prototype>
+            """;
+        byte[] floats(float a, float b) => [.. BitConverter.GetBytes(a), .. BitConverter.GetBytes(b)];
+        byte[] words(ushort a, ushort b) => [.. BitConverter.GetBytes(a), .. BitConverter.GetBytes(b)];
+        var spec = new E57Spec
+        {
+            PrototypeXml = prototype,
+            Points = [],
+            RecordCount = 2,
+            RawPackets = E57Spec.DataPacket([floats(1, 2), floats(1, 2), floats(1, 2), words(1, 1)]),
+        };
+        using var dir = new TempDirectory();
+        using var doc = E57Document.Open(dir.Write("flags.e57", spec.Build()));
+
+        Assert.Equal(2, doc.Scans[0].ReadPoints(NoTransform).Count());
+    }
+
+    [Fact]
+    public void E57_With_A_Partial_Colour_Record_Is_Rejected()
+    {
+        const string prototype = """
+            <prototype type="Structure">
+              <cartesianX type="Float" precision="single"/>
+              <cartesianY type="Float" precision="single"/>
+              <cartesianZ type="Float" precision="single"/>
+              <colorRed type="Integer" minimum="0" maximum="65535"/>
+              <colorGreen type="Integer" minimum="0" maximum="65535"/>
+              <colorBlue type="Integer" minimum="0" maximum="65535"/>
+            </prototype>
+            """;
+        byte[] floats(float a, float b) => [.. BitConverter.GetBytes(a), .. BitConverter.GetBytes(b)];
+        var spec = new E57Spec
+        {
+            PrototypeXml = prototype,
+            Points = [],
+            RecordCount = 2,
+            RawPackets = E57Spec.DataPacket([floats(1, 2), floats(1, 2), floats(1, 2), floats(1, 2)[..3], floats(1, 2), floats(1, 2)]),
+        };
+        using var dir = new TempDirectory();
+        using var doc = E57Document.Open(dir.Write("partial.e57", spec.Build()));
+
+        Assert.Throws<InvalidDataException>(() => doc.Scans[0].ReadPoints().ToList());
+    }
+
     // ---- Leica -----------------------------------------------------------------------------------------------
 
     [Fact]
