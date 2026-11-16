@@ -629,10 +629,15 @@ public sealed class LgsxScan : PclScan
     /// keep consecutive <see cref="PclPoint.Index"/> values.
     /// </para>
     /// <para>
+    /// With <see cref="PclReadOptions.Blocks"/> only the blocks of the scan in that range are read; without it all
+    /// of them are. With <see cref="PclReadOptions.MaxDegreeOfParallelism"/> above one the blocks decode in parallel
+    /// and the points still come out in file order; only the blocks of the scan are ever held decoded at once in the
+    /// sequential read, while the parallel read holds the decoded points of the selected blocks.
+    /// </para>
+    /// <para>
     /// Data that the reader cannot use is counted and reported in the warnings of the document: the points that were
-    /// dropped as padding, the compressed streams that were skipped because they are too large, the point blocks that
-    /// carry no positions or whose frame list ends before the block does, and the point data that ends at a block the
-    /// reader does not know. With <see cref="PclReadOptions.Strict"/> the read fails with
+    /// dropped as padding, the compressed streams that were skipped because they are too large and the point data
+    /// that ends at a block the reader does not know. With <see cref="PclReadOptions.Strict"/> the read fails with
     /// <see cref="InvalidDataException"/> instead of the warning.
     /// </para>
     /// </remarks>
@@ -651,92 +656,40 @@ public sealed class LgsxScan : PclScan
         // The counters describe this read alone; they start at zero every time.
         var state = new ReadState();
 
-        using var fs = File.OpenRead(_filePath);
-        foreach (var block in ReadBlocks(fs, state))
+        if (options.MaxDegreeOfParallelism > 1)
         {
-            var frames = block.Frames;
-            byte[] p0 = frames[0];
-            byte[] p1 = frames[1];
-            byte[] p2 = frames[2];
-            byte[] p3 = frames[3];
+            foreach (var pt in ReadPointsParallelOrdered(options, step, targetCount, state)) yield return pt;
+            yield break;
+        }
 
-            // Optional channels follow the position planes; normals are the last three planes.
-            byte[][]? colPlanes = frames.Count >= ColorFrames ? [frames[12], frames[13]] : null;
-            byte[][]? intPlanes = frames.Count >= IntensityFrames ? [frames[14], frames[15]] : null;
-            byte[][]? normPlanes = frames.Count >= NormalFrames ? [frames[^3], frames[^2], frames[^1]] : null;
+        using var fs = File.OpenRead(_filePath);
+        var chain = ScanBlockChain(fs);
+        SetChainEnd(fs, state, chain);
+        var selected = ApplyBlockRange(chain.ScanChain, options.Blocks);
+        long decodedLimit = DecodedAllowanceBytes + (fs.Length * DecodedBytesPerFileByte);
+        long decodedBytes = 0;
 
-            int numPoints = Math.Min(p0.Length, Math.Min(p1.Length, Math.Min(p2.Length, p3.Length)));
+        foreach (var (blockStart, blockLength) in selected)
+        {
+            var (block, added, skippedStreams, unusable, incomplete) = DecodeBlock(fs, blockStart, blockLength);
+            state.SkippedStreams += skippedStreams;
+            state.UnusableBlocks += unusable;
+            state.IncompleteBlocks += incomplete;
 
-            for (int i = 0; i < numPoints; i++)
+            // Every decoded block counts toward the total, including one that carries no positions: many small
+            // blocks that each expand a lot would otherwise make the file cost unbounded time.
+            decodedBytes += added;
+            if (decodedBytes > decodedLimit)
+                throw FormatError.Corrupted("the point data decompresses to more than the accepted total size.");
+
+            if (block == null) continue;
+            state.BlocksRead++;
+
+            var points = UnpackBlock(block, step, options.ApplyTransform, Transform, (ulong)yielded, out long dropped);
+            state.DroppedPoints += dropped;
+
+            foreach (var pt in points)
             {
-                if (i % step != 0) continue;
-
-                uint val = (uint)(p0[i] | (p1[i] << 8) | (p2[i] << 16) | (p3[i] << 24));
-                if (val == 0 && i > 0 && p0[i] == 0 && p1[i] == 0)
-                {
-                    // The slot holds no point: it is padding or a point at the origin of the block.
-                    state.DroppedPoints++;
-                    continue;
-                }
-
-                // Unpack the three 10-bit coordinates from the packed code.
-                uint xm = 0, ym = 0, zm = 0;
-                for (int b = 0; b < 10; b++)
-                {
-                    xm |= ((val >> (b * 3)) & 1) << b;
-                    ym |= ((val >> (b * 3 + 1)) & 1) << b;
-                    zm |= ((val >> (b * 3 + 2)) & 1) << b;
-                }
-
-                double x = block.MinX + (xm * block.ScaleX);
-                double y = block.MinY + (ym * block.ScaleY);
-                double z = block.MinZ + (zm * block.ScaleZ);
-
-                // 16-bit packed colour; zero means no colour.
-                PclColor? color = null;
-                if (colPlanes != null && i < colPlanes[0].Length && i < colPlanes[1].Length)
-                {
-                    ushort cval = (ushort)(colPlanes[0][i] | (colPlanes[1][i] << 8));
-                    if (cval != 0)
-                    {
-                        byte red = (byte)(((cval >> 11) & 0x1F) * 255 / 31);
-                        byte green = (byte)(((cval >> 5) & 0x3F) * 255 / 63);
-                        byte blue = (byte)((cval & 0x1F) * 255 / 31);
-                        color = new PclColor(red, green, blue);
-                    }
-                }
-
-                // 16-bit intensity; unknown when the plane is absent.
-                float? intensity = null;
-                if (intPlanes != null && i < intPlanes[0].Length && i < intPlanes[1].Length)
-                {
-                    ushort ival = (ushort)(intPlanes[0][i] | (intPlanes[1][i] << 8));
-                    intensity = ival / 65535.0f;
-                }
-
-                // Signed-byte components; all zero means no normal.
-                PclVector3? normal = null;
-                if (normPlanes != null && i < normPlanes[0].Length && i < normPlanes[1].Length && i < normPlanes[2].Length)
-                {
-                    sbyte nx = (sbyte)normPlanes[0][i];
-                    sbyte ny = (sbyte)normPlanes[1][i];
-                    sbyte nz = (sbyte)normPlanes[2][i];
-                    if (nx != 0 || ny != 0 || nz != 0)
-                    {
-                        normal = new PclVector3(nx / 127.0, ny / 127.0, nz / 127.0);
-                    }
-                }
-
-                var pt = new PclPoint(
-                    new PclVector3(x, y, z),
-                    Color: color,
-                    Intensity: intensity,
-                    Normal: normal,
-                    Index: (ulong)yielded);
-
-                if (options.ApplyTransform)
-                    pt = pt with { Position = Transform.TransformPoint(pt.Position) };
-
                 yield return pt;
                 yielded++;
                 if (yielded >= targetCount) yield break;
@@ -745,6 +698,141 @@ public sealed class LgsxScan : PclScan
 
         // The whole point data was read, so what it did not hold can be reported.
         ReportIncompleteData(options.Strict, state);
+    }
+
+    /// <summary>Decodes the selected blocks in parallel and yields their points in file order.</summary>
+    /// <remarks>
+    /// Every block decodes on its own stream, so blocks never share a file position. The whole selection is
+    /// decoded even when <see cref="PclReadOptions.MaxPoints"/> stops the reading early; <paramref name="targetCount"/>
+    /// only caps how many of the decoded points are yielded. Warnings and the strict failure behave as in the
+    /// sequential read, except that a truncated read (fewer points yielded than decoded) reports nothing.
+    /// </remarks>
+    private IEnumerable<PclPoint> ReadPointsParallelOrdered(PclReadOptions options, int step, long targetCount, ReadState state)
+    {
+        List<PclPoint>?[] perBlock;
+        using (var fs = File.OpenRead(_filePath))
+        {
+            var chain = ScanBlockChain(fs);
+            SetChainEnd(fs, state, chain);
+            var selected = ApplyBlockRange(chain.ScanChain, options.Blocks);
+            long decodedLimit = DecodedAllowanceBytes + (fs.Length * DecodedBytesPerFileByte);
+
+            perBlock = new List<PclPoint>?[selected.Count];
+            long dropped = 0, skipped = 0, blocks = 0, decodedTotal = 0, unusable = 0, incomplete = 0;
+            try
+            {
+                Parallel.For(0, selected.Count,
+                    new ParallelOptions { MaxDegreeOfParallelism = options.MaxDegreeOfParallelism },
+                    () => File.OpenRead(_filePath),
+                    (i, _, stream) =>
+                    {
+                        var (blockStart, blockLength) = selected[i];
+                        var (block, added, skippedStreams, u, inc) = DecodeBlock(stream, blockStart, blockLength);
+                        Interlocked.Add(ref skipped, skippedStreams);
+                        Interlocked.Add(ref unusable, u);
+                        Interlocked.Add(ref incomplete, inc);
+
+                        // Every decoded block counts toward the total, including one that carries no positions.
+                        if (Interlocked.Add(ref decodedTotal, added) > decodedLimit)
+                            throw FormatError.Corrupted("the point data decompresses to more than the accepted total size.");
+
+                        if (block == null)
+                        {
+                            perBlock[i] = [];
+                        }
+                        else
+                        {
+                            perBlock[i] = UnpackBlock(block, step, options.ApplyTransform, Transform, 0, out long d);
+                            Interlocked.Add(ref dropped, d);
+                            Interlocked.Increment(ref blocks);
+                        }
+
+                        return stream;
+                    },
+                    static stream => stream.Dispose());
+            }
+            catch (AggregateException ex) when (ex.InnerExceptions.Count > 0)
+            {
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex.InnerExceptions[0]).Throw();
+                throw;
+            }
+
+            state.DroppedPoints = dropped;
+            state.SkippedStreams = skipped;
+            state.BlocksRead = blocks;
+            state.UnusableBlocks = unusable;
+            state.IncompleteBlocks = incomplete;
+        }
+
+        long yielded = 0;
+        foreach (var list in perBlock)
+        {
+            if (list == null) continue;
+            foreach (var pt in list)
+            {
+                if (yielded >= targetCount) yield break;
+                yield return pt with { Index = (ulong)yielded };
+                yielded++;
+            }
+        }
+
+        if (yielded >= targetCount) yield break;
+
+        // The whole selection was yielded, so what it did not hold can be reported.
+        ReportIncompleteData(options.Strict, state);
+    }
+
+    /// <summary>Chain of point blocks for this scan: the full payload chain and the scan's own blocks in file order.</summary>
+    private (List<(long Start, long Length)> FullChain, List<(long Start, long Length)> ScanChain, long PayloadEnd) ScanBlockChain(FileStream fs)
+    {
+        var full = LgsxDocument.ReadBlockChain(fs, _entry!);
+        long payloadEnd = (long)_entry!.Offset + (long)_entry.Size;
+        var scan = new List<(long Start, long Length)>(full.Count);
+        foreach (var item in full)
+            if (BelongsToScan(item.Start)) scan.Add(item);
+        return (full, scan, payloadEnd);
+    }
+
+    /// <summary>Slices a scan chain to a block range in file order; a range past the last block yields nothing.</summary>
+    private static List<(long Start, long Length)> ApplyBlockRange(List<(long Start, long Length)> scanChain, BlockRange? range)
+    {
+        if (range is null) return scanChain;
+        int start = range.Value.StartBlock;
+        if (start < 0) start = 0;
+        if (start >= scanChain.Count) return [];
+        int count = range.Value.BlockCount ?? (scanChain.Count - start);
+        if (count <= 0) return [];
+        count = Math.Min(count, scanChain.Count - start);
+        return scanChain.GetRange(start, count);
+    }
+
+    /// <summary>
+    /// Records whether the point data ends at a block the reader does not know, and how many blocks the payload
+    /// holds. The gap belongs to the payload, so only the unified scan or the scan that owns the last block reports
+    /// it. An empty chain means the very first chunk is unknown; when a full block could have fit there, that is the
+    /// same condition.
+    /// </summary>
+    private void SetChainEnd(FileStream fs, ReadState state,
+        (List<(long Start, long Length)> FullChain, List<(long Start, long Length)> ScanChain, long PayloadEnd) chain)
+    {
+        state.ChainBlocks = chain.FullChain.Count;
+
+        if (_blockStarts != null && (chain.FullChain.Count == 0 || !BelongsToScan(chain.FullChain[^1].Start)))
+            return;
+
+        if (chain.FullChain.Count > 0)
+        {
+            long lastEnd = chain.FullChain[^1].Start + chain.FullChain[^1].Length;
+            if (chain.PayloadEnd - lastEnd >= 8 + 128) state.ChainEndedEarly = true;
+        }
+        else
+        {
+            fs.Position = (long)_entry!.Offset;
+            byte[] payloadHeader = new byte[64];
+            fs.ReadExactly(payloadHeader);
+            long firstBlock = (long)_entry.Offset + Bytes.ReadUInt32LE(payloadHeader.AsSpan(0x20, 4));
+            if (chain.PayloadEnd - firstBlock >= 8 + 128) state.ChainEndedEarly = true;
+        }
     }
 
     /// <summary>
@@ -842,38 +930,231 @@ public sealed class LgsxScan : PclScan
                     state.BlocksRead++;
                     yield return new Block(scaleX, scaleY, scaleZ, minX, minY, minZ, frames);
                 }
-                else state.UnusableBlocks++;
             }
-            else state.UnusableBlocks++;
         }
 
         // Data that is left in the point data but that is not a point block means that the reader did not read
-        // everything the container holds. The gap belongs to the payload, so only the unified scan or the scan
-        // that owns the last block reports it, and the count is the count of the whole chain.
-        state.ChainBlocks = chain.Count;
-        if (_blockStarts == null || (chain.Count > 0 && BelongsToScan(chain[^1].Start)))
+        // everything the container holds.
+        if (chain.Count > 0)
         {
-            if (chain.Count > 0)
-            {
-                long lastEnd = chain[^1].Start + chain[^1].Length;
-                if (payloadEnd - lastEnd >= 8 + 128) state.ChainEndedEarly = true;
-            }
-            else
-            {
-                // An empty chain means the very first chunk is not a point block. When a full block could have
-                // fit there, the point data ends at a block the reader does not know, just as with a later one.
-                fs.Position = (long)_entry!.Offset;
-                byte[] payloadHeader = new byte[64];
-                fs.ReadExactly(payloadHeader);
-                long firstBlock = (long)_entry.Offset + Bytes.ReadUInt32LE(payloadHeader.AsSpan(0x20, 4));
-                if (payloadEnd - firstBlock >= 8 + 128) state.ChainEndedEarly = true;
-            }
+            long lastEnd = chain[^1].Start + chain[^1].Length;
+            if (payloadEnd - lastEnd >= 8 + 128) state.ChainEndedEarly = true;
         }
     }
 
     // A scan without its own blocks holds all of them; otherwise only the blocks the container assigned to it.
     private bool BelongsToScan(long blockStart) =>
         _blockStarts == null || Array.BinarySearch(_blockStarts, blockStart) >= 0;
+
+    /// <summary>Decodes one point block on its own stream without touching shared read state.</summary>
+    /// <returns>
+    /// The block with its planes, the decoded bytes, the skipped streams, and whether the block is unusable (fewer
+    /// than four planes) or its frame list is cut short; the block is null when it holds no positions.
+    /// </returns>
+    /// <exception cref="InvalidDataException">The block header or its planes are malformed or oversized.</exception>
+    private static (Block? Block, long DecodedBytes, long SkippedStreams, long Unusable, long Incomplete) DecodeBlock(FileStream fs, long blockStart, long blockLength)
+    {
+        if (blockStart < 0 || blockLength < 8 + 128 || blockStart + blockLength > fs.Length)
+            throw FormatError.Corrupted("point block range is outside the file.");
+
+        byte[] blockHeader = new byte[128];
+        fs.Position = blockStart + 8;
+        fs.ReadExactly(blockHeader);
+
+        double scaleX = Bytes.ReadDoubleLE(blockHeader.AsSpan(0x34, 8));
+        double scaleY = Bytes.ReadDoubleLE(blockHeader.AsSpan(0x3C, 8));
+        double scaleZ = Bytes.ReadDoubleLE(blockHeader.AsSpan(0x44, 8));
+        double minX = Bytes.ReadDoubleLE(blockHeader.AsSpan(0x4C, 8));
+        double minY = Bytes.ReadDoubleLE(blockHeader.AsSpan(0x54, 8));
+        double minZ = Bytes.ReadDoubleLE(blockHeader.AsSpan(0x5C, 8));
+
+        long blockEnd = blockStart + blockLength;
+
+        // Find the first compressed frame; its 8-byte length prefix precedes it.
+        byte[] searchBuf = new byte[(int)Math.Min(1024L, blockLength)];
+        fs.Position = blockStart + 8;
+        int bytesRead = fs.Read(searchBuf, 0, searchBuf.Length);
+        int firstFrame = -1;
+        for (int s = 0; s < bytesRead - 4; s++)
+        {
+            if (searchBuf.AsSpan(s, 4).SequenceEqual(FrameMagic))
+            {
+                firstFrame = s;
+                break;
+            }
+        }
+
+        if (firstFrame < 8) return (null, 0, 0, 1, 0);
+
+        long firstFrameOffset = blockStart + firstFrame;
+        var (frames, decodedBytes, skippedStreams, incomplete) = ReadAllFramesLocal(fs, firstFrameOffset, blockEnd);
+
+        // Blocks with fewer than four planes carry no positions.
+        if (frames.Count < 4) return (null, decodedBytes, skippedStreams, 1, incomplete);
+
+        if (!(double.IsFinite(scaleX) && scaleX > 0 && double.IsFinite(scaleY) && scaleY > 0 &&
+              double.IsFinite(scaleZ) && scaleZ > 0 &&
+              double.IsFinite(minX) && double.IsFinite(minY) && double.IsFinite(minZ)))
+            throw FormatError.Corrupted("point block has an invalid coordinate scale or origin.");
+
+        return (new Block(scaleX, scaleY, scaleZ, minX, minY, minZ, frames), decodedBytes, skippedStreams, 0, incomplete);
+    }
+
+    /// <summary>Unpacks the planes of one block into points, dropping padding slots. The first returned point gets <paramref name="baseIndex"/> and the rest keep consecutive values; <paramref name="dropped"/> counts dropped slots.</summary>
+    private static List<PclPoint> UnpackBlock(Block block, int step, bool applyTransform, PclTransform transform, ulong baseIndex, out long dropped)
+    {
+        var frames = block.Frames;
+        byte[] p0 = frames[0];
+        byte[] p1 = frames[1];
+        byte[] p2 = frames[2];
+        byte[] p3 = frames[3];
+
+        // Optional channels follow the position planes; normals are the last three planes.
+        byte[][]? colPlanes = frames.Count >= ColorFrames ? [frames[12], frames[13]] : null;
+        byte[][]? intPlanes = frames.Count >= IntensityFrames ? [frames[14], frames[15]] : null;
+        byte[][]? normPlanes = frames.Count >= NormalFrames ? [frames[^3], frames[^2], frames[^1]] : null;
+
+        int numPoints = Math.Min(p0.Length, Math.Min(p1.Length, Math.Min(p2.Length, p3.Length)));
+        var points = new List<PclPoint>(Math.Max(0, (numPoints + step - 1) / step));
+        dropped = 0;
+        ulong yielded = baseIndex;
+
+        for (int i = 0; i < numPoints; i++)
+        {
+            if (i % step != 0) continue;
+
+            uint val = (uint)(p0[i] | (p1[i] << 8) | (p2[i] << 16) | (p3[i] << 24));
+            if (val == 0 && i > 0 && p0[i] == 0 && p1[i] == 0)
+            {
+                // The slot holds no point: it is padding or a point at the origin of the block.
+                dropped++;
+                continue;
+            }
+
+            // Unpack the three 10-bit coordinates from the packed code.
+            uint xm = 0, ym = 0, zm = 0;
+            for (int b = 0; b < 10; b++)
+            {
+                xm |= ((val >> (b * 3)) & 1) << b;
+                ym |= ((val >> (b * 3 + 1)) & 1) << b;
+                zm |= ((val >> (b * 3 + 2)) & 1) << b;
+            }
+
+            double x = block.MinX + (xm * block.ScaleX);
+            double y = block.MinY + (ym * block.ScaleY);
+            double z = block.MinZ + (zm * block.ScaleZ);
+
+            // 16-bit packed colour; zero means no colour.
+            PclColor? color = null;
+            if (colPlanes != null && i < colPlanes[0].Length && i < colPlanes[1].Length)
+            {
+                ushort cval = (ushort)(colPlanes[0][i] | (colPlanes[1][i] << 8));
+                if (cval != 0)
+                {
+                    byte red = (byte)(((cval >> 11) & 0x1F) * 255 / 31);
+                    byte green = (byte)(((cval >> 5) & 0x3F) * 255 / 63);
+                    byte blue = (byte)((cval & 0x1F) * 255 / 31);
+                    color = new PclColor(red, green, blue);
+                }
+            }
+
+            // 16-bit intensity; unknown when the plane is absent.
+            float? intensity = null;
+            if (intPlanes != null && i < intPlanes[0].Length && i < intPlanes[1].Length)
+            {
+                ushort ival = (ushort)(intPlanes[0][i] | (intPlanes[1][i] << 8));
+                intensity = ival / 65535.0f;
+            }
+
+            // Signed-byte components; all zero means no normal.
+            PclVector3? normal = null;
+            if (normPlanes != null && i < normPlanes[0].Length && i < normPlanes[1].Length && i < normPlanes[2].Length)
+            {
+                sbyte nx = (sbyte)normPlanes[0][i];
+                sbyte ny = (sbyte)normPlanes[1][i];
+                sbyte nz = (sbyte)normPlanes[2][i];
+                if (nx != 0 || ny != 0 || nz != 0)
+                {
+                    normal = new PclVector3(nx / 127.0, ny / 127.0, nz / 127.0);
+                }
+            }
+
+            var pt = new PclPoint(
+                new PclVector3(x, y, z),
+                Color: color,
+                Intensity: intensity,
+                Normal: normal,
+                Index: yielded);
+
+            if (applyTransform)
+                pt = pt with { Position = transform.TransformPoint(pt.Position) };
+
+            points.Add(pt);
+            yielded++;
+        }
+
+        return points;
+    }
+
+    /// <summary>Reads the frames of one block without touching shared read state.</summary>
+    private static (List<byte[]> Frames, long DecodedBytes, long SkippedStreams, long Incomplete) ReadAllFramesLocal(FileStream fs, long offset, long maxOffset)
+    {
+        var list = new List<byte[]>();
+        long limit = Math.Min(maxOffset, fs.Length);
+        if (offset < 0 || offset + 8 >= limit) return (list, 0, 0, 0);
+
+        fs.Position = offset;
+        byte[] lenBuf = new byte[8];
+        long totalBytes = 0;
+        long skipped = 0;
+        long incomplete = 0;
+
+        while (fs.Position + 8 <= limit)
+        {
+            fs.ReadExactly(lenBuf);
+
+            // A zero length marks the end of the frame list.
+            ulong fLen = Bytes.ReadUInt64LE(lenBuf);
+            if (fLen == 0) break;
+
+            // A stream that is larger than the accepted size is skipped: the rest of the block is lost with it.
+            if (fLen > MaxCompressedFrameBytes)
+            {
+                skipped++;
+                break;
+            }
+
+            // A frame list that ends before the block does leaves the rest of the block unread.
+            if ((long)fLen > limit - fs.Position)
+            {
+                incomplete = 1;
+                break;
+            }
+
+            byte[] fData = new byte[(int)fLen];
+            fs.ReadExactly(fData);
+
+            if (!fData.AsSpan().StartsWith(FrameMagic))
+            {
+                incomplete = 1;
+                break;
+            }
+
+            if (list.Count >= MaxFramesPerBlock)
+                throw FormatError.Corrupted($"point block has more than {MaxFramesPerBlock} planes.");
+
+            // The size cap is checked against the frame's declared size before any allocation.
+            byte[] plane = ZstdDecoder.Decompress(fData, MaxFrameBytes);
+
+            totalBytes += plane.Length;
+            if (totalBytes > MaxBlockBytes)
+                throw FormatError.Corrupted($"point block decompresses to more than {MaxBlockBytes} bytes.");
+
+            list.Add(plane);
+        }
+
+        return (list, totalBytes, skipped, incomplete);
+    }
 
     private List<byte[]> ReadAllFrames(FileStream fs, long offset, long maxOffset, ReadState state)
     {
@@ -900,21 +1181,12 @@ public sealed class LgsxScan : PclScan
                 break;
             }
 
-            // A frame list that ends before the block does leaves the rest of the block unread.
-            if ((long)fLen > limit - fs.Position)
-            {
-                state.IncompleteBlocks++;
-                break;
-            }
+            if ((long)fLen > limit - fs.Position) break;
 
             byte[] fData = new byte[(int)fLen];
             fs.ReadExactly(fData);
 
-            if (!fData.AsSpan().StartsWith(FrameMagic))
-            {
-                state.IncompleteBlocks++;
-                break;
-            }
+            if (!fData.AsSpan().StartsWith(FrameMagic)) break;
 
             if (list.Count >= MaxFramesPerBlock)
                 throw FormatError.Corrupted($"point block has more than {MaxFramesPerBlock} planes.");

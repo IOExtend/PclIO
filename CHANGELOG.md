@@ -59,6 +59,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   1.2 with point format 2 stays the default and is byte-identical to before. A projected `EPSG:NNNN` coordinate system
   of the source is written as a GeoTIFF record for LAS 1.2 when asked; LAS 1.4 point formats 6 and above require WKT,
   which the exporter does not produce, so a 1.4 file carries no coordinate system record.
+- Leica scans read a block range with opt-in parallel decoding: the new `PclReadOptions.Blocks` selects the blocks of the
+  scan in file order (per scan) and the new `PclReadOptions.MaxDegreeOfParallelism` (default 1, sequential streaming)
+  decodes the selected blocks in parallel, keeping file order, consecutive `Index` values and `MaxPoints`/`SubsampleStep`
+  semantics. Other readers ignore both options. A damaged block fails the read in both paths (the parallel failure is
+  unwrapped, not an `AggregateException`); a truncated read reports no incomplete-data warning.
 
 ## [0.1.0] - 2026-11-15
 

@@ -1301,6 +1301,20 @@ public sealed class FormatTests
     }
 
     [Fact]
+    public void A_Lgsx_Parallel_Read_Reports_Unusable_Blocks_As_The_Sequential_Read_Does()
+    {
+        // Blocks that carry no positions are counted in both read paths; the parallel path must not drop them
+        // from the incomplete-data report.
+        using var dir = new TempDirectory();
+        using var doc = LgsxDocument.Open(dir.Write("site.lgsx",
+            SyntheticFixtures.CreateSyntheticLgsx(blockCount: 4, fewPlanes: true)));
+
+        var scan = Assert.Single(doc.Scans);
+        Assert.Empty(scan.ReadPoints(new PclReadOptions { MaxDegreeOfParallelism = 4 }));
+        Assert.Contains(doc.Warnings, w => w.Contains("4 point blocks were skipped because they hold fewer than four planes", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void Interleaved_Reads_Of_A_Lgsx_Scan_Keep_Their_Own_Counts()
     {
         // Two enumerators advance side by side; the counters of one read must not reset or mix with the other's.
@@ -1409,6 +1423,202 @@ public sealed class FormatTests
         Assert.Equal(2, scan.ReadPoints(new PclReadOptions { MaxPoints = 2 }).Count());
         Assert.Equal(3, scan.ReadPoints(new PclReadOptions { SubsampleStep = 2 }).Count());
         Assert.Empty(scan.ReadPoints(new PclReadOptions { MaxPoints = 0 }));
+    }
+
+    private static IReadOnlyList<LeicaSamplePoint> SixLeicaPoints =>
+    [
+        new(1, 2, 3),
+        new(4, 5, 6),
+        new(7, 8, 9),
+        new(10, 11, 12),
+        new(13, 14, 15),
+        new(16, 17, 18),
+    ];
+
+    private static List<PclVector3> ExpectedLeicaPositions(IReadOnlyList<LeicaSamplePoint> written) =>
+        [.. written.Select(p => new PclVector3(
+            SyntheticFixtures.LeicaOriginX + (p.X * SyntheticFixtures.LeicaScale),
+            SyntheticFixtures.LeicaOriginY + (p.Y * SyntheticFixtures.LeicaScale),
+            SyntheticFixtures.LeicaOriginZ + (p.Z * SyntheticFixtures.LeicaScale)))];
+
+    [Fact]
+    public void Lgsx_Range_Reads_Only_The_Selected_Blocks_In_File_Order()
+    {
+        using var dir = new TempDirectory();
+        using var doc = LgsxDocument.Open(dir.Write("multi.lgsx",
+            SyntheticFixtures.CreateSyntheticLgsx(SixLeicaPoints, blockCount: 3)));
+        var scan = Assert.Single(doc.Scans);
+        var expected = ExpectedLeicaPositions(SixLeicaPoints);
+
+        var middle = scan.ReadPoints(new PclReadOptions { Blocks = new BlockRange { StartBlock = 1, BlockCount = 1 } }).ToList();
+        Assert.Equal(2, middle.Count);
+        Assert.Equal([0UL, 1UL], middle.Select(p => p.Index));
+        AssertNear(expected[2], middle[0].Position);
+        AssertNear(expected[3], middle[1].Position);
+
+        var tail = scan.ReadPoints(new PclReadOptions { Blocks = new BlockRange { StartBlock = 2 } }).ToList();
+        Assert.Equal(2, tail.Count);
+        AssertNear(expected[4], tail[0].Position);
+        AssertNear(expected[5], tail[1].Position);
+    }
+
+    [Fact]
+    public void Lgsx_Range_Past_The_Last_Block_Yields_No_Points()
+    {
+        using var dir = new TempDirectory();
+        using var doc = LgsxDocument.Open(dir.Write("multi.lgsx",
+            SyntheticFixtures.CreateSyntheticLgsx(SixLeicaPoints, blockCount: 3)));
+        var scan = Assert.Single(doc.Scans);
+
+        Assert.Empty(scan.ReadPoints(new PclReadOptions { Blocks = new BlockRange { StartBlock = 3 } }));
+        Assert.Empty(scan.ReadPoints(new PclReadOptions { Blocks = new BlockRange { StartBlock = 1, BlockCount = 0 } }));
+        Assert.Empty(scan.ReadPoints(new PclReadOptions { Blocks = new BlockRange { StartBlock = 10, BlockCount = 5 } }));
+    }
+
+    [Fact]
+    public void Lgsx_Parallel_Read_Matches_The_Sequential_Read_In_Order()
+    {
+        using var dir = new TempDirectory();
+        using var doc = LgsxDocument.Open(dir.Write("multi.lgsx",
+            SyntheticFixtures.CreateSyntheticLgsx(SixLeicaPoints, blockCount: 3)));
+        var scan = Assert.Single(doc.Scans);
+
+        var sequential = scan.ReadPoints(NoTransform).ToList();
+        var parallel = scan.ReadPoints(new PclReadOptions { ApplyTransform = false, MaxDegreeOfParallelism = 4 }).ToList();
+
+        Assert.Equal(sequential.Count, parallel.Count);
+        Assert.Equal(sequential.Select(p => p.Index), parallel.Select(p => p.Index));
+        for (int i = 0; i < sequential.Count; i++)
+            AssertNear(sequential[i].Position, parallel[i].Position);
+        Assert.Equal([0UL, 1UL, 2UL, 3UL, 4UL, 5UL], parallel.Select(p => p.Index));
+    }
+
+    [Fact]
+    public void Lgsx_Parallel_Read_With_A_Range_Matches_The_Sequential_Range()
+    {
+        using var dir = new TempDirectory();
+        using var doc = LgsxDocument.Open(dir.Write("multi.lgsx",
+            SyntheticFixtures.CreateSyntheticLgsx(SixLeicaPoints, blockCount: 3)));
+        var scan = Assert.Single(doc.Scans);
+        var range = new PclReadOptions { ApplyTransform = false, Blocks = new BlockRange { StartBlock = 1, BlockCount = 2 } };
+
+        var sequential = scan.ReadPoints(range).ToList();
+        var parallel = scan.ReadPoints(range with { MaxDegreeOfParallelism = 4 }).ToList();
+
+        Assert.Equal(4, sequential.Count);
+        Assert.Equal(sequential.Select(p => p.Position), parallel.Select(p => p.Position));
+        Assert.Equal([0UL, 1UL, 2UL, 3UL], parallel.Select(p => p.Index));
+    }
+
+    [Fact]
+    public void Lgsx_Parallel_Read_Caps_At_MaxPoints_With_Consecutive_Index()
+    {
+        using var dir = new TempDirectory();
+        using var doc = LgsxDocument.Open(dir.Write("multi.lgsx",
+            SyntheticFixtures.CreateSyntheticLgsx(SixLeicaPoints, blockCount: 3)));
+        var scan = Assert.Single(doc.Scans);
+
+        var capped = scan.ReadPoints(new PclReadOptions { ApplyTransform = false, MaxPoints = 3, MaxDegreeOfParallelism = 4 }).ToList();
+        Assert.Equal(3, capped.Count);
+        Assert.Equal([0UL, 1UL, 2UL], capped.Select(p => p.Index));
+
+        var sequential = scan.ReadPoints(new PclReadOptions { ApplyTransform = false, MaxPoints = 3 }).ToList();
+        for (int i = 0; i < 3; i++) AssertNear(sequential[i].Position, capped[i].Position);
+    }
+
+    [Fact]
+    public void Lgsx_Damaged_Block_Fails_And_A_Range_Around_It_Reads()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticLgsx(SixLeicaPoints, blockCount: 3, damagedBlock: 1);
+        using var doc = LgsxDocument.Open(dir.Write("damaged.lgsx", bytes));
+        var scan = Assert.Single(doc.Scans);
+
+        Assert.Throws<InvalidDataException>(() => scan.ReadPoints(NoTransform).ToList());
+        var parallelError = Assert.Throws<InvalidDataException>(() =>
+            scan.ReadPoints(new PclReadOptions { ApplyTransform = false, MaxDegreeOfParallelism = 4 }).ToList());
+        Assert.IsNotType<AggregateException>(parallelError);
+
+        // The blocks around the damaged one still read.
+        var first = scan.ReadPoints(new PclReadOptions { ApplyTransform = false, Blocks = new BlockRange { StartBlock = 0, BlockCount = 1 } }).ToList();
+        Assert.Equal(2, first.Count);
+        var last = scan.ReadPoints(new PclReadOptions { ApplyTransform = false, Blocks = new BlockRange { StartBlock = 2, BlockCount = 1 } }).ToList();
+        Assert.Equal(2, last.Count);
+    }
+
+    [Fact]
+    public void Lgsx_Truncated_File_Fails_In_Both_Read_Paths()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticLgsx(SixLeicaPoints, blockCount: 2);
+
+        // Truncate the second block in place: its declared length runs past the file.
+        byte[] magic = [(byte)'A', (byte)'P', (byte)'R', (byte)'N'];
+        int first = bytes.AsSpan().IndexOf(magic);
+        Assert.True(first >= 0);
+        int second = bytes.AsSpan()[(first + 4)..].IndexOf(magic);
+        Assert.True(second >= 0);
+        int lengthAt = first + 4 + second + 4;
+        BitConverter.GetBytes(uint.MaxValue).CopyTo(bytes, lengthAt);
+
+        using var doc = LgsxDocument.Open(dir.Write("cut.lgsx", bytes));
+        var scan = Assert.Single(doc.Scans);
+
+        Assert.Throws<InvalidDataException>(() => scan.ReadPoints(NoTransform).ToList());
+        Assert.Throws<InvalidDataException>(() =>
+            scan.ReadPoints(new PclReadOptions { ApplyTransform = false, MaxDegreeOfParallelism = 4 }).ToList());
+    }
+
+    [Fact]
+    public void Lgsx_Truncated_Read_By_MaxPoints_Reports_No_Incomplete_Data()
+    {
+        using var dir = new TempDirectory();
+        using var doc = LgsxDocument.Open(dir.Write("site.lgsx",
+            SyntheticFixtures.CreateSyntheticLgsx(SixLeicaPoints, blockCount: 1, unknownBlock: true)));
+        var scan = Assert.Single(doc.Scans);
+
+        Assert.Equal(5, scan.ReadPoints(new PclReadOptions { MaxPoints = 5 }).Count());
+        Assert.DoesNotContain(doc.Warnings, w => w.Contains("incomplete", StringComparison.Ordinal));
+
+        var parallel = scan.ReadPoints(new PclReadOptions { MaxPoints = 5, MaxDegreeOfParallelism = 4 }).ToList();
+        Assert.Equal(5, parallel.Count);
+        Assert.DoesNotContain(doc.Warnings, w => w.Contains("incomplete", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Lgsx_Strict_Mode_Fails_For_A_Selected_Damaged_Block()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticLgsx(SixLeicaPoints, blockCount: 2, damagedBlock: 1);
+        using var doc = LgsxDocument.Open(dir.Write("damaged.lgsx", bytes));
+        var scan = Assert.Single(doc.Scans);
+
+        Assert.Throws<InvalidDataException>(() => scan.ReadPoints(new PclReadOptions { Strict = true }).ToList());
+        Assert.Throws<InvalidDataException>(() => scan.ReadPoints(new PclReadOptions
+        {
+            Blocks = new BlockRange { StartBlock = 1, BlockCount = 1 },
+            Strict = true,
+            MaxDegreeOfParallelism = 4,
+        }).ToList());
+    }
+
+    [Fact]
+    public void Other_Readers_Ignore_Blocks_And_Parallel_Options()
+    {
+        using var dir = new TempDirectory();
+        var spec = new E57Spec { Points = [new E57SamplePoint(1, 2, 3, 0, 0, 0, 0), new E57SamplePoint(4, 5, 6, 0, 0, 0, 0)] };
+        using var doc = E57Document.Open(dir.Write("small.e57", spec.Build()));
+
+        var plain = doc.Scans[0].ReadPoints(NoTransform).ToList();
+        var ranged = doc.Scans[0].ReadPoints(new PclReadOptions
+        {
+            ApplyTransform = false,
+            Blocks = new BlockRange { StartBlock = 1, BlockCount = 1 },
+            MaxDegreeOfParallelism = 4,
+        }).ToList();
+
+        Assert.Equal(plain.Count, ranged.Count);
+        for (int i = 0; i < plain.Count; i++) AssertNear(plain[i].Position, ranged[i].Position);
     }
 
     [Fact]

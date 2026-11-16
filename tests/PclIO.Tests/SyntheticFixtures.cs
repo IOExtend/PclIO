@@ -174,10 +174,13 @@ internal static class SyntheticFixtures
     /// <param name="unknownFirstBlock">True writes a chunk the reader does not know before the point blocks.</param>
     /// <param name="truncatedFrameList">True ends the frame list of a block with a length prefix that declares more bytes than the block holds.</param>
     /// <param name="fewPlanes">True writes the blocks with fewer than four planes, so they carry no positions.</param>
+    /// <param name="blockCount">When above zero, splits the points into that many blocks without assigning them to setups.</param>
+    /// <param name="damagedBlock">When not negative, only the block with this zero-based index holds damaged frames.</param>
     public static byte[] CreateSyntheticLgsx(IReadOnlyList<LeicaSamplePoint>? points = null, bool withColorAndIntensity = false, bool withPointData = true,
         IReadOnlyList<byte[]>? extraPlanes = null, int setupCount = 1, bool assignPointsToSetups = false, bool overlappingSetupRanges = false,
         bool collidingSetupNames = false, bool damagedSetupRecord = false, bool damagedPointData = false, bool withPointCount = true,
-        bool oversizedFrame = false, bool unknownBlock = false, bool unknownFirstBlock = false, bool truncatedFrameList = false, bool fewPlanes = false)
+        bool oversizedFrame = false, bool unknownBlock = false, bool unknownFirstBlock = false, bool truncatedFrameList = false, bool fewPlanes = false,
+        int blockCount = 0, int damagedBlock = -1)
     {
         points ??= DefaultLeicaPoints;
         using var ms = new MemoryStream();
@@ -186,13 +189,13 @@ internal static class SyntheticFixtures
         bw.Write("wild::geosystems"u8.ToArray());
 
         // The groups of points, one per block of the point data.
-        var groups = assignPointsToSetups
-            ? SplitPoints(points, setupCount)
+        var groups = blockCount > 0 ? SplitPoints(points, blockCount)
+            : assignPointsToSetups ? SplitPoints(points, setupCount)
             : new List<IReadOnlyList<LeicaSamplePoint>> { points };
 
         (byte[] payload, List<(long Start, long Length)> blocks) =
             BuildLeicaPayload(groups, withColorAndIntensity, extraPlanes ?? [], damagedPointData, withPointCount, oversizedFrame, unknownBlock,
-                unknownFirstBlock, truncatedFrameList, fewPlanes);
+                unknownFirstBlock, truncatedFrameList, fewPlanes, damagedBlock);
 
         // The point data follows the container entries and their records, so its start is known before they are written.
         var setupNames = Enumerable.Range(0, setupCount).Select(i => "SETUP-" + (3 + i)).ToList();
@@ -321,7 +324,7 @@ internal static class SyntheticFixtures
     private static (byte[] Payload, List<(long Start, long Length)> Blocks) BuildLeicaPayload(
         IReadOnlyList<IReadOnlyList<LeicaSamplePoint>> groups, bool full, IReadOnlyList<byte[]> extraPlanes, bool damaged = false,
         bool withPointCount = true, bool oversizedFrame = false, bool unknownBlock = false,
-        bool unknownFirstBlock = false, bool truncatedFrameList = false, bool fewPlanes = false)
+        bool unknownFirstBlock = false, bool truncatedFrameList = false, bool fewPlanes = false, int damagedBlock = -1)
     {
         using var ms = new MemoryStream();
         using var bw = new BinaryWriter(ms);
@@ -343,6 +346,7 @@ internal static class SyntheticFixtures
         }
 
         var blocks = new List<(long Start, long Length)>();
+        int blockIndex = 0;
         foreach (var group in groups)
         {
             // A setup without points has no block of its own.
@@ -350,11 +354,13 @@ internal static class SyntheticFixtures
 
             var frames = BuildFrames(group, full, extraPlanes);
             if (fewPlanes) frames = [.. frames.Take(3)];
-            if (damaged)
+            if (damaged || blockIndex == damagedBlock)
             {
                 // A frame whose descriptor is not valid: the header of the block stays readable, the data does not.
                 foreach (byte[] broken in frames) broken[4] = 0x5A;
             }
+
+            blockIndex++;
 
             // A frame whose declared length is above the accepted size is skipped by the reader.
             const ulong OversizedLength = 20_000_000;
