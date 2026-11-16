@@ -1,3 +1,4 @@
+using PclIO.Export;
 using PclIO.Internal;
 using Xunit;
 
@@ -78,6 +79,34 @@ public sealed class OptionsAndPathTests
     [Fact]
     public void A_Positive_Finite_EdgeWise_Scale_Is_Accepted() =>
         Assert.Equal(0.001, new PclReadOptions { EdgeWiseCoordinateScale = 0.001 }.EdgeWiseCoordinateScale);
+
+    [Theory]
+    [InlineData(5)]
+    [InlineData(0)]
+    [InlineData(-2)]
+    public void A_Las_Point_Format_Outside_2_6_7_8_Is_Rejected(int format) =>
+        Assert.Throws<ArgumentOutOfRangeException>(() => new PclLasOptions { PointFormat = format });
+
+    [Theory]
+    [InlineData(0.0)]
+    [InlineData(-1.0)]
+    [InlineData(double.NaN)]
+    [InlineData(double.PositiveInfinity)]
+    public void A_Las_Scale_That_Is_Not_Positive_And_Finite_Is_Rejected(double scale) =>
+        Assert.Throws<ArgumentOutOfRangeException>(() => new PclLasOptions { Scale = scale });
+
+    [Fact]
+    public void Las_Options_Default_To_1_2_Format_2_And_A_Millimetre()
+    {
+        var options = new PclLasOptions();
+
+        Assert.Equal(LasVersion.V12, options.Version);
+        Assert.Equal(2, options.PointFormat);
+        Assert.Equal(0.001, options.Scale);
+        Assert.Null(options.Offset);
+        Assert.False(options.WriteCoordinateSystem);
+        Assert.Equal(options, PclLasOptions.Default);
+    }
 
     [Fact]
     public void A_Limit_Applies_To_The_Total_Across_All_Scans()

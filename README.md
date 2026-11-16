@@ -8,7 +8,7 @@ PclIO is a .NET library and command line tool that reads point cloud files from 
 
 - Detects the format of a file or folder from its content, extension or layout (`PclFile.DetectKind`).
 - Opens a file as a `PclDocument` with its scans, bounds, transforms, metadata and warnings, and streams the points (`ReadAllPoints`, `PclScan.ReadPoints`) with a point limit, a subsampling step and an optional scan transform.
-- Exports to ASPRS LAS 1.2 (point format 2), ASCII XYZ, ASCII PTS and JSON.
+- Exports to ASPRS LAS 1.2 (point format 2) and 1.4 (point formats 6 to 8), ASCII XYZ, ASCII PTS and JSON.
 - Ships the command line tool `pclio` with `info`, `scans`, `points` and `export`.
 
 ## Install
@@ -125,7 +125,7 @@ outside the file is fetched.
 
 | Output | Class | Notes |
 | --- | --- | --- |
-| LAS 1.2, point format 2 | `PclLasExporter` | Position, intensity, classification, RGB. Fixed 1 mm scale. |
+| LAS 1.2, point format 2<br>LAS 1.4, point formats 6 to 8 | `PclLasExporter` (`PclLasOptions` selects version, format, scale, offset and coordinate system record) | Position, intensity, classification, RGB (formats 2 and 7/8; format 8 adds a zero near infrared). 1 mm scale and offset from the data by default. An `EPSG:NNNN` coordinate system of the source is written as a GeoTIFF record only when asked. |
 | XYZ | `PclXyzExporter` | `X Y Z R G B` when the point has a colour, else `X Y Z I` when it has an intensity, else `X Y Z`. |
 | PTS | `PclPtsExporter` | A line with the point count, then `X Y Z Intensity R G B` per point. |
 | JSON | `PclJsonExporter` | Metadata and scans; sample points only when a point limit above zero is given. |
@@ -203,7 +203,7 @@ See the [public API](docs/public-api.md) for the supported surface and [dependen
 - Readers limit the sizes and counts that a file declares; the numbers are listed under Limits. A file that exceeds a limit is rejected, with the exceptions described there. Some readers drop points that fail a plausibility rule; see Data filters.
 - `SubsampleStep` is applied inside each format's internal blocks, so the spacing is approximate. `MaxPoints` limits one read call.
 - A scan transform is scale and translation, or a 4x4 matrix when the format gives one. Rotation values of a `PclTransform` are stored for information and are not applied by `TransformPoint`.
-- LAS and PTS export read the source twice (the header needs the count), so the source must be re-enumerable; memory does not depend on the number of points. A point without intensity is written with full intensity and a point without colour as white, because these formats have no "missing" value. LAS stores coordinates with a 1 mm scale, so the extent of each axis must not exceed about 2147 km.
+- LAS and PTS export read the source twice (the header needs the count), so the source must be re-enumerable; memory does not depend on the number of points. A point without intensity is written with full intensity and a point without colour as white, because these formats have no "missing" value. LAS stores coordinates with the configured scale (1 mm by default), so the extent of each axis must fit 32-bit integers at that scale; the default offset is the minimum of the data.
 - Normals are read where a format has them, but no exporter writes them.
 - There is no support for writing or modifying scan files.
 

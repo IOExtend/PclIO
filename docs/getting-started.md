@@ -105,7 +105,7 @@ file that exceeds a limit is rejected with `InvalidDataException`, with the exce
   and counts are listed in the repository README.
 - `SubsampleStep` is applied inside each format's internal blocks, so the spacing is approximate; `MaxPoints` limits one read call.
 - LAS and PTS export read the source twice; memory does not depend on the number of points. A point without intensity is written with full
-  intensity and a point without colour as white. LAS uses a 1 mm scale, so the extent of each axis must not exceed about 2147 km.
+  intensity and a point without colour as white. LAS uses a 1 mm scale by default, so the extent of each axis must fit 32-bit integers at the configured scale.
 - Normals are read where a format has them but no exporter writes them.
 - Rotation values of a `PclTransform` are stored for information and are not applied by `TransformPoint`.
 
