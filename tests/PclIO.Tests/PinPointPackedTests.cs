@@ -47,12 +47,47 @@ public sealed class PinPointPackedTests
         var scan = (PinPointScan)Assert.Single(doc.Scans);
         Assert.False(scan.HasColors);
         Assert.False(scan.HasIntensities);
+        Assert.False(scan.HasNormals);
         Assert.All(ReadAll(doc), p =>
         {
             Assert.Null(p.Color);
             Assert.Null(p.Intensity);
             Assert.Null(p.Normal);
         });
+    }
+
+    [Fact]
+    public void Normals_Are_Read_When_The_File_Holds_Them()
+    {
+        using var dir = new TempDirectory();
+        using var doc = Open(dir, PinPointPackedFixtures.Create(Three, normals: [0, 0, 1, 0, 0, 0, 1, 0, 0]));
+
+        var scan = (PinPointScan)Assert.Single(doc.Scans);
+        Assert.True(scan.HasNormals);
+
+        var points = ReadAll(doc);
+        Assert.Equal(3, points.Count);
+        Assert.Equal(new PclVector3(0, 0, 1), points[0].Normal);
+        Assert.Null(points[1].Normal);
+        Assert.Equal(new PclVector3(1, 0, 0), points[2].Normal);
+    }
+
+    [Fact]
+    public void A_Normals_Channel_With_The_Wrong_Size_Is_Rejected()
+    {
+        using var dir = new TempDirectory();
+        byte[] positions = new byte[Three.Length * 12];
+        var bad = PinPointPackedFixtures.Assemble(
+        [
+            ("RowColIndex", PinPointPackedFixtures.Literals(new byte[Three.Length * 8])),
+            ("Points", PinPointPackedFixtures.Literals(positions)),
+            ("Normals", PinPointPackedFixtures.Literals(new byte[Three.Length * 12 - 1])),
+        ], Three.Length);
+
+        using var doc = PinPointDocument.Open(SyntheticFixtures.WritePinPointProject(dir, bad.Bytes));
+
+        Assert.Contains(doc.Warnings, w => w.Contains("Normals", StringComparison.Ordinal));
+        Assert.Throws<InvalidDataException>(() => ReadAll(doc));
     }
 
     [Fact]
