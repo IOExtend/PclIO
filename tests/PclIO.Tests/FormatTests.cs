@@ -4,6 +4,7 @@ using PclIO.Formats.EdgeWise;
 using PclIO.Formats.Faro;
 using PclIO.Formats.Las;
 using PclIO.Formats.Leica;
+using PclIO.Formats.Pcd;
 using PclIO.Formats.PinPoint;
 using PclIO.Formats.Recap;
 using Xunit;
@@ -2533,5 +2534,238 @@ public sealed class FormatTests
         Assert.Equal(3, points.Count);
         AssertNear(new PclVector3(1, 2, 3), points[0].Position);
         Assert.Equal(new PclColor(10, 20, 30), points[0].Color);
+    }
+
+    // ---- PCD ----------------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void PclFile_Opens_Pcd_With_Count_Channels_Viewpoint_And_Metadata()
+    {
+        using var dir = new TempDirectory();
+        using var doc = PclFile.Open(dir.Write("sample.pcd", SyntheticFixtures.CreateSyntheticPcd()));
+
+        Assert.Equal(PclFileKind.Pcd, doc.Kind);
+        var scan = Assert.Single(doc.Scans);
+        Assert.Equal("0", scan.Id);
+        Assert.Equal("sample", scan.Name);
+        Assert.Equal(3, scan.PointCount);
+        Assert.Equal(3, doc.TotalPointCount);
+        Assert.True(scan.HasColors);
+        Assert.True(scan.HasIntensities);
+        Assert.True(scan.HasNormals);
+        Assert.True(scan.Bounds.IsEmpty);
+        Assert.Equal("0.7", ((PcdDocument)doc).Version);
+        Assert.Equal("0 0 0 1 0 0 0", ((PcdDocument)doc).Viewpoint);
+        Assert.Equal("Point Cloud Library PCD", doc.Metadata["Format"]);
+        Assert.Null(doc.CoordinateSystem);
+        Assert.Empty(doc.Warnings);
+    }
+
+    [Theory]
+    [InlineData("ascii")]
+    [InlineData("binary")]
+    [InlineData("binary_compressed")]
+    public void Pcd_Round_Trip_Positions_Intensity_Colour_And_Normals(string data)
+    {
+        using var dir = new TempDirectory();
+        using var doc = PcdDocument.Open(dir.Write("sample.pcd", SyntheticFixtures.CreateSyntheticPcd(data: data)));
+
+        var points = doc.Scans[0].ReadPoints(NoTransform).ToList();
+
+        Assert.Equal(3, points.Count);
+        Assert.Equal([0UL, 1UL, 2UL], points.Select(p => p.Index));
+        AssertNear(new PclVector3(1, 2, 3), points[0].Position);
+        AssertNear(new PclVector3(-4.5, 5.25, 6.125), points[1].Position);
+        AssertNear(new PclVector3(7, 8, 9), points[2].Position);
+        Assert.Equal(0.25f, points[0].Intensity);
+        Assert.Equal(0.5f, points[1].Intensity);
+        Assert.Equal(0f, points[2].Intensity);
+        Assert.Equal(new PclColor(10, 20, 30), points[0].Color);
+        Assert.Equal(new PclColor(255, 255, 255), points[1].Color);
+        Assert.Equal(new PclColor(255, 255, 255), points[2].Color);
+        Assert.Equal(new PclVector3(0, 0, 1), points[0].Normal);
+        // Stored zeros read back as-is: PCD marks nothing as missing.
+        Assert.Equal(new PclVector3(0, 0, 0), points[1].Normal);
+        Assert.Equal(new PclVector3(0, 0, 0), points[2].Normal);
+        Assert.All(points, p => Assert.Null(p.Classification));
+    }
+
+    [Fact]
+    public void Pcd_Organised_Cloud_Streams_Row_After_Row()
+    {
+        var points = new[]
+        {
+            new PcdSamplePoint(1, 0, 0), new PcdSamplePoint(2, 0, 0),
+            new PcdSamplePoint(3, 0, 0), new PcdSamplePoint(4, 0, 0),
+        };
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticPcd(points,
+            fields: [("x", 4, 'F', 1), ("y", 4, 'F', 1), ("z", 4, 'F', 1)],
+            heightOverride: 2, widthOverride: 2);
+        using var doc = PcdDocument.Open(dir.Write("grid.pcd", bytes));
+
+        var scan = Assert.Single(doc.Scans);
+        Assert.Equal(4, scan.PointCount);
+        Assert.False(scan.HasColors);
+        Assert.False(scan.HasIntensities);
+
+        var read = scan.ReadPoints(NoTransform).ToList();
+        Assert.Equal([1.0, 2.0, 3.0, 4.0], read.Select(p => p.X));
+        Assert.All(read, p => Assert.Null(p.Intensity));
+    }
+
+    [Fact]
+    public void Pcd_Points_Without_Finite_Coordinates_Are_Not_Returned()
+    {
+        var points = new[]
+        {
+            new PcdSamplePoint(1, 2, 3),
+            new PcdSamplePoint(double.NaN, 0, 0),
+            new PcdSamplePoint(4, 5, 6),
+        };
+        foreach (string data in new[] { "ascii", "binary", "binary_compressed" })
+        {
+            using var dir = new TempDirectory();
+            using var doc = PcdDocument.Open(dir.Write("sample.pcd",
+                SyntheticFixtures.CreateSyntheticPcd(points, data: data)));
+
+            var read = doc.Scans[0].ReadPoints(NoTransform).ToList();
+            Assert.Equal(2, read.Count);
+            Assert.Equal([0UL, 1UL], read.Select(p => p.Index));
+        }
+    }
+
+    [Fact]
+    public void Pcd_Honours_Limit_And_Step_And_Ignores_Blocks_And_Parallelism()
+    {
+        var points = Enumerable.Range(0, 8).Select(i => new PcdSamplePoint(i, 0, 0)).ToList();
+        using var dir = new TempDirectory();
+        using var doc = PcdDocument.Open(dir.Write("sample.pcd", SyntheticFixtures.CreateSyntheticPcd(points)));
+        var scan = doc.Scans[0];
+
+        Assert.Equal(3, scan.ReadPoints(new PclReadOptions { MaxPoints = 3 }).Count());
+        Assert.Equal(4, scan.ReadPoints(new PclReadOptions { SubsampleStep = 2 }).Count());
+        Assert.Empty(scan.ReadPoints(new PclReadOptions { MaxPoints = 0 }));
+
+        var ranged = scan.ReadPoints(new PclReadOptions
+        {
+            Blocks = new BlockRange { StartBlock = 1, BlockCount = 1 },
+            MaxDegreeOfParallelism = 4,
+        }).ToList();
+        Assert.Equal(8, ranged.Count);
+    }
+
+    [Fact]
+    public void Pcd_Without_X_Y_Or_Z_Is_Not_Read()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticPcd(
+            fields: [("y", 4, 'F', 1), ("z", 4, 'F', 1), ("rgb", 4, 'F', 1)]);
+
+        Assert.Throws<NotSupportedException>(() => PcdDocument.Open(dir.Write("sample.pcd", bytes)));
+    }
+
+    [Fact]
+    public void Pcd_Unusable_Colour_Leaves_Points_Without_Colour()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticPcd(
+            fields: [("x", 4, 'F', 1), ("y", 4, 'F', 1), ("z", 4, 'F', 1), ("rgb", 1, 'U', 1)]);
+        using var doc = PcdDocument.Open(dir.Write("sample.pcd", bytes));
+
+        var scan = Assert.Single(doc.Scans);
+        Assert.False(scan.HasColors);
+        Assert.Equal(3, scan.ReadPoints(NoTransform).Count());
+        Assert.All(scan.ReadPoints(NoTransform), p => Assert.Null(p.Color));
+    }
+
+    [Fact]
+    public void Pcd_Unknown_Data_Type_Is_Rejected()
+    {
+        using var dir = new TempDirectory();
+        var header = new[]
+        {
+            "VERSION 0.7", "FIELDS x y z", "SIZE 4 4 4", "TYPE F F F", "COUNT 1 1 1",
+            "WIDTH 1", "HEIGHT 1", "VIEWPOINT 0 0 0 1 0 0 0", "POINTS 1", "DATA base64",
+        };
+
+        Assert.Throws<InvalidDataException>(() =>
+            PcdDocument.Open(dir.Write("sample.pcd", SyntheticFixtures.CreatePcdFile(header, [0]))));
+    }
+
+    [Fact]
+    public void Pcd_Header_Out_Of_Order_Is_Rejected()
+    {
+        using var dir = new TempDirectory();
+        var header = new[]
+        {
+            "VERSION 0.7", "SIZE 4 4 4", "FIELDS x y z", "TYPE F F F", "COUNT 1 1 1",
+            "WIDTH 1", "HEIGHT 1", "VIEWPOINT 0 0 0 1 0 0 0", "POINTS 1", "DATA ascii",
+        };
+
+        Assert.Throws<InvalidDataException>(() =>
+            PcdDocument.Open(dir.Write("sample.pcd", SyntheticFixtures.CreatePcdFile(header, "1 2 3"u8.ToArray()))));
+    }
+
+    [Fact]
+    public void Pcd_Grid_That_Does_Not_Hold_The_Point_Count_Is_Rejected()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticPcd(widthOverride: 2, heightOverride: 2);
+
+        Assert.Throws<InvalidDataException>(() => PcdDocument.Open(dir.Write("sample.pcd", bytes)));
+    }
+
+    [Fact]
+    public void Pcd_Truncated_Ascii_Point_Data_Is_Rejected_When_Read()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticPcd(data: "ascii");
+        byte[] cut = bytes[..(bytes.Length - 5)];
+        using var doc = PcdDocument.Open(dir.Write("cut.pcd", cut));
+
+        Assert.Equal(3, doc.Scans[0].PointCount);
+        Assert.Throws<InvalidDataException>(() => doc.Scans[0].ReadPoints().ToList());
+    }
+
+    [Theory]
+    [InlineData("binary")]
+    [InlineData("binary_compressed")]
+    public void Pcd_Truncated_Binary_Point_Data_Is_Rejected_At_Open(string data)
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticPcd(data: data);
+        byte[] cut = bytes[..(bytes.Length - 5)];
+
+        Assert.Throws<InvalidDataException>(() => PcdDocument.Open(dir.Write("cut.pcd", cut)));
+    }
+
+    [Fact]
+    public void Pcd_Corrupt_Lzf_Is_Rejected_When_Read()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticPcd(data: "binary_compressed");
+
+        // The header ends at the first DATA line; the first compressed byte follows the two sizes.
+        int dataAt = System.Text.Encoding.ASCII.GetString(bytes).IndexOf("DATA binary_compressed", StringComparison.Ordinal);
+        int bodyAt = System.Text.Encoding.ASCII.GetString(bytes).IndexOf('\n', dataAt) + 1;
+        bytes[bodyAt + 8] = 0xFF; // a match reaching before the start of the output
+        using var doc = PcdDocument.Open(dir.Write("sample.pcd", bytes));
+
+        Assert.Throws<InvalidDataException>(() => doc.Scans[0].ReadPoints().ToList());
+    }
+
+    [Fact]
+    public void Pcd_Compressed_Size_Mismatch_Is_Rejected()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticPcd(data: "binary_compressed");
+
+        // The header ends at the first DATA line; the sizes start 8 bytes after it.
+        int dataAt = System.Text.Encoding.ASCII.GetString(bytes).IndexOf("DATA binary_compressed", StringComparison.Ordinal);
+        int bodyAt = System.Text.Encoding.ASCII.GetString(bytes).IndexOf('\n', dataAt) + 1;
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(bodyAt + 4, 4), 1);
+
+        Assert.Throws<InvalidDataException>(() => PcdDocument.Open(dir.Write("sample.pcd", bytes)));
     }
 }

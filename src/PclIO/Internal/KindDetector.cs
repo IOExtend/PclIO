@@ -97,6 +97,78 @@ internal static class KindDetector
         if (head.StartsWith(LasMagic))
             return extension == ".laz" ? PclFileKind.Unknown : PclFileKind.Las;
 
+        // PCD files have no signature; a strict header structure in any extension decides.
+        if (IsPcdHeader(stream, origin))
+            return PclFileKind.Pcd;
+
         return PclFileKind.Unknown;
+    }
+
+    // True when the stream starts with a PCD header: the documented entries in order, with or without COUNT.
+    // At most the first 256 KiB are inspected; the position is restored.
+    private static bool IsPcdHeader(Stream stream, long origin)
+    {
+        const int maxProbeBytes = 256 * 1024;
+        string[] order = ["VERSION", "FIELDS", "SIZE", "TYPE", "COUNT", "WIDTH", "HEIGHT", "VIEWPOINT", "POINTS", "DATA"];
+
+        long length = stream.CanSeek ? stream.Length : long.MaxValue;
+        int toRead = (int)Math.Min(maxProbeBytes, Math.Max(0, length - origin));
+        if (toRead < 7) return false;
+
+        byte[] buffer = new byte[toRead];
+        stream.Position = origin;
+        try
+        {
+            int got = 0;
+            while (got < toRead)
+            {
+                int n = stream.Read(buffer, got, toRead - got);
+                if (n == 0) break;
+                got += n;
+            }
+
+            int stage = 0;
+            int position = 0;
+            int lines = 0;
+            while (position < got)
+            {
+                int end = Array.IndexOf(buffer, (byte)'\n', position, got - position);
+                if (end < 0) return false;
+                int lineLength = end - position;
+                if (lineLength > 0 && buffer[end - 1] == (byte)'\r') lineLength--;
+                if (lineLength > 4096) return false;
+
+                bool comment = lineLength > 0 && buffer[position] == (byte)'#';
+                if (!comment && lineLength > 0)
+                {
+                    int space = -1;
+                    for (int i = position; i < position + lineLength; i++)
+                    {
+                        if (buffer[i] is (byte)' ' or (byte)'\t')
+                        {
+                            space = i;
+                            break;
+                        }
+                    }
+
+                    if (space < 0) return false;
+                    string keyword = System.Text.Encoding.ASCII.GetString(buffer, position, space - position);
+
+                    while (stage < order.Length && order[stage] == "COUNT" && keyword != "COUNT") stage++;
+                    if (stage >= order.Length || keyword != order[stage]) return false;
+                    stage++;
+                    if (keyword == "DATA") return true;
+                }
+
+                position = end + 1;
+                if (++lines > 4096) return false;
+            }
+
+            return false;
+        }
+        finally
+        {
+            stream.Position = origin;
+        }
     }
 }

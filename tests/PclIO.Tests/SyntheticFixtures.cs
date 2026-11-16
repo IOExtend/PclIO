@@ -17,6 +17,9 @@ public readonly record struct C3Cluster(float Cx, float Cy, float Cz, (short Dx,
 /// <summary>One point of a synthetic LAS file: position, normalised intensity, colour and class code.</summary>
 public readonly record struct LasSamplePoint(double X, double Y, double Z, float Intensity = 1.0f, PclColor? Color = null, byte Classification = 0);
 
+/// <summary>One point of a synthetic PCD file: position, intensity, colour and normal.</summary>
+public readonly record struct PcdSamplePoint(double X, double Y, double Z, float? Intensity = null, PclColor? Color = null, PclVector3? Normal = null);
+
 /// <summary>Generates small synthetic scan files for the tests. Every layout is written from what the readers implement;
 /// no byte of any of them comes from a real scan.</summary>
 internal static class SyntheticFixtures
@@ -611,7 +614,6 @@ internal static class SyntheticFixtures
     }
 
     // ---- LAS (.las) ---------------------------------------------------------------------------------------------------
-
     /// <summary>Base record size of a LAS point format; waveform tails are not interpreted.</summary>
     public static int LasBaseRecordSize(int pointFormat) => pointFormat switch
     {
@@ -780,5 +782,250 @@ internal static class SyntheticFixtures
         }
 
         return ms.ToArray();
+    }
+
+    // ---- PCD (.pcd) ---------------------------------------------------------------------------------------------------
+
+    /// <summary>Default PCD fields: positions, packed colour, intensity and normals, all 4-byte floats.</summary>
+    public static IReadOnlyList<(string Name, int Size, char Type, int Count)> DefaultPcdFields =>
+    [
+        ("x", 4, 'F', 1), ("y", 4, 'F', 1), ("z", 4, 'F', 1),
+        ("rgb", 4, 'F', 1), ("intensity", 4, 'F', 1),
+        ("normal_x", 4, 'F', 1), ("normal_y", 4, 'F', 1), ("normal_z", 4, 'F', 1),
+    ];
+
+    /// <summary>Default PCD points: three points with mixed channels.</summary>
+    public static IReadOnlyList<PcdSamplePoint> DefaultPcdPoints =>
+    [
+        new(1, 2, 3, 0.25f, new PclColor(10, 20, 30), new PclVector3(0, 0, 1)),
+        new(-4.5, 5.25, 6.125, 0.5f),
+        new(7, 8, 9, null, new PclColor(255, 255, 255)),
+    ];
+
+    /// <summary>A synthetic PCD file with one scan.</summary>
+    /// <param name="points">Points to store.</param>
+    /// <param name="fields">Field declarations; null uses <see cref="DefaultPcdFields"/>.</param>
+    /// <param name="data">Point storage: ascii, binary or binary_compressed.</param>
+    /// <param name="viewpoint">VIEWPOINT value; null uses the default.</param>
+    /// <param name="widthOverride">WIDTH to declare instead of the point count.</param>
+    /// <param name="heightOverride">HEIGHT to declare instead of 1.</param>
+    /// <param name="pointsOverride">POINTS to declare instead of the point count.</param>
+    /// <param name="withCountLine">False leaves the COUNT line out.</param>
+    public static byte[] CreateSyntheticPcd(IReadOnlyList<PcdSamplePoint>? points = null,
+        IReadOnlyList<(string Name, int Size, char Type, int Count)>? fields = null, string data = "ascii",
+        string? viewpoint = null, long? widthOverride = null, long? heightOverride = null, long? pointsOverride = null,
+        bool withCountLine = true)
+    {
+        points ??= DefaultPcdPoints;
+        fields ??= DefaultPcdFields;
+
+        var header = new List<string>
+        {
+            "# .PCD v.7 - Point Cloud Data file format",
+            "VERSION 0.7",
+            "FIELDS " + string.Join(' ', fields.Select(f => f.Name)),
+            "SIZE " + string.Join(' ', fields.Select(f => f.Size)),
+            "TYPE " + string.Join(' ', fields.Select(f => f.Type)),
+        };
+        if (withCountLine) header.Add("COUNT " + string.Join(' ', fields.Select(f => f.Count)));
+        header.AddRange([
+            $"WIDTH {widthOverride ?? points.Count}",
+            $"HEIGHT {heightOverride ?? 1}",
+            $"VIEWPOINT {viewpoint ?? "0 0 0 1 0 0 0"}",
+            $"POINTS {pointsOverride ?? points.Count}",
+            $"DATA {data}",
+        ]);
+
+        byte[] body = data switch
+        {
+            "ascii" => PcdAsciiBody(points, fields),
+            "binary" => PcdBinaryBody(points, fields),
+            "binary_compressed" => PcdCompressedBody(points, fields),
+            _ => throw new ArgumentException($"Unknown PCD data '{data}'.", nameof(data)),
+        };
+
+        byte[] headerBytes = System.Text.Encoding.ASCII.GetBytes(string.Join('\n', header) + "\n");
+        return [.. headerBytes, .. body];
+    }
+
+    /// <summary>A PCD file from raw header lines and a body.</summary>
+    public static byte[] CreatePcdFile(IEnumerable<string> headerLines, byte[] body)
+    {
+        byte[] headerBytes = System.Text.Encoding.ASCII.GetBytes(string.Join('\n', headerLines) + "\n");
+        return [.. headerBytes, .. body];
+    }
+
+    private static byte[] PcdAsciiBody(IReadOnlyList<PcdSamplePoint> points,
+        IReadOnlyList<(string Name, int Size, char Type, int Count)> fields)
+    {
+        var sb = new StringBuilder();
+        foreach (var p in points)
+        {
+            var tokens = new List<string>();
+            foreach (var field in fields)
+                for (int c = 0; c < field.Count; c++)
+                    tokens.Add(PcdAsciiValue(p, field, c));
+            sb.Append(string.Join(' ', tokens));
+            sb.Append('\n');
+        }
+
+        return System.Text.Encoding.ASCII.GetBytes(sb.ToString());
+    }
+
+    private static string PcdAsciiValue(PcdSamplePoint p, (string Name, int Size, char Type, int Count) field, int index)
+    {
+        if (index > 0) return "0";
+        // Packed colour travels as the float holding its bits, like PCL writes it; other shapes hold no colour.
+        if (field.Name is "rgb" or "rgba")
+        {
+            if (field is not { Size: 4, Type: 'F' }) return "0";
+            uint bits = p.Color is { } c ? (uint)((c.R << 16) | (c.G << 8) | c.B) : 0xFFFFFF;
+            return BitConverter.UInt32BitsToSingle(bits).ToString("R", System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        double value = PcdFieldValue(p, field);
+        if (field.Type == 'F') return double.IsNaN(value) ? "nan" : value.ToString("R", System.Globalization.CultureInfo.InvariantCulture);
+        return ((long)value).ToString(System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    private static byte[] PcdBinaryBody(IReadOnlyList<PcdSamplePoint> points,
+        IReadOnlyList<(string Name, int Size, char Type, int Count)> fields)
+    {
+        using var ms = new MemoryStream();
+        foreach (var p in points)
+            foreach (var field in fields)
+                for (int c = 0; c < field.Count; c++)
+                    ms.Write(PcdFieldBytes(p, field, c));
+        return ms.ToArray();
+    }
+
+    private static byte[] PcdCompressedBody(IReadOnlyList<PcdSamplePoint> points,
+        IReadOnlyList<(string Name, int Size, char Type, int Count)> fields)
+    {
+        // The payload is one block per field holding every point.
+        using var flat = new MemoryStream();
+        foreach (var field in fields)
+            foreach (var p in points)
+                for (int c = 0; c < field.Count; c++)
+                    flat.Write(PcdFieldBytes(p, field, c));
+
+        byte[] uncompressed = flat.ToArray();
+        byte[] compressed = LzfCompress(uncompressed);
+
+        using var ms = new MemoryStream();
+        byte[] sizes = new byte[8];
+        BinaryPrimitives.WriteUInt32LittleEndian(sizes.AsSpan(0, 4), (uint)compressed.Length);
+        BinaryPrimitives.WriteUInt32LittleEndian(sizes.AsSpan(4, 4), (uint)uncompressed.Length);
+        ms.Write(sizes);
+        ms.Write(compressed);
+        return ms.ToArray();
+    }
+
+    private static double PcdFieldValue(PcdSamplePoint p, (string Name, int Size, char Type, int Count) field) => field.Name switch
+    {
+        "x" => p.X,
+        "y" => p.Y,
+        "z" => p.Z,
+        "intensity" => p.Intensity ?? 0,
+        "normal_x" => p.Normal?.X ?? 0,
+        "normal_y" => p.Normal?.Y ?? 0,
+        "normal_z" => p.Normal?.Z ?? 0,
+        _ => 0,
+    };
+
+    private static byte[] PcdFieldBytes(PcdSamplePoint p, (string Name, int Size, char Type, int Count) field, int index)
+    {
+        // Packed colour travels as its four bytes; other shapes hold no colour.
+        if (field.Name is "rgb" or "rgba")
+        {
+            uint bits = p.Color is { } c ? (uint)((c.R << 16) | (c.G << 8) | c.B) : 0xFFFFFF;
+            byte[] colour = new byte[field.Size];
+            if (field.Size >= 4) BinaryPrimitives.WriteUInt32LittleEndian(colour, bits);
+            return colour;
+        }
+
+        double value = index == 0 ? PcdFieldValue(p, field) : 0;
+        byte[] bytes = new byte[field.Size];
+        switch (field.Type)
+        {
+            case 'I':
+                long signed = (long)value;
+                for (int i = 0; i < field.Size; i++) bytes[i] = (byte)(signed >> (8 * i));
+                break;
+            case 'U':
+                ulong unsigned = (ulong)(long)value;
+                for (int i = 0; i < field.Size; i++) bytes[i] = (byte)(unsigned >> (8 * i));
+                break;
+            default:
+                if (field.Size == 4)
+                    BinaryPrimitives.WriteSingleLittleEndian(bytes, (float)value);
+                else
+                    BinaryPrimitives.WriteDoubleLittleEndian(bytes, value);
+                break;
+        }
+
+        return bytes;
+    }
+
+    /// <summary>Test-only LZF compressor for fixtures: greedy matches of at least 3 bytes in an 8 KiB window.</summary>
+    public static byte[] LzfCompress(byte[] input)
+    {
+        var output = new List<byte>(input.Length);
+        int i = 0;
+        int literals = 0;
+
+        void FlushLiterals(int from, int count)
+        {
+            while (count > 0)
+            {
+                int run = Math.Min(32, count);
+                output.Add((byte)(run - 1));
+                output.AddRange(input.AsSpan(from, run).ToArray());
+                from += run;
+                count -= run;
+            }
+        }
+
+        while (i < input.Length)
+        {
+            int bestLength = 0;
+            int bestOffset = 0;
+            int start = Math.Max(0, i - 8192);
+            for (int j = start; j < i; j++)
+            {
+                int length = 0;
+                while (length < 264 && i + length < input.Length && input[j + length] == input[i + length]) length++;
+                if (length >= 3 && length > bestLength)
+                {
+                    bestLength = length;
+                    bestOffset = i - j;
+                    if (length == 264) break;
+                }
+            }
+
+            if (bestLength >= 3)
+            {
+                FlushLiterals(i - literals, literals);
+                literals = 0;
+                int coded = bestLength - 2;
+                output.Add((byte)((Math.Min(7, coded) << 5) | ((bestOffset - 1) >> 8)));
+                if (coded >= 7) output.Add((byte)(coded - 7));
+                output.Add((byte)((bestOffset - 1) & 0xFF));
+                i += bestLength;
+            }
+            else
+            {
+                literals++;
+                i++;
+                if (literals == 32)
+                {
+                    FlushLiterals(i - literals, literals);
+                    literals = 0;
+                }
+            }
+        }
+
+        FlushLiterals(i - literals, literals);
+        return [.. output];
     }
 }

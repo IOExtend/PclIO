@@ -32,4 +32,7 @@ public enum PclFileKind
 
     /// <summary>ASPRS LAS point cloud file (.las).</summary>
     Las = 9,
+
+    /// <summary>Point Cloud Library point cloud file (.pcd).</summary>
+    Pcd = 10,
 }
