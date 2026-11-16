@@ -287,6 +287,51 @@ public sealed class FormatTests
         Assert.Equal(3, doc.ReadAllPoints(NoTransform).Count());
     }
 
+    [Fact]
+    public void An_Rcp_Applies_The_Transform_Of_The_Project_To_Its_Points()
+    {
+        using var dir = new TempDirectory();
+        string rcp = dir.Write("site.rcp", SyntheticFixtures.CreateSyntheticRcpZip());
+        dir.Write(Path.Combine("site Support", "scan1.rcs"),
+            SyntheticFixtures.CreateSyntheticRcsWithPoints(RcsPoints, (0, 0, 0)));
+
+        using var doc = RcpProjectDocument.Open(rcp);
+
+        // The project places the scan at (10.5, 20.5, 5).
+        var moved = doc.ReadAllPoints().ToList();
+        var raw = doc.ReadAllPoints(NoTransform).ToList();
+        Assert.Equal(3, moved.Count);
+        for (int i = 0; i < moved.Count; i++)
+        {
+            AssertNear(new PclVector3(raw[i].X + 10.5, raw[i].Y + 20.5, raw[i].Z + 5.0), moved[i].Position);
+        }
+    }
+
+    [Fact]
+    public void An_Rcp_Without_A_Transform_Of_The_Project_Uses_The_Transform_Of_The_Scan_File()
+    {
+        using var dir = new TempDirectory();
+        string rcp = dir.Write("site.rcp", SyntheticFixtures.CreateSyntheticRcpZip(withTransform: false));
+        dir.Write(Path.Combine("site Support", "scan1.rcs"),
+            SyntheticFixtures.CreateSyntheticRcsWithPoints(RcsPoints, (0, 0, 0), tx: 1.0, ty: 2.0, tz: 3.0));
+
+        using var doc = RcpProjectDocument.Open(rcp);
+
+        var points = doc.ReadAllPoints().ToList();
+        Assert.Equal(3, points.Count);
+        AssertNear(new PclVector3(1.1, 2.2, 3.3), points[0].Position);
+    }
+
+    [Fact]
+    public void An_Rcp_With_A_Damaged_Transform_Is_Rejected()
+    {
+        using var dir = new TempDirectory();
+        string manifest = SyntheticFixtures.RcpManifest("scan1.rcs", "Station 1")
+            .Replace("<Translation X=\"10.5\" Y=\"20.5\" Z=\"5.0\" />", "<Translation X=\"NaN\" Y=\"20.5\" Z=\"5.0\" />");
+
+        Assert.Throws<InvalidDataException>(() => RcpProjectDocument.Open(dir.Write("site.rcp", SyntheticFixtures.CreateZip("project.xml", manifest))));
+    }
+
     // ---- E57 -------------------------------------------------------------------------------------------------
 
     [Fact]

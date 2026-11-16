@@ -27,6 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   layout is rejected with a message that names the version and the described ones.
 - The channels of a ReCap scan follow from the file: the size of the payload of the nodes tells whether the points hold a
   colour, an intensity and a normal. `HasColors`, `HasIntensities` and `HasNormals` are no longer constants.
+- The transform of a ReCap project scan node is applied to its points unless `ApplyTransform` is false; when the manifest
+  states no transform, the transform of the scan file is used.
 
 ## [0.1.0] - 2026-11-15
 

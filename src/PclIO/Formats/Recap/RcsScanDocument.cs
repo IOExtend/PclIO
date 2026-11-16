@@ -308,8 +308,9 @@ public sealed class RcsScan : PclScan
 
         long curOffset = payloadStart;
         byte[] chunkBuf = new byte[65536];
-        // Normals are read per chunk, so memory stays constant however large a node is.
-        byte[] normalBuf = new byte[chunkBuf.Length / PointRecordSize * NormalRecordSize];
+        // Normals are read per chunk, so memory stays constant however large a node is. Sized for the shortest
+        // record, which packs the most points per chunk.
+        byte[] normalBuf = new byte[chunkBuf.Length / PositionRecordSize * NormalRecordSize];
 
         foreach (var node in nodes)
         {

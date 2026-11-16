@@ -8,8 +8,9 @@ namespace PclIO.Formats.Recap;
 
 /// <summary>
 /// Reads a ReCap project archive (.rcp) and lists its scan nodes. Referenced .rcs files are looked up next to the
-/// project; paths stored in the archive are never followed outside the project folder. Node transforms are parsed
-/// and exposed as data but are not applied to points.
+/// project; paths stored in the archive are never followed outside the project folder. The transform of a scan node
+/// places the scan in the project and is applied to its points unless reading asks not to; when the manifest states
+/// no transform for a node, the transform of the scan file is used.
 /// </summary>
 public sealed class RcpProjectDocument : PclDocument
 {
@@ -103,13 +104,13 @@ public sealed class RcpProjectDocument : PclDocument
                 (!long.TryParse(numPointsStr, NumberStyles.Integer, CultureInfo.InvariantCulture, out numPoints) || numPoints < 0))
                 throw FormatError.Corrupted($"Invalid point count for scan '{name}'.");
 
-            var transform = ParseNodeTransform(node);
+            var (transform, transformStated) = ParseNodeTransform(node);
 
             string? resolvedRcsPath = ResolveRcsPath(projectDir, supportDir, rawRcsPath, name);
             if (resolvedRcsPath == null)
                 project._warnings.Add($"Scan '{name}': scan file was not found next to the project or its path was rejected; it yields no points.");
 
-            project._scans.Add(new RcpScan(id, name, numPoints, transform, resolvedRcsPath));
+            project._scans.Add(new RcpScan(id, name, numPoints, transform, resolvedRcsPath, transformStated));
             index++;
         }
 
@@ -206,11 +207,14 @@ public sealed class RcpProjectDocument : PclDocument
     // Components may be written as x/y/z, X/Y/Z, or (for rotation) Yaw/Pitch/Roll; the first one present is used.
     // Rotation is informational only: Yaw, Pitch and Roll fill the X, Y and Z components in that order, with no
     // rotation convention implied, and PclTransform does not apply them.
-    private static PclTransform ParseNodeTransform(XElement node)
+    // The second value tells whether the project states a transform for the node at all.
+    private static (PclTransform Transform, bool Stated) ParseNodeTransform(XElement node)
     {
         var transElem = node.Element("Translation");
         var rotElem = node.Element("Rotation");
         var scaleElem = node.Element("Scale");
+
+        bool stated = transElem != null || rotElem != null || scaleElem != null;
 
         double tx = ParseDouble(transElem?.Attribute("x")?.Value ?? transElem?.Attribute("X")?.Value, 0);
         double ty = ParseDouble(transElem?.Attribute("y")?.Value ?? transElem?.Attribute("Y")?.Value, 0);
@@ -224,12 +228,14 @@ public sealed class RcpProjectDocument : PclDocument
         double sy = ParseDouble(scaleElem?.Attribute("y")?.Value ?? scaleElem?.Attribute("Y")?.Value, 1);
         double sz = ParseDouble(scaleElem?.Attribute("z")?.Value ?? scaleElem?.Attribute("Z")?.Value, 1);
 
-        return new PclTransform
+        var transform = new PclTransform
         {
             Translation = new PclVector3(tx, ty, tz),
             Rotation = new PclVector3(rx, ry, rz),
             Scale = new PclVector3(sx, sy, sz)
         };
+
+        return (transform, stated);
     }
 
     // Looks for the scan file inside the project folder only; every candidate goes through SafePath.
@@ -276,6 +282,9 @@ public sealed class RcpProjectDocument : PclDocument
 /// <summary>Scan node of a ReCap project.</summary>
 public sealed class RcpScan : PclScan
 {
+    // True when the project states a transform for the node; it then places the scan.
+    private readonly bool _transformStated;
+
     /// <inheritdoc />
     public override string Id { get; }
 
@@ -297,19 +306,20 @@ public sealed class RcpScan : PclScan
     /// <inheritdoc />
     public override bool HasIntensities => RcsFilePath != null;
 
-    internal RcpScan(string id, string name, long pointCount, PclTransform transform, string? rcsFilePath)
+    internal RcpScan(string id, string name, long pointCount, PclTransform transform, string? rcsFilePath, bool transformStated)
     {
         Id = id;
         Name = name;
         PointCount = pointCount;
         Transform = transform;
         RcsFilePath = rcsFilePath;
+        _transformStated = transformStated;
     }
 
     /// <summary>
-    /// Streams the points of the referenced .rcs file with that file's own header transform. The project node
-    /// <see cref="PclScan.Transform"/> is data only and is not applied. Yields nothing when the file was not found
-    /// (the document records a warning).
+    /// Streams the points of the referenced .rcs file. The transform of the project places the scan in the project, so
+    /// it is applied to the points instead of the transform of the scan file; when the project states no transform, the
+    /// transform of the scan file is used. Yields nothing when the file was not found (the document records a warning).
     /// </summary>
     public override IEnumerable<PclPoint> ReadPoints(PclReadOptions? options = null)
     {
@@ -317,9 +327,15 @@ public sealed class RcpScan : PclScan
         if (RcsFilePath == null) yield break;
 
         using var rcsDoc = RcsScanDocument.Open(RcsFilePath, options);
-        foreach (var pt in rcsDoc.ReadAllPoints(options))
+
+        // The transform of the project and the one of the scan file place the scan in the same way, so only one of
+        // them is applied.
+        bool place = options.ApplyTransform && _transformStated;
+        PclReadOptions readOptions = place ? options with { ApplyTransform = false } : options;
+
+        foreach (var pt in rcsDoc.ReadAllPoints(readOptions))
         {
-            yield return pt;
+            yield return place ? pt with { Position = Transform.TransformPoint(pt.Position) } : pt;
         }
     }
 }

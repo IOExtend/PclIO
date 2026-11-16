@@ -116,10 +116,11 @@ internal static class SyntheticFixtures
     // ---- ReCap project (.rcp) -------------------------------------------------------------------------------------
 
     /// <summary>A project archive with one scan node whose file is named by <paramref name="scanPath"/>.</summary>
-    public static byte[] CreateSyntheticRcpZip(string scanPath = "Scans/scan1.rcs", string scanName = "Station 1", string xmlPrologue = "") =>
-        CreateZip("project.xml", RcpManifest(scanPath, scanName, xmlPrologue));
+    public static byte[] CreateSyntheticRcpZip(string scanPath = "Scans/scan1.rcs", string scanName = "Station 1", string xmlPrologue = "",
+        bool withTransform = true) =>
+        CreateZip("project.xml", RcpManifest(scanPath, scanName, xmlPrologue, withTransform));
 
-    public static string RcpManifest(string scanPath, string scanName, string xmlPrologue = "") => $"""
+    public static string RcpManifest(string scanPath, string scanName, string xmlPrologue = "", bool withTransform = true) => $"""
         <?xml version="1.0" encoding="utf-8"?>
         {xmlPrologue}
         <Project ProjectId="synthetic-project-id" Version="2.0">
@@ -127,9 +128,11 @@ internal static class SyntheticFixtures
           <!-- The element name below is the one the reader looks for. -->
           <VoxelTreeRunTime ScanId="scan-001" ScanName="{SecurityElement.Escape(scanName)}" TotalPoints="5000">
             <RelativePath>{SecurityElement.Escape(scanPath)}</RelativePath>
+            {(withTransform ? """
             <Translation X="10.5" Y="20.5" Z="5.0" />
             <Rotation Yaw="0" Pitch="0" Roll="0" />
             <Scale X="1" Y="1" Z="1" />
+            """ : "")}
           </VoxelTreeRunTime>
         </Project>
         """;
