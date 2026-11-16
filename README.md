@@ -93,7 +93,7 @@ These readers drop data without an error or a warning, so a scan can yield fewer
   A full read reports how many points it dropped in the warnings of the document, and fails instead with `PclReadOptions.Strict`. A
   data file in neither layout, or in the sectioned layout with an element type or header value the reader does not support, cannot
   be read: the project lists it with a warning and reading its points throws `NotSupportedException`. A compressed stream whose
-  copies reach back more than 1 MiB is not decoded either: reading its points throws `NotSupportedException`, without an earlier warning.
+  copies reach back more than 8 MiB is not decoded: reading its points throws `NotSupportedException`, without an earlier warning.
 - Leica: padding entries and points that coincide with a block's origin are dropped, a compressed stream above its size limit is
   skipped, and a block that is not recognised ends the scan. The reader counts what it dropped or skipped and reports it in the
   warnings of the document, so that an incomplete result is visible. With `PclReadOptions.Strict` the read fails instead.
@@ -118,7 +118,7 @@ outside the file is fetched.
 | ReCap scan | 500,000 nodes in the node table, which must fit in the file together with the node payloads. |
 | Leica | 10,000 container entries; per point block at most 64 compressed streams, 10,000,000 compressed bytes per stream, 16 MiB per decompressed stream (checked before allocation) and 128 MiB decompressed in all; over all blocks of one read 1 GiB plus 64 times the file size decompressed. |
 | FARO | Parameters 1 MiB; scan grid of at most 2^27 cells (134,217,728); a distance stream too small for the declared grid is refused; each compressed data stream is held in memory (see above) and is inflated in chunks, and must not inflate beyond its grid size plus 64 KiB. Compound file: 65,536 directory entries, depth 16. |
-| PinPoint | Manifest 64 MiB and the default nesting depth of `System.Text.Json` (64); 100,000 scans. The parsed manifest needs memory of about 15 times its size, so a manifest at the limit needs about 1 GB. Sectioned data file: at most 16 sections, a property table of at most 1 MiB nested at most 8 levels, copies in a compressed stream at most 1 MiB back; the sections must be contiguous and fill the file, and the `Points`, `RGB8` and `Intensities8` streams must decode to exactly 12, 3 and 1 bytes per stored point. |
+| PinPoint | Manifest 64 MiB and the default nesting depth of `System.Text.Json` (64); 100,000 scans. The parsed manifest needs memory of about 15 times its size, so a manifest at the limit needs about 1 GB. Sectioned data file: at most 16 sections, a property table of at most 1 MiB nested at most 8 levels, copies in a compressed stream at most 8 MiB back with a decoder window of at most 8 MiB per stream; the sections must be contiguous and fill the file, and the `Points`, `RGB8`, `Intensities8`, `Normals` and `FilterBits` streams must decode to exactly 12, 3, 1, 12 and 1 bytes per stored point. |
 | EdgeWise | 1,048,576 characters per database line; 1,000,000 nodes. Patterns that parse a line have a time limit. |
 
 ## Exporters
