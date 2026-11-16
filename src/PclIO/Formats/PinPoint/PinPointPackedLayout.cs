@@ -110,7 +110,8 @@ internal static class PinPointPackedLayout
             position += (long)streamLength;
 
             // Each channel with a meaning here holds a fixed number of bytes per point; the stream says how many it decodes to.
-            int elementSize = name switch { "Points" => 12, "RGB8" => 3, "Intensities8" => 1, _ => 0 };
+            // "FilterBits" holds one flag byte per point; "RowColIndex" and unknown channels are skipped.
+            int elementSize = name switch { "Points" => 12, "RGB8" => 3, "Intensities8" => 1, "FilterBits" => 1, _ => 0 };
             if (elementSize == 0) continue;
             if (!seen.Add(name)) throw FormatError.Corrupted($"channel '{name}' is listed twice");
 
@@ -121,6 +122,7 @@ internal static class PinPointPackedLayout
 
             if (name == "Points") (table.PointsOffset, table.PointsLength) = (streamOffset, (long)streamLength);
             else if (name == "RGB8") (table.ColorsOffset, table.ColorsLength) = (streamOffset, (long)streamLength);
+            else if (name == "FilterBits") (table.FilterOffset, table.FilterLength) = (streamOffset, (long)streamLength);
             else (table.IntensitiesOffset, table.IntensitiesLength) = (streamOffset, (long)streamLength);
         }
 

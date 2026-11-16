@@ -52,4 +52,12 @@ public sealed record PclReadOptions
     /// incomplete data ignore this option. The default is false, so that a read never fails because of it.
     /// </summary>
     public bool Strict { get; init; }
+
+    /// <summary>
+    /// Whether points that the file marks as filtered are excluded from the read. Currently only the PinPoint
+    /// sectioned layout marks points: its "FilterBits" channel holds one flag byte per stored point, and a non-zero
+    /// flag means the point is filtered. Readers without such a channel ignore this option. The default is false, so
+    /// that every stored point that passes the other rules of the reader is returned.
+    /// </summary>
+    public bool ExcludeFilteredPoints { get; init; }
 }

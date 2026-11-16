@@ -29,6 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   colour, an intensity and a normal. `HasColors`, `HasIntensities` and `HasNormals` are no longer constants.
 - The transform of a ReCap project scan node is applied to its points unless `ApplyTransform` is false; when the manifest
   states no transform, the transform of the scan file is used.
+- The per-point flags (`FilterBits`) of the PinPoint sectioned layout are read and validated. The new
+  `PclReadOptions.ExcludeFilteredPoints` excludes the points with a non-zero flag; by default every stored point is returned.
 
 ## [0.1.0] - 2026-11-15
 

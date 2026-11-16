@@ -56,6 +56,45 @@ public sealed class PinPointPackedTests
     }
 
     [Fact]
+    public void Flagged_Points_Are_Returned_By_Default_And_Excluded_On_Request()
+    {
+        using var dir = new TempDirectory();
+        var bin = PinPointPackedFixtures.Create(Three, filterBits: [0, 1, 0]);
+        using var doc = Open(dir, bin);
+
+        var scan = (PinPointScan)Assert.Single(doc.Scans);
+        Assert.True(scan.HasFilterBits);
+
+        // By default every stored point is returned.
+        var all = ReadAll(doc);
+        Assert.Equal(3, all.Count);
+
+        // On request the point with a non-zero flag is not returned, and the rest keeps consecutive indices.
+        var kept = ReadAll(doc, new PclReadOptions { ApplyTransform = false, ExcludeFilteredPoints = true });
+        Assert.Equal(2, kept.Count);
+        Assert.Equal([0UL, 1UL], kept.Select(p => p.Index));
+        Assert.Equal([(1.0, 2.0, 3.0), (7.0, 8.0, -9.25)], kept.Select(p => (p.X, p.Y, p.Z)));
+    }
+
+    [Fact]
+    public void A_FilterBits_Channel_With_The_Wrong_Size_Is_Rejected()
+    {
+        using var dir = new TempDirectory();
+        byte[] positions = new byte[Three.Length * 12];
+        var bad = PinPointPackedFixtures.Assemble(
+        [
+            ("RowColIndex", PinPointPackedFixtures.Literals(new byte[Three.Length * 8])),
+            ("Points", PinPointPackedFixtures.Literals(positions)),
+            ("FilterBits", PinPointPackedFixtures.Literals(new byte[Three.Length - 1])),
+        ], Three.Length);
+
+        using var doc = PinPointDocument.Open(SyntheticFixtures.WritePinPointProject(dir, bad.Bytes));
+
+        Assert.Contains(doc.Warnings, w => w.Contains("FilterBits", StringComparison.Ordinal));
+        Assert.Throws<InvalidDataException>(() => ReadAll(doc));
+    }
+
+    [Fact]
     public void The_Point_Count_Comes_From_The_Data_Section_Unless_The_Manifest_Gives_One()
     {
         using var dir = new TempDirectory();
