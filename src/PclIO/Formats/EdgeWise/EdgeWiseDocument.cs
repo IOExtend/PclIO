@@ -153,12 +153,10 @@ public sealed class EdgeWiseDocument : PclDocument
 public sealed class EdgeWiseScan : PclScan
 {
     // Cluster file: a cluster count, then per cluster a centre, a point count and its points.
+    // A point record holds three 16-bit offsets from the centre; wider records are not decoded.
     private const int ClusterHeaderSize = 16;
     private const int PointSize = 6;
     private const int ChunkPoints = 8192;
-
-    // Reader assumption: the file does not declare this scale (32768 units = 0.128 m); positions are only as exact as it.
-    private const double CoordScale = 0.128 / 32768.0;
 
     /// <inheritdoc/>
     public override string Id { get; }
@@ -191,8 +189,9 @@ public sealed class EdgeWiseScan : PclScan
 
     /// <summary>Streams points from the cluster file.</summary>
     /// <remarks>
-    /// The binary layout has no signature or version, so it is checked only for size consistency, and the fixed-point
-    /// scale of the point offsets is an assumption of this reader. Only positions are returned.
+    /// The binary layout has no signature or version, so it is checked only for size consistency. A point record holds
+    /// three 16-bit offsets from the cluster centre; the scale comes from <see cref="PclReadOptions.EdgeWiseCoordinateScale"/>,
+    /// whose default keeps the long-standing assumption of the reader (32768 units = 0.128 m). Only positions are returned.
     /// </remarks>
     /// <exception cref="InvalidDataException">The cluster file is truncated or malformed.</exception>
     public override IEnumerable<PclPoint> ReadPoints(PclReadOptions? options = null)
@@ -201,6 +200,7 @@ public sealed class EdgeWiseScan : PclScan
 
         long targetCount = options.MaxPoints ?? PointCount;
         int step = Math.Max(1, options.SubsampleStep);
+        double scale = options.EdgeWiseCoordinateScale;
         long yielded = 0;
 
         using var fs = File.OpenRead(FilePath);
@@ -243,7 +243,7 @@ public sealed class EdgeWiseScan : PclScan
                     short dz = Bytes.ReadInt16LE(pointBuffer.AsSpan(off + 4, 2));
 
                     var pt = new PclPoint(
-                        new PclVector3(cx + (dx * CoordScale), cy + (dy * CoordScale), cz + (dz * CoordScale)),
+                        new PclVector3(cx + (dx * scale), cy + (dy * scale), cz + (dz * scale)),
                         Index: (ulong)yielded);
 
                     if (options.ApplyTransform)
