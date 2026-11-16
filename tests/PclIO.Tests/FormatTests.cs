@@ -495,7 +495,86 @@ public sealed class FormatTests
     }
 
     [Fact]
-    public void E57_With_Scaled_Integer_Coordinates_Opens_But_Is_Not_Decoded()
+    public void E57_With_Scaled_Integer_Coordinates_Is_Decoded()
+    {
+        const string prototype = """
+            <prototype type="Structure">
+              <cartesianX type="ScaledInteger" minimum="0" maximum="1000" scale="0.001"/>
+              <cartesianY type="ScaledInteger" minimum="-100000" maximum="100000" scale="0.01" offset="5"/>
+              <cartesianZ type="Float" precision="single"/>
+            </prototype>
+            """;
+        byte[] xs = [.. BitConverter.GetBytes((ushort)0), .. BitConverter.GetBytes((ushort)1000)];
+        byte[] ys = [.. BitConverter.GetBytes(-50000), .. BitConverter.GetBytes(25000)];
+        byte[] zs = [.. BitConverter.GetBytes(1.5f), .. BitConverter.GetBytes(-2.5f)];
+        var spec = new E57Spec { PrototypeXml = prototype, Points = [], RecordCount = 2, RawPackets = E57Spec.DataPacket([xs, ys, zs]) };
+        using var dir = new TempDirectory();
+        using var doc = E57Document.Open(dir.Write("scaled.e57", spec.Build()));
+
+        var scan = Assert.Single(doc.Scans);
+        var points = scan.ReadPoints(NoTransform).ToList();
+
+        Assert.Equal(2, points.Count);
+        AssertNear(new PclVector3(0, -495, 1.5), points[0].Position);
+        AssertNear(new PclVector3(1, 255, -2.5), points[1].Position);
+    }
+
+    [Fact]
+    public void E57_With_Scaled_Integer_Coordinates_Of_Several_Widths_Is_Decoded()
+    {
+        const string prototype = """
+            <prototype type="Structure">
+              <cartesianX type="ScaledInteger" minimum="-10" maximum="10" scale="0.5"/>
+              <cartesianY type="ScaledInteger" minimum="0" maximum="200000"/>
+              <cartesianZ type="ScaledInteger" minimum="-1099511627776" maximum="1099511627776"/>
+            </prototype>
+            """;
+        byte[] xs = [0xF6, 0x0A];
+        byte[] ys = [.. BitConverter.GetBytes(0u), .. BitConverter.GetBytes(200000u)];
+        byte[] zs = [.. BitConverter.GetBytes(5_000_000_000L), .. BitConverter.GetBytes(-7_000_000_000L)];
+        var spec = new E57Spec { PrototypeXml = prototype, Points = [], RecordCount = 2, RawPackets = E57Spec.DataPacket([xs, ys, zs]) };
+        using var dir = new TempDirectory();
+        using var doc = E57Document.Open(dir.Write("widths.e57", spec.Build()));
+
+        var points = doc.Scans[0].ReadPoints(NoTransform).ToList();
+
+        Assert.Equal(2, points.Count);
+        AssertNear(new PclVector3(-5, 0, 5_000_000_000), points[0].Position);
+        AssertNear(new PclVector3(5, 200000, -7_000_000_000), points[1].Position);
+    }
+
+    [Fact]
+    public void E57_With_A_Scaled_Integer_Range_That_Is_Empty_Is_Rejected()
+    {
+        const string prototype = """
+            <prototype type="Structure">
+              <cartesianX type="ScaledInteger" minimum="5" maximum="4" scale="0.001"/>
+              <cartesianY type="ScaledInteger" minimum="0" maximum="1000" scale="0.001"/>
+              <cartesianZ type="ScaledInteger" minimum="0" maximum="1000" scale="0.001"/>
+            </prototype>
+            """;
+        using var dir = new TempDirectory();
+
+        Assert.Throws<InvalidDataException>(() => E57Document.Open(dir.Write("scaled.e57", new E57Spec { PrototypeXml = prototype }.Build())));
+    }
+
+    [Fact]
+    public void E57_With_A_Scaled_Integer_Scale_That_Is_Not_Finite_Is_Rejected()
+    {
+        const string prototype = """
+            <prototype type="Structure">
+              <cartesianX type="ScaledInteger" minimum="0" maximum="1000" scale="NaN"/>
+              <cartesianY type="ScaledInteger" minimum="0" maximum="1000" scale="0.001"/>
+              <cartesianZ type="ScaledInteger" minimum="0" maximum="1000" scale="0.001"/>
+            </prototype>
+            """;
+        using var dir = new TempDirectory();
+
+        Assert.Throws<InvalidDataException>(() => E57Document.Open(dir.Write("scaled.e57", new E57Spec { PrototypeXml = prototype }.Build())));
+    }
+
+    [Fact]
+    public void E57_With_A_Partial_Scaled_Integer_Record_Is_Rejected()
     {
         const string prototype = """
             <prototype type="Structure">
@@ -504,11 +583,14 @@ public sealed class FormatTests
               <cartesianZ type="ScaledInteger" minimum="0" maximum="1000" scale="0.001"/>
             </prototype>
             """;
+        byte[] xs = [0x00, 0x00, 0xE8];
+        byte[] ys = [.. BitConverter.GetBytes((ushort)0), .. BitConverter.GetBytes((ushort)1000)];
+        byte[] zs = [.. BitConverter.GetBytes((ushort)0), .. BitConverter.GetBytes((ushort)1000)];
+        var spec = new E57Spec { PrototypeXml = prototype, Points = [], RecordCount = 2, RawPackets = E57Spec.DataPacket([xs, ys, zs]) };
         using var dir = new TempDirectory();
-        using var doc = E57Document.Open(dir.Write("scaled.e57", new E57Spec { PrototypeXml = prototype }.Build()));
+        using var doc = E57Document.Open(dir.Write("partial.e57", spec.Build()));
 
-        Assert.Single(doc.Scans);
-        Assert.Throws<NotSupportedException>(() => doc.Scans[0].ReadPoints().ToList());
+        Assert.Throws<InvalidDataException>(() => doc.Scans[0].ReadPoints().ToList());
     }
 
     // ---- Leica -----------------------------------------------------------------------------------------------

@@ -15,6 +15,8 @@ internal static class Bytes
 
     public static int ReadInt32LE(ReadOnlySpan<byte> span) => BinaryPrimitives.ReadInt32LittleEndian(span);
 
+    public static long ReadInt64LE(ReadOnlySpan<byte> span) => BinaryPrimitives.ReadInt64LittleEndian(span);
+
     public static float ReadSingleLE(ReadOnlySpan<byte> span) => BinaryPrimitives.ReadSingleLittleEndian(span);
 
     public static double ReadDoubleLE(ReadOnlySpan<byte> span) => BinaryPrimitives.ReadDoubleLittleEndian(span);
