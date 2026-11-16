@@ -48,6 +48,9 @@ public sealed class E57Spec
 
     public string PrototypeXml { get; init; } = DefaultPrototype;
 
+    /// <summary>Elements placed inside the codecs vector; empty for plain bit-packing.</summary>
+    public string CodecsXml { get; init; } = "";
+
     public ulong PageSize { get; init; } = 1024;
 
     /// <summary>Text inserted between the XML declaration and the root element, for example a document type declaration.</summary>
@@ -202,7 +205,7 @@ public sealed class E57Spec
                   {PoseXml}
                   <points type="CompressedVector" fileOffset="{sectionOffset.ToString(CultureInfo.InvariantCulture)}" recordCount="{count.ToString(CultureInfo.InvariantCulture)}">
                     {PrototypeXml}
-                    <codecs type="Vector" allowHeterogeneousChildren="1"/>
+                    <codecs type="Vector" allowHeterogeneousChildren="1">{CodecsXml}</codecs>
                   </points>
                 </vectorChild>
               </data3D>
