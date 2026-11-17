@@ -110,7 +110,9 @@ public static class PclLasExporter
             (bounds.Max.Z - offsetZ) / scale > int.MaxValue || (bounds.Min.Z - offsetZ) / scale < int.MinValue)
             throw new NotSupportedException($"The coordinates do not fit int32 with LAS {(is14 ? "1.4" : "1.2")} and the configured scale and offset.");
 
-        byte[] vlrs = lasOptions.WriteCoordinateSystem ? CoordinateSystemVlr(doc.CoordinateSystem) : [];
+        // The GeoTIFF record is the coordinate system carrier of LAS 1.2. LAS 1.4 point formats 6 and above require
+        // WKT, which the exporter does not produce, so a 1.4 file is written without a coordinate system record.
+        byte[] vlrs = (!is14 && lasOptions.WriteCoordinateSystem) ? CoordinateSystemVlr(doc.CoordinateSystem) : [];
         uint pointDataOffset = checked((uint)headerSize + (uint)vlrs.Length);
 
         byte[] header = new byte[headerSize];
@@ -123,7 +125,9 @@ public static class PclLasExporter
         header[104] = (byte)format; // point data format
         BinaryPrimitives.WriteUInt16LittleEndian(header.AsSpan(105, 2), (ushort)recordSize);
 
-        uint legacyCount = (is14 && count > uint.MaxValue) ? 0 : (uint)count;
+        // LAS 1.4 keeps the legacy counts at zero when the point format is 6 or above, or when the count does not
+        // fit 32 bits; the extended counts at the end of the header carry the number instead.
+        uint legacyCount = (is14 && (format >= 6 || count > uint.MaxValue)) ? 0 : (uint)count;
         BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(107, 4), legacyCount);
         BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(111, 4), legacyCount); // points of return 1
 
@@ -224,9 +228,9 @@ public static class PclLasExporter
     private const int VlrSize = 54 + 24;
 
     /// <summary>
-    /// A GeoTIFF variable length record naming the EPSG code of the source, or empty when the source has none that
-    /// fits in 16 bits. Only the <c>EPSG:NNNN</c> form is recognised and it is transcribed as a projected reference;
-    /// anything else is skipped without a record.
+    /// A GeoTIFF variable length record naming the projected EPSG code of the source, or empty when the source has
+    /// none that fits in 16 bits. Only the <c>EPSG:NNNN</c> form is recognised; geographic codes and anything else
+    /// are skipped without a record.
     /// </summary>
     private static byte[] CoordinateSystemVlr(string? coordinateSystem)
     {
@@ -260,6 +264,8 @@ public static class PclLasExporter
         return vlr;
     }
 
+    // Recognises a projected EPSG code. The record writes a projected reference, so a geographic code (the
+    // 4000-4999 block) would name a CRS of the wrong kind and is skipped, as is the user-defined sentinel 32767.
     private static bool TryParseEpsg(string? coordinateSystem, out ushort code)
     {
         code = 0;
@@ -273,6 +279,8 @@ public static class PclLasExporter
             return false;
 
         if (value is < 1 or > ushort.MaxValue) return false;
+        if (value is >= 4000 and <= 4999) return false;
+        if (value == 32767) return false;
         code = (ushort)value;
         return true;
     }

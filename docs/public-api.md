@@ -96,7 +96,7 @@ is empty, rooted, contains invalid characters or resolves outside the folder is 
 
 | Type | Use |
 |---|---|
-| `PclLasExporter` / `PclLasOptions` / `LasVersion` | `Export(doc, stream, options, lasOptions)` writes ASPRS LAS 1.2 (point format 2) or 1.4 (point formats 6 to 8), with a configurable scale (default 1 mm), offset (default the minimum of the data) and an optional GeoTIFF coordinate system record for an `EPSG:NNNN` source. Returns the number of points written. |
+| `PclLasExporter` / `PclLasOptions` / `LasVersion` | `Export(doc, stream, options, lasOptions)` writes ASPRS LAS 1.2 (point format 2) or 1.4 (point formats 6 to 8), with a configurable scale (default 1 mm) and offset (default the minimum of the data). A projected `EPSG:NNNN` coordinate system of the source is written as a GeoTIFF record for LAS 1.2 when asked; LAS 1.4 requires WKT, which the exporter does not produce, so a 1.4 file carries no coordinate system record. Returns the number of points written. |
 | `PclXyzExporter` | `Export(doc, writer, options)` writes `X Y Z R G B`, or `X Y Z I`, or `X Y Z` per point. |
 | `PclPtsExporter` | `Export(doc, writer, options)` writes the point count, then `X Y Z Intensity R G B` per point. |
 | `PclJsonExporter` | `Export(doc, writer, indented, maxPoints)` writes metadata, scans and, when `maxPoints` is above zero, sample points. |

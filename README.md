@@ -125,7 +125,7 @@ outside the file is fetched.
 
 | Output | Class | Notes |
 | --- | --- | --- |
-| LAS 1.2, point format 2<br>LAS 1.4, point formats 6 to 8 | `PclLasExporter` (`PclLasOptions` selects version, format, scale, offset and coordinate system record) | Position, intensity, classification, RGB (formats 2 and 7/8; format 8 adds a zero near infrared). 1 mm scale and offset from the data by default. An `EPSG:NNNN` coordinate system of the source is written as a GeoTIFF record only when asked. |
+| LAS 1.2, point format 2<br>LAS 1.4, point formats 6 to 8 | `PclLasExporter` (`PclLasOptions` selects version, format, scale, offset and coordinate system record) | Position, intensity, classification, RGB (formats 2 and 7/8; format 8 adds a zero near infrared). 1 mm scale and offset from the data by default. A projected `EPSG:NNNN` coordinate system of the source is written as a GeoTIFF record for LAS 1.2 only when asked; LAS 1.4 requires WKT, which the exporter does not produce, so a 1.4 file carries no coordinate system record. |
 | XYZ | `PclXyzExporter` | `X Y Z R G B` when the point has a colour, else `X Y Z I` when it has an intensity, else `X Y Z`. |
 | PTS | `PclPtsExporter` | A line with the point count, then `X Y Z Intensity R G B` per point. |
 | JSON | `PclJsonExporter` | Metadata and scans; sample points only when a point limit above zero is given. |

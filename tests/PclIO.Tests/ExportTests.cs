@@ -348,12 +348,13 @@ public sealed class ExportTests
         Assert.Equal(1, bytes[24]);
         Assert.Equal(4, bytes[25]);
         Assert.Equal(375, BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(94, 2)));
-        Assert.Equal(375 + 78u, BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(96, 4)));
-        Assert.Equal(1u, BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(100, 4)));
+        Assert.Equal(375u, BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(96, 4)));
+        Assert.Equal(0u, BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(100, 4)));
         Assert.Equal(7, bytes[104]);
         Assert.Equal(36, BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(105, 2)));
-        Assert.Equal(3u, BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(107, 4)));
-        Assert.Equal(3u, BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(111, 4)));
+        // Format 7 keeps the legacy counts at zero; the extended counts carry the number.
+        Assert.Equal(0u, BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(107, 4)));
+        Assert.Equal(0u, BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(111, 4)));
         Assert.Equal(3ul, BinaryPrimitives.ReadUInt64LittleEndian(bytes.AsSpan(247, 8)));
         Assert.Equal(3ul, BinaryPrimitives.ReadUInt64LittleEndian(bytes.AsSpan(255, 8)));
 
@@ -364,36 +365,51 @@ public sealed class ExportTests
         Assert.Equal(7.0, BinaryPrimitives.ReadDoubleLittleEndian(bytes.AsSpan(179, 8)));
         Assert.Equal(-4.5, BinaryPrimitives.ReadDoubleLittleEndian(bytes.AsSpan(187, 8)));
 
-        Assert.Equal(375 + 78 + (3 * 36), bytes.Length);
+        Assert.Equal(375 + (3 * 36), bytes.Length);
     }
 
     [Fact]
-    public void Las14_Coordinate_System_Writes_A_Geotiff_Record()
+    public void Las14_Writes_No_Coordinate_System_Record_Even_When_Requested()
     {
+        // LAS 1.4 point formats 6 and above require WKT, which the exporter does not produce, so the record is
+        // skipped rather than written in the GeoTIFF form that only LAS 1.2 may carry.
         using var doc = new FakeDocument(() => [], "sample.xyz", 0, "EPSG:3857");
         byte[] bytes = Las(doc, new PclLasOptions { Version = LasVersion.V14, PointFormat = 6, WriteCoordinateSystem = true });
 
-        Assert.Equal(375 + 78, bytes.Length);
-        Assert.Equal(0, BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(375, 2)));
-        Assert.Equal("LASF_Projection", Encoding.ASCII.GetString(bytes, 377, 15));
-        Assert.Equal(34735, BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(393, 2)));
-        Assert.Equal(24u, BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(395, 4)));
-        Assert.Equal("GeoTIFF", Encoding.ASCII.GetString(bytes, 399, 7));
+        Assert.Equal(375, bytes.Length);
+        Assert.Equal(0u, BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(100, 4)));
+    }
 
-        Assert.Equal(1, BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(429, 2)));
-        Assert.Equal(2, BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(435, 2)));
-        Assert.Equal(1024, BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(437, 2)));
-        Assert.Equal(1, BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(443, 2)));
-        Assert.Equal(3072, BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(445, 2)));
-        Assert.Equal(3857, BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(451, 2)));
+    [Fact]
+    public void Las12_Coordinate_System_Writes_A_Geotiff_Record()
+    {
+        using var doc = new FakeDocument(() => [], "sample.xyz", 0, "EPSG:3857");
+        byte[] bytes = Las(doc, new PclLasOptions { WriteCoordinateSystem = true });
+
+        Assert.Equal(LasHeaderSize + 78, bytes.Length);
+        Assert.Equal(0, BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(LasHeaderSize, 2)));
+        Assert.Equal("LASF_Projection", Encoding.ASCII.GetString(bytes, LasHeaderSize + 2, 15));
+        Assert.Equal(34735, BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(LasHeaderSize + 18, 2)));
+        Assert.Equal(24u, BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(LasHeaderSize + 20, 4)));
+        Assert.Equal("GeoTIFF", Encoding.ASCII.GetString(bytes, LasHeaderSize + 24, 7));
+
+        int keys = LasHeaderSize + 54;
+        Assert.Equal(1, BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(keys, 2)));
+        Assert.Equal(2, BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(keys + 6, 2)));
+        Assert.Equal(1024, BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(keys + 8, 2)));
+        Assert.Equal(1, BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(keys + 14, 2)));
+        Assert.Equal(3072, BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(keys + 16, 2)));
+        Assert.Equal(3857, BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(keys + 22, 2)));
     }
 
     [Theory]
     [InlineData("LOCAL_GRID_SYSTEM")]
     [InlineData("EPSG:999999")]
     [InlineData("EPSG:12x4")]
+    [InlineData("EPSG:4326")]
+    [InlineData("EPSG:32767")]
     [InlineData("epsg:3857")]
-    public void Las_Coordinate_System_Record_Needs_An_Epsg_Code_That_Fits(string? coordinateSystem)
+    public void Las_Coordinate_System_Record_Needs_A_Projected_Epsg_Code_That_Fits(string? coordinateSystem)
     {
         bool written = coordinateSystem is "epsg:3857";
         using var doc = new FakeDocument(() => [], "sample.xyz", 0, coordinateSystem);
@@ -527,6 +543,23 @@ public sealed class ExportTests
         var las = new PclLasOptions { Offset = new PclVector3(1e15, 0, 0) };
 
         Assert.Throws<NotSupportedException>(() => PclLasExporter.Export(doc, new MemoryStream(), null, las));
+    }
+
+    [Theory]
+    [InlineData(double.NaN, 0, 0)]
+    [InlineData(0, double.PositiveInfinity, 0)]
+    [InlineData(0, 0, double.NegativeInfinity)]
+    public void Las_Rejects_A_Non_Finite_Offset_Before_Writing(double x, double y, double z)
+    {
+        // A non-finite offset would slip through the extent check and write a corrupt header, so it is rejected
+        // when the options are built, before anything reaches the output.
+        Assert.Throws<ArgumentOutOfRangeException>(() => new PclLasOptions { Offset = new PclVector3(x, y, z) });
+
+        using var doc = FakeDocument.Of();
+        using var output = new MemoryStream();
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            PclLasExporter.Export(doc, output, null, new PclLasOptions { Offset = new PclVector3(x, y, z) }));
+        Assert.Equal(0, output.Length);
     }
 
     // ---- JSON ------------------------------------------------------------------------------------------------

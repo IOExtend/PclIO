@@ -15,6 +15,7 @@ public sealed record PclLasOptions
 {
     private int _pointFormat = 2;
     private double _scale = 0.001;
+    private PclVector3? _offset;
 
     /// <summary>Default options: LAS 1.2, point format 2, 1 mm scale, offset from the data, no coordinate system record.</summary>
     public static PclLasOptions Default { get; } = new();
@@ -55,14 +56,27 @@ public sealed record PclLasOptions
     }
 
     /// <summary>
-    /// Coordinate offset subtracted before scaling, or null to use the minimum of the data on every axis.
+    /// Coordinate offset subtracted before scaling, or null to use the minimum of the data on every axis. Every
+    /// component must be finite.
     /// </summary>
-    public PclVector3? Offset { get; init; }
+    /// <exception cref="ArgumentOutOfRangeException">A component is not finite.</exception>
+    public PclVector3? Offset
+    {
+        get => _offset;
+        init
+        {
+            if (value is { } v && (!double.IsFinite(v.X) || !double.IsFinite(v.Y) || !double.IsFinite(v.Z)))
+                throw new ArgumentOutOfRangeException(nameof(value), "The LAS offset must be finite on every axis.");
+            _offset = value;
+        }
+    }
 
     /// <summary>
-    /// Whether to write the coordinate system of the source as a GeoTIFF variable length record when it names an
-    /// EPSG code that fits in 16 bits (the <c>EPSG:NNNN</c> form, transcribed as a projected reference). Sources carry
-    /// only the code, so anything else is skipped without a record. The default is false.
+    /// Whether to write the coordinate system of the source as a GeoTIFF variable length record when it names a
+    /// projected EPSG code that fits in 16 bits (the <c>EPSG:NNNN</c> form). Geographic codes and anything else are
+    /// skipped without a record. Only LAS 1.2 carries the record: LAS 1.4 point formats 6 and above require WKT,
+    /// which the exporter does not produce, so a 1.4 file is written without a coordinate system record. The default
+    /// is false.
     /// </summary>
     public bool WriteCoordinateSystem { get; init; }
 }
