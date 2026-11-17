@@ -6,9 +6,10 @@ namespace PclIO.Formats.Ply;
 /// <remarks>
 /// <para>
 /// Supported: ASCII and binary little and big endian files whose header declares a vertex element; positions from
-/// the x, y and z properties, colour from red, green and blue (with alpha when present), intensity from an
-/// intensity property, and normals from nx, ny and nz, by those conventional names in any numeric type. Faces and
-/// all other elements are ignored. Points whose coordinates are not finite are not returned.
+/// the x, y and z properties, intensity from an intensity property, and normals from nx, ny and nz, by those
+/// conventional names in any numeric type. Colour is read from red, green and blue (with alpha when present)
+/// only when they are 8-bit integers; a wider or float colour is left unread with a warning. Faces and all other
+/// elements are ignored. Points whose coordinates are not finite are not returned.
 /// </para>
 /// <para>
 /// Not read (reported with <see cref="NotSupportedException"/> when the file is opened): files without a vertex
@@ -82,14 +83,34 @@ public sealed class PlyDocument : PclDocument
             if (element == vertex) break;
             if (element.Properties.Any(p => p.IsList))
                 throw FormatError.Unsupported($"PLY element '{element.Name}' before the vertices has list properties.");
-            vertexDataOffset += element.Count * (long)element.Stride;
-            vertexLineSkip += element.Count;
-            if (vertexDataOffset < 0) throw FormatError.Corrupted("PLY elements declare more bytes than can be counted.");
+            try
+            {
+                checked
+                {
+                    vertexDataOffset += element.Count * (long)element.Stride;
+                    vertexLineSkip += element.Count;
+                }
+            }
+            catch (OverflowException)
+            {
+                throw FormatError.Corrupted("PLY elements declare more bytes than can be counted.");
+            }
+            if (vertexDataOffset < 0 || vertexLineSkip < 0)
+                throw FormatError.Corrupted("PLY elements declare more bytes than can be counted.");
         }
 
         if (header.Data != PlyData.Ascii)
         {
-            long need = vertex.Count * (long)vertex.Stride;
+            if (vertexDataOffset > fs.Length) throw FormatError.Truncated("vertex data");
+            long need;
+            try
+            {
+                checked { need = vertex.Count * (long)vertex.Stride; }
+            }
+            catch (OverflowException)
+            {
+                throw FormatError.Corrupted("PLY vertices declare more bytes than can be counted.");
+            }
             if (need > fs.Length - vertexDataOffset) throw FormatError.Truncated("vertex data");
         }
 
@@ -101,8 +122,17 @@ public sealed class PlyDocument : PclDocument
         });
 
         string name = Path.GetFileNameWithoutExtension(path);
-        document._scans.Add(new PlyScan("0", name, vertex.Count, path, header, vertex, vertexDataOffset, vertexLineSkip));
+        document._scans.Add(new PlyScan("0", name, vertex.Count, path, header, vertex, vertexDataOffset, vertexLineSkip, document));
         return document;
+    }
+
+    /// <summary>Adds a warning to the document, once per distinct message.</summary>
+    internal void AddWarning(string message)
+    {
+        lock (_warnings)
+        {
+            if (!_warnings.Contains(message, StringComparer.Ordinal)) _warnings.Add(message);
+        }
     }
 
     private static int Find(PlyElement element, string name)
@@ -336,7 +366,8 @@ public sealed class PlyScan : PclScan
     private readonly int _normalZ;
 
     internal PlyScan(string id, string name, long pointCount, string filePath,
-        PlyDocument.PlyHeader header, PlyDocument.PlyElement vertex, long vertexDataOffset, long vertexLineSkip)
+        PlyDocument.PlyHeader header, PlyDocument.PlyElement vertex, long vertexDataOffset, long vertexLineSkip,
+        PlyDocument? document = null)
     {
         Id = id;
         Name = name;
@@ -364,6 +395,11 @@ public sealed class PlyScan : PclScan
             (_alpha < 0 || ByteChannel(_alpha));
         HasIntensities = _intensity >= 0;
         HasNormals = _normalX >= 0 && _normalY >= 0 && _normalZ >= 0;
+
+        // Colour is read only from 8-bit integer channels; a wider or float colour is left unread, and the drop
+        // is reported so it is not silent.
+        if ((_red >= 0 || _green >= 0 || _blue >= 0) && !HasColors)
+            document?.AddWarning("PLY colour is not stored as 8-bit integers; colour is not read.");
     }
 
     private int Find(string name)

@@ -102,8 +102,8 @@ These readers drop data without an error or a warning, so a scan can yield fewer
   skipped, and a block that is not recognised ends the scan. The reader counts what it dropped or skipped and reports it in the
   warnings of the document, so that an incomplete result is visible. With `PclReadOptions.Strict` the read fails instead.
 - EdgeWise: a database node whose point count is 0 is skipped.
-- PCD: a point with a NaN or infinite coordinate is not returned.
-- PLY: a vertex with a NaN or infinite coordinate is not returned.
+- PCD: a point with a NaN or infinite coordinate is not returned; a colour, intensity or normal field whose shape the reader does not convert stays unread, so the points come without that channel.
+- PLY: a vertex with a NaN or infinite coordinate is not returned; colour that is not stored as 8-bit integers is left unread, with a warning.
 ### Limits
 
 A file that exceeds one of these limits, or whose declared sizes and counts do not fit the file, is rejected with

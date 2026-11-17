@@ -6,6 +6,7 @@ using PclIO.Formats.Las;
 using PclIO.Formats.Leica;
 using PclIO.Formats.Pcd;
 using PclIO.Formats.PinPoint;
+using PclIO.Formats.Ply;
 using PclIO.Formats.Recap;
 using Xunit;
 
@@ -3149,5 +3150,86 @@ public sealed class FormatTests
         Assert.Throws<InvalidDataException>(() => PlyDocument.Open(dir.Write("sample.ply", bytes)));
         Assert.Equal(PclFileKind.Unknown, PclFile.DetectKind(dir.Write("other.ply", bytes)));
         Assert.Throws<NotSupportedException>(() => PclFile.Open(dir.PathOf("other.ply")));
+    }
+
+    [Theory]
+    [InlineData("binary_little_endian", true)]
+    [InlineData("binary_big_endian", false)]
+    public void Ply_Binary_Elements_Before_Vertices_Are_Skipped(string format, bool littleEndian)
+    {
+        // A fixed-size camera element precedes the vertices; its bytes are skipped, not read as points.
+        using var dir = new TempDirectory();
+        var header = new[]
+        {
+            "ply", $"format {format} 1.0", "element camera 1", "property double value",
+            "element vertex 1", "property float x", "property float y", "property float z", "end_header",
+        };
+        byte[] body = new byte[20];
+        Span<byte> cam = body.AsSpan(0, 8);
+        Span<byte> vx = body.AsSpan(8, 4), vy = body.AsSpan(12, 4), vz = body.AsSpan(16, 4);
+        if (littleEndian)
+        {
+            System.Buffers.Binary.BinaryPrimitives.WriteDoubleLittleEndian(cam, 12345.6789);
+            System.Buffers.Binary.BinaryPrimitives.WriteSingleLittleEndian(vx, 1f);
+            System.Buffers.Binary.BinaryPrimitives.WriteSingleLittleEndian(vy, 2f);
+            System.Buffers.Binary.BinaryPrimitives.WriteSingleLittleEndian(vz, 3f);
+        }
+        else
+        {
+            System.Buffers.Binary.BinaryPrimitives.WriteDoubleBigEndian(cam, 12345.6789);
+            System.Buffers.Binary.BinaryPrimitives.WriteSingleBigEndian(vx, 1f);
+            System.Buffers.Binary.BinaryPrimitives.WriteSingleBigEndian(vy, 2f);
+            System.Buffers.Binary.BinaryPrimitives.WriteSingleBigEndian(vz, 3f);
+        }
+        using var doc = PlyDocument.Open(dir.Write("sample.ply", SyntheticFixtures.CreatePlyFile(header, body)));
+
+        AssertNear(new PclVector3(1, 2, 3), Assert.Single(doc.Scans[0].ReadPoints(NoTransform)).Position);
+    }
+
+    [Fact]
+    public void Ply_Huge_Preceding_Element_Count_Is_Rejected_At_Open()
+    {
+        // count * stride wraps past zero unchecked; the checked product rejects the file at open instead of
+        // reading the camera bytes as vertices.
+        using var dir = new TempDirectory();
+        var header = new[]
+        {
+            "ply", "format binary_little_endian 1.0", "element camera 2305843009213693952", "property double value",
+            "element vertex 1", "property float x", "property float y", "property float z", "end_header",
+        };
+        byte[] body = new byte[20];
+        Assert.Throws<InvalidDataException>(() =>
+            PlyDocument.Open(dir.Write("sample.ply", SyntheticFixtures.CreatePlyFile(header, body))));
+    }
+
+    [Fact]
+    public void Ply_Ascii_Preceding_Element_Counts_That_Wrap_Are_Rejected()
+    {
+        // Two preceding counts sum past long.MaxValue; the wrapped line skip would read the wrong lines.
+        using var dir = new TempDirectory();
+        var header = new[]
+        {
+            "ply", "format ascii 1.0",
+            "element camera 9223372036854775807", "property float x", "property float y", "property float z",
+            "element edge 1", "property float x", "property float y", "property float z",
+            "element vertex 1", "property float x", "property float y", "property float z", "end_header",
+        };
+        Assert.Throws<InvalidDataException>(() =>
+            PlyDocument.Open(dir.Write("sample.ply", SyntheticFixtures.CreatePlyFile(header, "1 2 3\n"u8.ToArray()))));
+    }
+
+    [Fact]
+    public void Ply_Float_Colour_Is_Left_Unread_With_A_Warning()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticPly(
+            properties: [("x", "float"), ("y", "float"), ("z", "float"), ("red", "float"), ("green", "float"), ("blue", "float")]);
+        using var doc = PlyDocument.Open(dir.Write("sample.ply", bytes));
+
+        var scan = Assert.Single(doc.Scans);
+        Assert.False(scan.HasColors);
+        Assert.Equal(3, scan.ReadPoints(NoTransform).Count());
+        Assert.All(scan.ReadPoints(NoTransform), p => Assert.Null(p.Color));
+        Assert.Contains(doc.Warnings, w => w.Contains("colour is not stored as 8-bit integers", StringComparison.Ordinal));
     }
 }
