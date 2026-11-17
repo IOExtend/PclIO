@@ -616,13 +616,14 @@ public sealed class FormatTests
 
         var plain = scan.ReadPoints(NoTransform).ToList();
         Assert.Equal(3, plain.Count);
-        AssertNear(new PclVector3(0, 2, 0), plain[0].Position);
-        AssertNear(new PclVector3(1, 0, 0), plain[1].Position);
-        AssertNear(new PclVector3(0, -Math.Sqrt(3), 1), plain[2].Position);
+        // Azimuth is measured from the positive X axis: az=0 lies on +X, az=pi/2 on +Y.
+        AssertNear(new PclVector3(2, 0, 0), plain[0].Position);
+        AssertNear(new PclVector3(0, 1, 0), plain[1].Position);
+        AssertNear(new PclVector3(-Math.Sqrt(3), 0, 1), plain[2].Position);
 
         // The pose of the scan moves the converted points as it moves Cartesian ones.
         var moved = scan.ReadPoints().ToList();
-        AssertNear(new PclVector3(1.5, 4.5, 3.5), moved[0].Position);
+        AssertNear(new PclVector3(3.5, 2.5, 3.5), moved[0].Position);
     }
 
     [Fact]
@@ -643,7 +644,7 @@ public sealed class FormatTests
         using var doc = E57Document.Open(dir.Write("scaled-spherical.e57", spec.Build()));
 
         var point = Assert.Single(doc.Scans[0].ReadPoints(NoTransform));
-        AssertNear(new PclVector3(0, 2, 0), point.Position);
+        AssertNear(new PclVector3(2, 0, 0), point.Position);
     }
 
     [Fact]

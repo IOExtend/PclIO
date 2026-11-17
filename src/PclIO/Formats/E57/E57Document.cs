@@ -720,7 +720,9 @@ public sealed class E57Scan : PclScan
         ReadNumber(packet, starts[layout.Coordinate[axis]], layout.CoordinateSize[axis], index,
             layout.CoordinateScaled[axis], layout.CoordinateUnsigned[axis], layout.CoordinateScale[axis], layout.CoordinateOffset[axis]);
 
-    // Spherical coordinates as the E57 standard defines them: range in the file's unit, azimuth and elevation in radians.
+    // Spherical coordinates as the E57 standard defines them: range in the file's unit, azimuth and elevation in
+    // radians. The azimuth is the counterclockwise rotation of the positive X axis about the positive Z axis, and
+    // the elevation is measured up from the XY plane, so x = r cos(el) cos(az), y = r cos(el) sin(az), z = r sin(el).
     private static PclVector3 ReadSpherical(E57PointLayout layout, byte[] packet, int[] starts, int index)
     {
         double range = ReadNumber(packet, starts[layout.Spherical[0]], layout.SphericalSize[0], index,
@@ -732,8 +734,8 @@ public sealed class E57Scan : PclScan
 
         double cosElevation = Math.Cos(elevation);
         return new PclVector3(
-            range * cosElevation * Math.Sin(azimuth),
             range * cosElevation * Math.Cos(azimuth),
+            range * cosElevation * Math.Sin(azimuth),
             range * Math.Sin(elevation));
     }
 
