@@ -769,7 +769,7 @@ public sealed class FormatTests
         using var doc = E57Document.Open(dir.Write("spherical-flags.e57", spec.Build()));
 
         var point = Assert.Single(doc.Scans[0].ReadPoints(NoTransform));
-        AssertNear(new PclVector3(0, 2, 0), point.Position);
+        AssertNear(new PclVector3(2, 0, 0), point.Position);
     }
 
     [Fact]
