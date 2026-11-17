@@ -548,6 +548,57 @@ public sealed class FormatTests
     }
 
     [Fact]
+    public void A_Lgsx_Container_Whose_First_Chunk_Is_Not_A_Point_Block_Reports_It()
+    {
+        // The chain is empty because the very first chunk is unknown; the point data still ends at a block the
+        // reader does not know, and the declared count is not what a read returns.
+        using var dir = new TempDirectory();
+        using var doc = LgsxDocument.Open(dir.Write("site.lgsx", SyntheticFixtures.CreateSyntheticLgsx(unknownFirstBlock: true)));
+
+        var scan = Assert.Single(doc.Scans);
+        Assert.Equal(5, scan.PointCount);
+        Assert.Empty(scan.ReadPoints());
+        Assert.Contains(doc.Warnings, w => w.Contains("ends after 0 blocks", StringComparison.Ordinal));
+        Assert.Throws<InvalidDataException>(() => scan.ReadPoints(new PclReadOptions { Strict = true }).ToList());
+    }
+
+    [Fact]
+    public void A_Lgsx_Block_Whose_Frame_List_Is_Cut_Short_Is_Reported()
+    {
+        using var dir = new TempDirectory();
+        using var doc = LgsxDocument.Open(dir.Write("site.lgsx", SyntheticFixtures.CreateSyntheticLgsx(truncatedFrameList: true)));
+
+        var scan = Assert.Single(doc.Scans);
+        Assert.Equal(5, scan.ReadPoints().Count());
+        Assert.Contains(doc.Warnings, w => w.Contains("1 point blocks have a frame list that ends before the block does", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void A_Lgsx_Block_With_Fewer_Than_Four_Planes_Is_Reported()
+    {
+        using var dir = new TempDirectory();
+        using var doc = LgsxDocument.Open(dir.Write("site.lgsx", SyntheticFixtures.CreateSyntheticLgsx(fewPlanes: true)));
+
+        var scan = Assert.Single(doc.Scans);
+        Assert.Empty(scan.ReadPoints());
+        Assert.Contains(doc.Warnings, w => w.Contains("1 point blocks were skipped because they hold fewer than four planes", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Interleaved_Reads_Of_A_Lgsx_Scan_Keep_Their_Own_Counts()
+    {
+        // Two enumerators advance side by side; the counters of one read must not reset or mix with the other's.
+        var points = new List<LeicaSamplePoint> { new(1, 2, 3), new(0, 0, 0), new(4, 5, 6), new(0, 0, 0) };
+        using var dir = new TempDirectory();
+        using var doc = LgsxDocument.Open(dir.Write("site.lgsx", SyntheticFixtures.CreateSyntheticLgsx(points)));
+
+        var scan = Assert.Single(doc.Scans);
+        var pairs = scan.ReadPoints().Zip(scan.ReadPoints(), (a, b) => (a, b)).ToList();
+        Assert.Equal(2, pairs.Count);
+        Assert.Contains(doc.Warnings, w => w.Contains("2 points were dropped", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void A_Lgsx_Container_Fails_In_Strict_Mode_When_Its_Point_Data_Is_Incomplete()
     {
         using var dir = new TempDirectory();

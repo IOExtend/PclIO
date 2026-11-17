@@ -157,10 +157,13 @@ internal static class SyntheticFixtures
     /// <param name="withPointCount">False leaves the number of points out of the header of the point data.</param>
     /// <param name="oversizedFrame">True writes a frame whose declared length is above the accepted size.</param>
     /// <param name="unknownBlock">True writes a block after the point blocks that the reader does not know.</param>
+    /// <param name="unknownFirstBlock">True writes a chunk the reader does not know before the point blocks.</param>
+    /// <param name="truncatedFrameList">True ends the frame list of a block with a length prefix that declares more bytes than the block holds.</param>
+    /// <param name="fewPlanes">True writes the blocks with fewer than four planes, so they carry no positions.</param>
     public static byte[] CreateSyntheticLgsx(IReadOnlyList<LeicaSamplePoint>? points = null, bool withColorAndIntensity = false, bool withPointData = true,
         IReadOnlyList<byte[]>? extraPlanes = null, int setupCount = 1, bool assignPointsToSetups = false, bool overlappingSetupRanges = false,
         bool collidingSetupNames = false, bool damagedSetupRecord = false, bool damagedPointData = false, bool withPointCount = true,
-        bool oversizedFrame = false, bool unknownBlock = false)
+        bool oversizedFrame = false, bool unknownBlock = false, bool unknownFirstBlock = false, bool truncatedFrameList = false, bool fewPlanes = false)
     {
         points ??= DefaultLeicaPoints;
         using var ms = new MemoryStream();
@@ -174,7 +177,8 @@ internal static class SyntheticFixtures
             : new List<IReadOnlyList<LeicaSamplePoint>> { points };
 
         (byte[] payload, List<(long Start, long Length)> blocks) =
-            BuildLeicaPayload(groups, withColorAndIntensity, extraPlanes ?? [], damagedPointData, withPointCount, oversizedFrame, unknownBlock);
+            BuildLeicaPayload(groups, withColorAndIntensity, extraPlanes ?? [], damagedPointData, withPointCount, oversizedFrame, unknownBlock,
+                unknownFirstBlock, truncatedFrameList, fewPlanes);
 
         // The point data follows the container entries and their records, so its start is known before they are written.
         var setupNames = Enumerable.Range(0, setupCount).Select(i => "SETUP-" + (3 + i)).ToList();
@@ -302,7 +306,8 @@ internal static class SyntheticFixtures
     // Builds the point data payload: a header, then one block per group of points.
     private static (byte[] Payload, List<(long Start, long Length)> Blocks) BuildLeicaPayload(
         IReadOnlyList<IReadOnlyList<LeicaSamplePoint>> groups, bool full, IReadOnlyList<byte[]> extraPlanes, bool damaged = false,
-        bool withPointCount = true, bool oversizedFrame = false, bool unknownBlock = false)
+        bool withPointCount = true, bool oversizedFrame = false, bool unknownBlock = false,
+        bool unknownFirstBlock = false, bool truncatedFrameList = false, bool fewPlanes = false)
     {
         using var ms = new MemoryStream();
         using var bw = new BinaryWriter(ms);
@@ -315,6 +320,14 @@ internal static class SyntheticFixtures
             BinaryPrimitives.WriteUInt64LittleEndian(header.AsSpan(0x28, 8), (ulong)groups.Sum(g => g.Count));
         bw.Write(header);
 
+        // A chunk that is not a point block before the point blocks: the chain stays empty.
+        if (unknownFirstBlock)
+        {
+            bw.Write("XPRB"u8.ToArray());
+            bw.Write((uint)(8 + 128));
+            bw.Write(new byte[128]);
+        }
+
         var blocks = new List<(long Start, long Length)>();
         foreach (var group in groups)
         {
@@ -322,6 +335,7 @@ internal static class SyntheticFixtures
             if (group.Count == 0) continue;
 
             var frames = BuildFrames(group, full, extraPlanes);
+            if (fewPlanes) frames = [.. frames.Take(3)];
             if (damaged)
             {
                 // A frame whose descriptor is not valid: the header of the block stays readable, the data does not.
@@ -330,7 +344,7 @@ internal static class SyntheticFixtures
 
             // A frame whose declared length is above the accepted size is skipped by the reader.
             const ulong OversizedLength = 20_000_000;
-            int blockLength = 8 + 128 + frames.Sum(f => 8 + f.Length) + (oversizedFrame ? 8 : 0);
+            int blockLength = 8 + 128 + frames.Sum(f => 8 + f.Length) + (oversizedFrame ? 8 : 0) + (truncatedFrameList ? 8 : 0);
             long start = ms.Position;
 
             bw.Write("APRN"u8.ToArray());
@@ -347,6 +361,9 @@ internal static class SyntheticFixtures
             }
 
             if (oversizedFrame) bw.Write(OversizedLength);
+
+            // A length prefix that declares more bytes than the block holds: the frame list is cut short.
+            if (truncatedFrameList) bw.Write((ulong)1000);
 
             blocks.Add((start, blockLength));
         }
