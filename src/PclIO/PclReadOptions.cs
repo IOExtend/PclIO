@@ -31,13 +31,15 @@ public sealed record PclReadOptions
     /// returned. Null means no magnitude limit. Coordinates that are NaN or infinite are never returned. Currently only
     /// the PinPoint reader applies this rule; other readers ignore this option. The default is 5000.
     /// </summary>
-    /// <exception cref="ArgumentOutOfRangeException">The value is negative.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">The value is negative or not finite.</exception>
     public double? MaxCoordinateMagnitude
     {
         get => _maxCoordinateMagnitude;
         init
         {
             ArgumentOutOfRangeException.ThrowIfNegative(value ?? 0, nameof(value));
+            if (value is double v && !double.IsFinite(v))
+                throw new ArgumentOutOfRangeException(nameof(value), "The magnitude limit must be finite; null means no limit.");
             _maxCoordinateMagnitude = value;
         }
     }

@@ -51,7 +51,10 @@ public sealed class OptionsAndPathTests
     [Theory]
     [InlineData(-1.0)]
     [InlineData(double.MinValue)]
-    public void A_Negative_Magnitude_Limit_Is_Rejected(double value) =>
+    [InlineData(double.NaN)]
+    [InlineData(double.PositiveInfinity)]
+    [InlineData(double.NegativeInfinity)]
+    public void A_Negative_Or_Non_Finite_Magnitude_Limit_Is_Rejected(double value) =>
         Assert.Throws<ArgumentOutOfRangeException>(() => new PclReadOptions { MaxCoordinateMagnitude = value });
 
     [Fact]

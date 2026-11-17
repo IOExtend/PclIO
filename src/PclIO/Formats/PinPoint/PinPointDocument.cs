@@ -540,6 +540,7 @@ public sealed class PinPointScan : PclScan
 
         long yielded = 0;
         long start = 0;
+        long visited = 0;
         for (; start < pointTotal && yielded < targetCount; start += Batch)
         {
             int count = (int)Math.Min(Batch, pointTotal - start);
@@ -556,6 +557,7 @@ public sealed class PinPointScan : PclScan
 
             for (int j = 0; j < count && yielded < targetCount; j++)
             {
+                visited++;
                 if ((start + j) % step != 0) continue;
                 if (filters != null && filterBytes[j] != 0) continue;
 
@@ -622,12 +624,16 @@ public sealed class PinPointScan : PclScan
                 if (stream != null && stream.ReadByte() >= 0) throw FormatError.Corrupted("a compressed channel holds more data than it declares");
         }
 
-        ReportDroppedPoints(options, magnitudeLimit, droppedNonFinite, droppedOutOfRange);
+        // The report describes the whole point data. A read that MaxPoints stopped early visited only a part of it,
+        // so its counts say nothing about the rest and are not reported.
+        if (visited >= pointTotal)
+            ReportDroppedPoints(options, magnitudeLimit, droppedNonFinite, droppedOutOfRange);
     }
 
     /// <summary>
     /// Reports the points that the plausibility rule dropped: a warning tells how many had non-finite coordinates and
-    /// how many were beyond the magnitude limit. In strict mode the read fails instead.
+    /// how many were beyond the magnitude limit. In strict mode the read fails instead. Called only when the whole
+    /// point data was read, so the counts describe all of it.
     /// </summary>
     private void ReportDroppedPoints(PclReadOptions options, double? magnitudeLimit, long nonFinite, long outOfRange)
     {
