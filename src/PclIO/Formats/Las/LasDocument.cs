@@ -23,6 +23,7 @@ public sealed class LasDocument : PclDocument
     private const int Las14HeaderSize = 375;
     private const int MaxVlrs = 4096;
     private const int MaxVlrDataBytes = 1 << 20;
+    private const long MaxVlrTotalBytes = 16L << 20;
     private const int MaxPointRecordLength = 1 << 20;
 
     /// <inheritdoc />
@@ -100,7 +101,9 @@ public sealed class LasDocument : PclDocument
         if (vlrCount > MaxVlrs)
             throw FormatError.Corrupted($"LAS file declares {vlrCount} variable length records; at most {MaxVlrs} are accepted.");
 
-        int pointFormat = header[104];
+        // The low six bits hold the point format; bit 6 flags waveform data packets and bit 7 is reserved. The
+        // waveform tail is skipped as extra bytes, so a file that sets bit 6 still reads with its base format.
+        int pointFormat = header[104] & 0x3F;
         if (pointFormat > 10)
             throw FormatError.Unsupported($"LAS point format {pointFormat} is not supported; point formats 0 to 10 are read.");
         if (pointFormat >= 6 && minor != 4)
@@ -199,11 +202,13 @@ public sealed class LasDocument : PclDocument
     private sealed record Vlr(string UserId, int RecordId, byte[] Data);
 
     // Reads the variable length records between the header and the point data. Every declared size is checked
-    // against the file before anything is allocated for it.
+    // against the file before anything is allocated for it. Only the coordinate system records are kept; the rest
+    // are walked past without holding their payload, so a file with many large records does not exhaust memory.
     private static List<Vlr> ReadVlrs(FileStream fs, int headerSize, uint pointDataOffset, uint vlrCount)
     {
         var vlrs = new List<Vlr>((int)Math.Min(vlrCount, 16));
         long position = headerSize;
+        long keptBytes = 0;
         byte[] header = new byte[54];
 
         for (uint i = 0; i < vlrCount; i++)
@@ -220,11 +225,23 @@ public sealed class LasDocument : PclDocument
                 throw FormatError.Corrupted($"LAS variable length record holds {dataLength} bytes; at most {MaxVlrDataBytes} are accepted.");
             if (position + dataLength > pointDataOffset) throw FormatError.Corrupted("LAS variable length record reaches past the point data.");
 
-            byte[] data = new byte[dataLength];
-            if (dataLength > 0) fs.ReadExactly(data);
-            position += dataLength;
+            // A compressed LAZ file shares the LAS signature and header; its point data is not LAS records, so it
+            // is rejected here rather than read as points.
+            if (userId.Equals("laszip encoded", StringComparison.Ordinal) && recordId == 22205)
+                throw FormatError.Unsupported("LAS file is compressed (LAZ); compressed point data is not read.");
 
-            vlrs.Add(new Vlr(userId, recordId, data));
+            bool isCoordinateSystem = userId.Equals("LASF_Projection", StringComparison.Ordinal) && (recordId == 34735 || recordId == 2112);
+            if (isCoordinateSystem)
+            {
+                keptBytes += dataLength;
+                if (keptBytes > MaxVlrTotalBytes)
+                    throw FormatError.Corrupted("LAS coordinate system records hold more bytes than are accepted.");
+                byte[] data = new byte[dataLength];
+                if (dataLength > 0) fs.ReadExactly(data);
+                vlrs.Add(new Vlr(userId, recordId, data));
+            }
+
+            position += dataLength;
         }
 
         return vlrs;
@@ -242,9 +259,11 @@ public sealed class LasDocument : PclDocument
 
         foreach (var vlr in vlrs)
         {
-            if ((vlr.RecordId == 2111 || vlr.RecordId == 2112) && vlr.UserId.Equals("LASF_Spec", StringComparison.Ordinal))
+            // The OGC coordinate system WKT lives in record 2112 under LASF_Projection; record 2111 is a math
+            // transform, not a coordinate system, and is not read as one.
+            if (vlr.RecordId == 2112 && vlr.UserId.Equals("LASF_Projection", StringComparison.Ordinal))
             {
-                string wkt = System.Text.Encoding.ASCII.GetString(vlr.Data).TrimEnd('\0', ' ', '\r', '\n');
+                string wkt = System.Text.Encoding.UTF8.GetString(vlr.Data).TrimEnd('\0', ' ', '\r', '\n');
                 if (wkt.Length > 0) return wkt;
             }
         }
@@ -270,7 +289,8 @@ public sealed class LasDocument : PclDocument
                 var entry = data.AsSpan(8 + (k * 8), 8);
                 if (Bytes.ReadUInt16LE(entry[..2]) != wanted) continue;
                 int value = Bytes.ReadUInt16LE(entry.Slice(6, 2));
-                if (value is >= 1 and <= ushort.MaxValue)
+                // 32767 is the user-defined sentinel, not an assigned EPSG code; the definition lives elsewhere.
+                if (value is >= 1 and <= ushort.MaxValue && value != 32767)
                 {
                     code = (ushort)value;
                     return true;

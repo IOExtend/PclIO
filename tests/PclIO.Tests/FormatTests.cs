@@ -2334,6 +2334,87 @@ public sealed class FormatTests
         Assert.Equal(wkt, doc.CoordinateSystem);
     }
 
+    [Theory]
+    [InlineData(0, 0)]
+    [InlineData(1, 1)]
+    [InlineData(3, 3)]
+    public void Las_Versions_One_Zero_To_One_Three_Are_Read(int pointFormat, int versionMinor)
+    {
+        var points = new[] { new LasSamplePoint(1, 2, 3, 0.5f, null, 7) };
+        using var dir = new TempDirectory();
+        using var doc = LasDocument.Open(dir.Write("sample.las",
+            SyntheticFixtures.CreateSyntheticLas(points, versionMinor: versionMinor, pointFormat: pointFormat)));
+
+        Assert.Equal($"1.{versionMinor}", doc.Version);
+        var point = Assert.Single(doc.Scans[0].ReadPoints(NoTransform));
+        AssertNear(new PclVector3(1, 2, 3), point.Position);
+    }
+
+    [Fact]
+    public void Las_With_The_Waveform_Bit_Set_Reads_With_Its_Base_Format()
+    {
+        // Bit 6 of the format byte flags waveform data packets; the format is the low six bits.
+        var points = new[] { new LasSamplePoint(1, 2, 3, 0.5f, null, 7) };
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticLas(points, versionMinor: 4, pointFormat: 4);
+        bytes[104] |= 0x40;
+        using var doc = LasDocument.Open(dir.Write("sample.las", bytes));
+
+        var scan = Assert.Single(doc.Scans);
+        Assert.Equal(4, doc.PointFormat);
+        AssertNear(new PclVector3(1, 2, 3), Assert.Single(scan.ReadPoints(NoTransform)).Position);
+    }
+
+    [Fact]
+    public void Las_With_A_Laszip_Record_Is_Rejected_As_Compressed()
+    {
+        // A LAZ renamed to .las keeps the LAS signature and header; the laszip record marks it compressed.
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticLas(LasPoints,
+            vlrs: [("laszip encoded", 22205, new byte[] { 1, 2, 3, 4 })]);
+
+        Assert.Throws<NotSupportedException>(() => LasDocument.Open(dir.Write("sample.las", bytes)));
+        Assert.Throws<NotSupportedException>(() => PclFile.Open(dir.Write("renamed.las", bytes)));
+    }
+
+    [Theory]
+    [InlineData("LASF_Spec", 2112)]
+    [InlineData("LASF_Projection", 2111)]
+    public void Las_Wkt_In_The_Wrong_Record_Identity_Is_Not_A_Crs(string userId, int recordId)
+    {
+        const string wkt = "PROJCS[\"WGS 84 / Test\",GEOGCS[\"WGS 84\"]]";
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticLas(LasPoints,
+            vlrs: [(userId, (ushort)recordId, System.Text.Encoding.UTF8.GetBytes(wkt + "\0"))]);
+        using var doc = LasDocument.Open(dir.Write("sample.las", bytes));
+
+        Assert.Null(doc.CoordinateSystem);
+    }
+
+    [Fact]
+    public void Las_User_Defined_Epsg_Sentinel_Is_Not_A_Crs()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticLas(LasPoints,
+            vlrs: [SyntheticFixtures.LasEpsgVlr(32767)]);
+        using var doc = LasDocument.Open(dir.Write("sample.las", bytes));
+
+        Assert.Null(doc.CoordinateSystem);
+    }
+
+    [Fact]
+    public void Las_With_A_Huge_Declared_Count_Fails_Cleanly_When_Read()
+    {
+        // The count is not checked against the file at open; a read of the missing records fails with a truncation
+        // error rather than allocating for the declared count.
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticLas(LasPoints, legacyCountOverride: uint.MaxValue);
+        using var doc = LasDocument.Open(dir.Write("sample.las", bytes));
+
+        Assert.Equal(uint.MaxValue, doc.Scans[0].PointCount);
+        Assert.Throws<InvalidDataException>(() => doc.Scans[0].ReadPoints().ToList());
+    }
+
     [Fact]
     public void Las_Without_A_Recognised_Crs_Leaves_It_Unknown()
     {

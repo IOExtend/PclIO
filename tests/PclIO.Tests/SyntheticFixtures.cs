@@ -647,9 +647,9 @@ internal static class SyntheticFixtures
         return ("LASF_Projection", 34735, data);
     }
 
-    /// <summary>An OGC WKT coordinate system record.</summary>
+    /// <summary>An OGC WKT coordinate system record (LASF_Projection, record 2112, null-terminated UTF-8).</summary>
     public static (string UserId, ushort RecordId, byte[] Data) LasWktVlr(string wkt) =>
-        ("LASF_Spec", 2111, Encoding.ASCII.GetBytes(wkt));
+        ("LASF_Projection", 2112, Encoding.UTF8.GetBytes(wkt + "\0"));
 
     /// <summary>A synthetic LAS file with one scan.</summary>
     /// <param name="points">Points to store; empty writes a header with no records.</param>
