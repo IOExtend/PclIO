@@ -113,6 +113,40 @@ public sealed class FormatTests
         });
     }
 
+    [Theory]
+    [InlineData(12)]
+    [InlineData(14)]
+    [InlineData(17)]
+    [InlineData(21)]
+    public void An_Rcs_Node_With_An_Unknown_Record_Size_Is_Rejected(int bytesPerPoint)
+    {
+        // The decoder knows records of ten, sixteen and twenty bytes; any other size would be read with the
+        // wrong stride and return wrong positions, so the file is rejected instead of guessed.
+        using var dir = new TempDirectory();
+        using var doc = RcsScanDocument.Open(dir.Write("odd.rcs",
+            SyntheticFixtures.CreateSyntheticRcsWithPoints(RcsPoints, (0, 0, 0),
+                declaredPayloadBytes: (uint)(RcsPoints.Length * bytesPerPoint))));
+
+        Assert.Throws<NotSupportedException>(() => doc.Scans[0].ReadPoints().ToList());
+    }
+
+    [Fact]
+    public void An_Rcs_Position_Only_Node_Larger_Than_A_Chunk_Keeps_Record_Alignment()
+    {
+        // A chunk of 65536 bytes holds 6553 whole ten-byte records; the next chunk must start at a record
+        // boundary, not six bytes into a record.
+        var points = Enumerable.Range(0, 7000)
+            .Select(i => new RcsSamplePoint((ushort)(i % 1000), (ushort)(i / 1000), 0, 0, 0, 0, 0)).ToList();
+        using var dir = new TempDirectory();
+        using var doc = RcsScanDocument.Open(dir.Write("big.rcs",
+            SyntheticFixtures.CreateSyntheticRcsWithPoints(points, (0, 0, 0), withColor: false)));
+
+        var all = doc.Scans[0].ReadPoints(NoTransform).ToList();
+        Assert.Equal(7000, all.Count);
+        AssertNear(new PclVector3(0.0553, 0.0006, 0), all[6553].Position);
+        AssertNear(new PclVector3(0.0999, 0.0006, 0), all[6999].Position);
+    }
+
     [Fact]
     public void An_Rcs_With_Colour_And_Normals_Reports_Them()
     {

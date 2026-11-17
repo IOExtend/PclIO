@@ -336,7 +336,8 @@ public sealed class RcsScan : PclScan
 
             while (remaining > 0)
             {
-                int toRead = (int)Math.Min(chunkBuf.Length, remaining);
+                // A chunk holds whole records only, so the next one starts at a record boundary.
+                int toRead = (int)Math.Min(chunkBuf.Length / recordSize * recordSize, remaining);
                 fs.ReadExactly(chunkBuf, 0, toRead);
                 remaining -= toRead;
 
@@ -447,8 +448,13 @@ public sealed class RcsScan : PclScan
                     tMinX > tMaxX || tMinY > tMaxY || tMinZ > tMaxZ)
                     throw FormatError.Corrupted("RCS node bounds are invalid.");
 
-                if (nbytes < (long)npts * PositionRecordSize)
-                    throw FormatError.Unsupported("RCS node payload is smaller than the known point record layout.");
+                // The decoder reads records of exactly ten bytes (position), sixteen (position, colour and
+                // intensity) or twenty (the same plus the plane of the normals). Any other payload size would be
+                // read with the wrong stride and return wrong positions, so it is rejected instead of guessed.
+                if (nbytes != (long)npts * PositionRecordSize &&
+                    nbytes != (long)npts * PointRecordSize &&
+                    nbytes != (long)npts * (PointRecordSize + NormalRecordSize))
+                    throw FormatError.Unsupported("RCS node payload does not match a known point record layout.");
             }
 
             nodes.Add(new Node(new PclVector3(tMinX, tMinY, tMinZ), npts, nbytes));

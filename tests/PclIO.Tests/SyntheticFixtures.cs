@@ -36,11 +36,12 @@ internal static class SyntheticFixtures
     /// <param name="nodeMin">Tight minimum of the node.</param>
     /// <param name="withNormals">Whether the packed normal plane follows the records.</param>
     /// <param name="withColor">Whether the records hold an intensity and a colour; without them they hold the position only.</param>
+    /// <param name="declaredPayloadBytes">Overrides the payload size the node declares; the records stay as written.</param>
     /// <param name="tx">Translation of the scan.</param>
     /// <param name="ty">Translation of the scan.</param>
     /// <param name="tz">Translation of the scan.</param>
     public static byte[] CreateSyntheticRcsWithPoints(IReadOnlyList<RcsSamplePoint> points, (double X, double Y, double Z) nodeMin,
-        bool withNormals = false, double tx = 0.0, double ty = 0.0, double tz = 0.0, bool withColor = true)
+        bool withNormals = false, double tx = 0.0, double ty = 0.0, double tz = 0.0, bool withColor = true, uint? declaredPayloadBytes = null)
     {
         int recordBytes = withColor ? 16 : 10;
         int recordBytesTotal = recordBytes + (withNormals ? 4 : 0);
@@ -57,7 +58,7 @@ internal static class SyntheticFixtures
             BinaryPrimitives.WriteDoubleLittleEndian(node.Slice(0x48 + (i * 8), 8), min[i] + 7.0);
         }
         BinaryPrimitives.WriteUInt32LittleEndian(node.Slice(0x64, 4), (uint)points.Count);
-        BinaryPrimitives.WriteUInt32LittleEndian(node.Slice(0x68, 4), (uint)recordBytes_);
+        BinaryPrimitives.WriteUInt32LittleEndian(node.Slice(0x68, 4), declaredPayloadBytes ?? (uint)recordBytes_);
 
         int payload = buffer.Length - recordBytes_;
         int normals = payload + (points.Count * recordBytes);
