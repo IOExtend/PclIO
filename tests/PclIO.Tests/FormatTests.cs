@@ -332,6 +332,46 @@ public sealed class FormatTests
         Assert.Throws<InvalidDataException>(() => RcpProjectDocument.Open(dir.Write("site.rcp", SyntheticFixtures.CreateZip("project.xml", manifest))));
     }
 
+    [Fact]
+    public void An_Rcp_Placement_Reorients_The_Normals_With_The_Points()
+    {
+        // A non-uniform scale stretches the geometry; the normals must be re-oriented with it, not left in the
+        // local space of the scan.
+        using var dir = new TempDirectory();
+        string manifest = SyntheticFixtures.RcpManifest("scan1.rcs", "Station 1")
+            .Replace("<Translation X=\"10.5\" Y=\"20.5\" Z=\"5.0\" />", "<Translation X=\"0\" Y=\"0\" Z=\"0\" />")
+            .Replace("<Scale X=\"1\" Y=\"1\" Z=\"1\" />", "<Scale X=\"2\" Y=\"1\" Z=\"1\" />");
+        string rcp = dir.Write("site.rcp", SyntheticFixtures.CreateZip("project.xml", manifest));
+        var points = new[] { new RcsSamplePoint(1000, 0, 0, 0, 0, 0, 0, 89, 0, 89) };
+        dir.Write(Path.Combine("site Support", "scan1.rcs"),
+            SyntheticFixtures.CreateSyntheticRcsWithPoints(points, (0, 0, 0), withNormals: true));
+
+        using var doc = RcpProjectDocument.Open(rcp);
+        var pt = Assert.Single(doc.ReadAllPoints());
+        AssertNear(new PclVector3(0.2, 0, 0), pt.Position);
+        AssertNear(new PclVector3(2 / Math.Sqrt(5), 0, 1 / Math.Sqrt(5)), pt.Normal!.Value);
+    }
+
+    [Fact]
+    public void An_Rcp_Node_That_States_Only_A_Rotation_Keeps_The_Transform_Of_The_Scan_File()
+    {
+        // A rotation is informational and places nothing; stating one alone must not suppress the placement that
+        // the scan file itself declares.
+        using var dir = new TempDirectory();
+        string manifest = SyntheticFixtures.RcpManifest("scan1.rcs", "Station 1")
+            .Replace("<Translation X=\"10.5\" Y=\"20.5\" Z=\"5.0\" />", "")
+            .Replace("<Rotation Yaw=\"0\" Pitch=\"0\" Roll=\"0\" />", "<Rotation Yaw=\"90\" Pitch=\"0\" Roll=\"0\" />")
+            .Replace("<Scale X=\"1\" Y=\"1\" Z=\"1\" />", "");
+        string rcp = dir.Write("site.rcp", SyntheticFixtures.CreateZip("project.xml", manifest));
+        dir.Write(Path.Combine("site Support", "scan1.rcs"),
+            SyntheticFixtures.CreateSyntheticRcsWithPoints(RcsPoints, (0, 0, 0), tx: 1.0, ty: 2.0, tz: 3.0));
+
+        using var doc = RcpProjectDocument.Open(rcp);
+        var points = doc.ReadAllPoints().ToList();
+        Assert.Equal(3, points.Count);
+        AssertNear(new PclVector3(1.1, 2.2, 3.3), points[0].Position);
+    }
+
     // ---- E57 -------------------------------------------------------------------------------------------------
 
     [Fact]

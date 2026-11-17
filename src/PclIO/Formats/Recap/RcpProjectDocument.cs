@@ -207,14 +207,15 @@ public sealed class RcpProjectDocument : PclDocument
     // Components may be written as x/y/z, X/Y/Z, or (for rotation) Yaw/Pitch/Roll; the first one present is used.
     // Rotation is informational only: Yaw, Pitch and Roll fill the X, Y and Z components in that order, with no
     // rotation convention implied, and PclTransform does not apply them.
-    // The second value tells whether the project states a transform for the node at all.
+    // The second value tells whether the project states a transform that places the node. Only the translation and
+    // the scale place it; a node that states a rotation alone leaves the placement to the transform of the scan file.
     private static (PclTransform Transform, bool Stated) ParseNodeTransform(XElement node)
     {
         var transElem = node.Element("Translation");
         var rotElem = node.Element("Rotation");
         var scaleElem = node.Element("Scale");
 
-        bool stated = transElem != null || rotElem != null || scaleElem != null;
+        bool stated = transElem != null || scaleElem != null;
 
         double tx = ParseDouble(transElem?.Attribute("x")?.Value ?? transElem?.Attribute("X")?.Value, 0);
         double ty = ParseDouble(transElem?.Attribute("y")?.Value ?? transElem?.Attribute("Y")?.Value, 0);
@@ -335,7 +336,18 @@ public sealed class RcpScan : PclScan
 
         foreach (var pt in rcsDoc.ReadAllPoints(readOptions))
         {
-            yield return place ? pt with { Position = Transform.TransformPoint(pt.Position) } : pt;
+            if (!place)
+            {
+                yield return pt;
+                continue;
+            }
+
+            // The placement moves the position and re-orients the normal with it, as the scan-file transform does.
+            yield return pt with
+            {
+                Position = Transform.TransformPoint(pt.Position),
+                Normal = pt.Normal is { } n ? Transform.TransformVector(n) : null
+            };
         }
     }
 }
