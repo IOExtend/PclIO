@@ -272,7 +272,7 @@ public sealed class FaroScan : PclScan
     private readonly bool _hasColors;
     private readonly bool _hasIntensities;
 
-    private long? _validReturns;
+    private readonly Lazy<long> _validReturns;
 
     /// <inheritdoc />
     public override string Id { get; }
@@ -285,7 +285,7 @@ public sealed class FaroScan : PclScan
     /// the first access, which reads the distance data of the scan.
     /// </summary>
     /// <exception cref="InvalidDataException">The data of the scan is missing or damaged.</exception>
-    public override long PointCount => _validReturns ??= CountValidReturns();
+    public override long PointCount => _validReturns.Value;
 
     /// <summary>Number of cells of the scan grid, also the number of samples the file holds.</summary>
     public long GridSize { get; }
@@ -327,6 +327,10 @@ public sealed class FaroScan : PclScan
         _ole2Path = ole2Path;
         _hasColors = hasColors;
         _hasIntensities = hasIntensities;
+
+        // The count is made once even when several threads reach it at the same time, and the value is published
+        // whole, so a concurrent first access cannot observe a partial count.
+        _validReturns = new Lazy<long>(CountValidReturns);
     }
 
     /// <summary>Streams the valid returns of the scan.</summary>
