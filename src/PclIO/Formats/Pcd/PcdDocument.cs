@@ -21,7 +21,7 @@ public sealed class PcdDocument : PclDocument
 {
     // Bounds for data taken from an untrusted file.
     private const int MaxHeaderLines = 4096;
-    private const int MaxLineLength = 1 << 20;
+    internal const int MaxLineLength = 1 << 20;
     private const int MaxFields = 1024;
     private const int MaxFieldCount = 65536;
     private const long MaxDecompressedBytes = 1L << 30;
@@ -105,7 +105,7 @@ public sealed class PcdDocument : PclDocument
         // The binary layouts state their sizes up front, so a short file is rejected here and not mid-read.
         if (header.Data == PcdData.Binary)
         {
-            long need = header.Points * (long)header.RecordSize;
+            long need = CheckedPointBytes(header.Points, header.RecordSize);
             if (need > fs.Length - header.DataStart) throw FormatError.Truncated("point data");
         }
         else if (header.Data == PcdData.Compressed)
@@ -116,7 +116,7 @@ public sealed class PcdDocument : PclDocument
             fs.ReadExactly(sizes);
             uint compressedSize = Bytes.ReadUInt32LE(sizes.AsSpan(0, 4));
             uint uncompressedSize = Bytes.ReadUInt32LE(sizes.AsSpan(4, 4));
-            if (uncompressedSize != header.Points * (long)header.RecordSize)
+            if (uncompressedSize != CheckedPointBytes(header.Points, header.RecordSize))
                 throw FormatError.Corrupted("PCD compressed data does not hold the declared points.");
             if (uncompressedSize > MaxDecompressedBytes)
                 throw FormatError.Corrupted("PCD compressed data is larger than the accepted size.");
@@ -136,8 +136,22 @@ public sealed class PcdDocument : PclDocument
     }
 
     // A field size and type pair the reader converts; anything else stays unread.
-    private static bool IsInterpretable(PcdField field) =>
+    internal static bool IsInterpretable(PcdField field) =>
         (field.Type, field.Size) is ('I', 1 or 2 or 4) or ('U', 1 or 2 or 4) or ('F', 4 or 8);
+
+    // The product of the declared point count and the record size, checked: a crafted header can wrap it past
+    // zero and slip a short file past the size check, so the overflow is rejected rather than read.
+    internal static long CheckedPointBytes(long points, int recordSize)
+    {
+        try
+        {
+            checked { return points * recordSize; }
+        }
+        catch (OverflowException)
+        {
+            throw FormatError.Corrupted("PCD point count and record size declare more bytes than can be counted.");
+        }
+    }
 
     /// <summary>How the points are stored after the header.</summary>
     internal enum PcdData
@@ -171,9 +185,12 @@ public sealed class PcdDocument : PclDocument
         string? viewpoint = null;
         PcdData? data = null;
 
-        // The expected entries in order; COUNT is accepted but not required.
-        string[] order = ["VERSION", "FIELDS", "SIZE", "TYPE", "COUNT", "WIDTH", "HEIGHT", "VIEWPOINT", "POINTS", "DATA"];
-        int stage = 0;
+        // The header entries are dispatched by keyword: VERSION, WIDTH, HEIGHT and VIEWPOINT may appear anywhere,
+        // while FIELDS, SIZE, TYPE, COUNT and POINTS keep their relative order (COUNT optional) and DATA ends the
+        // header. Each entry appears once.
+        string[] ordered = ["FIELDS", "SIZE", "TYPE", "COUNT", "POINTS"];
+        int lastOrdered = -1;
+        var seen = new HashSet<string>(StringComparer.Ordinal);
         int lines = 0;
 
         while (data == null)
@@ -187,12 +204,13 @@ public sealed class PcdDocument : PclDocument
             string keyword = line[..space];
             string[] values = line[(space + 1)..].Split([' ', '\t'], StringSplitOptions.RemoveEmptyEntries);
 
-            // COUNT may be absent; any other entry must come in the documented order, exactly once.
-            while (stage < order.Length && order[stage] == "COUNT" && !keyword.Equals("COUNT", StringComparison.Ordinal))
-                stage++;
-            if (stage >= order.Length || !keyword.Equals(order[stage], StringComparison.Ordinal))
-                throw FormatError.Corrupted($"PCD header entry '{keyword}' is out of order.");
-            stage++;
+            if (!seen.Add(keyword)) throw FormatError.Corrupted($"PCD header entry '{keyword}' appears twice.");
+            int orderIndex = Array.IndexOf(ordered, keyword);
+            if (orderIndex >= 0)
+            {
+                if (orderIndex <= lastOrdered) throw FormatError.Corrupted($"PCD header entry '{keyword}' is out of order.");
+                lastOrdered = orderIndex;
+            }
 
             switch (keyword)
             {
@@ -203,7 +221,9 @@ public sealed class PcdDocument : PclDocument
                 case "FIELDS":
                     if (values.Length == 0 || values.Length > MaxFields)
                         throw FormatError.Corrupted("PCD FIELDS declares no fields or too many fields.");
-                    if (values.Distinct(StringComparer.Ordinal).Count() != values.Length)
+                    // "_" is the padding placeholder and may repeat; the real field names must be unique.
+                    var realNames = values.Where(v => !v.Equals("_", StringComparison.Ordinal)).ToArray();
+                    if (realNames.Distinct(StringComparer.Ordinal).Count() != realNames.Length)
                         throw FormatError.Corrupted("PCD FIELDS names a field twice.");
                     names = values;
                     break;
@@ -364,10 +384,10 @@ public sealed class PcdScan : PclScan
         _y = Find("y");
         _z = Find("z");
         _rgb = FindColor();
-        _intensity = Find("intensity");
-        _normalX = Find("normal_x");
-        _normalY = Find("normal_y");
-        _normalZ = Find("normal_z");
+        _intensity = InterpretableIndex("intensity");
+        _normalX = InterpretableIndex("normal_x");
+        _normalY = InterpretableIndex("normal_y");
+        _normalZ = InterpretableIndex("normal_z");
         HasColors = _rgb >= 0;
         HasIntensities = _intensity >= 0;
         HasNormals = _normalX >= 0 && _normalY >= 0 && _normalZ >= 0;
@@ -388,13 +408,25 @@ public sealed class PcdScan : PclScan
         return -1;
     }
 
-    // A packed rgb or rgba field holds its colour in the first four bytes; anything else stays unread.
+    // A channel is read only when its field has a shape the reader converts; any other shape stays unread, so the
+    // points come without that channel rather than failing or misreading it.
+    private int InterpretableIndex(string name)
+    {
+        int i = Find(name);
+        return i >= 0 && PcdDocument.IsInterpretable(_header.Fields[i]) ? i : -1;
+    }
+
+    // A packed rgb or rgba field holds its colour in a single four-byte float or unsigned integer; anything else
+    // stays unread.
     private int FindColor()
     {
         foreach (string name in new[] { "rgb", "rgba" })
         {
             int i = Find(name);
-            if (i >= 0 && _header.Fields[i].Bytes >= 4) return i;
+            if (i < 0) continue;
+            var field = _header.Fields[i];
+            if (field.Count == 1 && ((field.Type == 'F' && field.Size == 4) || (field.Type == 'U' && field.Size == 4)))
+                return i;
         }
 
         return -1;
@@ -425,7 +457,7 @@ public sealed class PcdScan : PclScan
                 bufferSize: 65536, leaveOpen: true);
             for (long i = 0; i < targetCount; i++)
             {
-                string? line = reader.ReadLine();
+                string? line = ReadDataLine(reader);
                 if (line == null) throw FormatError.Truncated("point data");
                 if ((i % step) != 0) continue;
 
@@ -443,10 +475,13 @@ public sealed class PcdScan : PclScan
             yield break;
         }
 
-        byte[] records = _header.Data == PcdDocument.PcdData.Binary
-            ? ReadBinaryPrefix(fs, targetCount)
-            : ReadDecompressedRecords(fs);
+        if (_header.Data == PcdDocument.PcdData.Binary)
+        {
+            foreach (var pt in ReadBinaryStreaming(fs, targetCount, step, options.ApplyTransform)) yield return pt;
+            yield break;
+        }
 
+        byte[] records = ReadDecompressedRecords(fs);
         int recordSize = _header.RecordSize;
         for (long i = 0; i < targetCount; i++)
         {
@@ -463,22 +498,76 @@ public sealed class PcdScan : PclScan
         }
     }
 
-    // Reads the first records of the binary point data in chunks; the open path checked that they fit the file.
-    private byte[] ReadBinaryPrefix(FileStream fs, long targetCount)
+    // Streams the binary point data in bounded chunks, carrying a record that straddles a chunk boundary, so
+    // memory use does not depend on the point count. The open path checked that the declared records fit the file.
+    private IEnumerable<PclPoint> ReadBinaryStreaming(FileStream fs, long targetCount, int step, bool applyTransform)
     {
-        long bytes = targetCount * (long)_header.RecordSize;
-        if (bytes > int.MaxValue) throw FormatError.Corrupted("PCD point data is larger than the accepted size.");
-        byte[] records = new byte[bytes];
+        int recordSize = _header.RecordSize;
         fs.Position = _header.DataStart;
-        int offset = 0;
-        while (offset < records.Length)
-        {
-            int want = Math.Min(MaxChunkBytes, records.Length - offset);
-            fs.ReadExactly(records.AsSpan(offset, want));
-            offset += want;
-        }
+        byte[] chunk = new byte[MaxChunkBytes];
+        byte[] carry = new byte[recordSize];
+        int carryLen = 0;
+        long parsed = 0;
+        long yielded = 0;
 
-        return records;
+        while (parsed < targetCount)
+        {
+            int read = fs.Read(chunk, 0, chunk.Length);
+            if (read == 0) throw FormatError.Truncated("point data");
+            int pos = 0;
+
+            // Complete a record carried over from the previous chunk.
+            if (carryLen > 0)
+            {
+                int take = Math.Min(recordSize - carryLen, read);
+                chunk.AsSpan(0, take).CopyTo(carry.AsSpan(carryLen));
+                carryLen += take;
+                pos = take;
+                if (carryLen == recordSize)
+                {
+                    carryLen = 0;
+                    if (parsed % step == 0)
+                    {
+                        var point = ParseBinaryPoint(carry, out bool valid);
+                        if (valid)
+                        {
+                            point = point with { Index = (ulong)yielded };
+                            if (applyTransform) point = point with { Position = Transform.TransformPoint(point.Position) };
+                            yield return point;
+                            yielded++;
+                            if (yielded >= targetCount) yield break;
+                        }
+                    }
+                    parsed++;
+                }
+            }
+
+            // Parse the whole records of this chunk.
+            while (pos + recordSize <= read && parsed < targetCount)
+            {
+                if (parsed % step == 0)
+                {
+                    var point = ParseBinaryPoint(chunk.AsSpan(pos, recordSize), out bool valid);
+                    if (valid)
+                    {
+                        point = point with { Index = (ulong)yielded };
+                        if (applyTransform) point = point with { Position = Transform.TransformPoint(point.Position) };
+                        yield return point;
+                        yielded++;
+                        if (yielded >= targetCount) yield break;
+                    }
+                }
+                pos += recordSize;
+                parsed++;
+            }
+
+            // Carry the partial record into the next chunk.
+            if (pos < read && parsed < targetCount)
+            {
+                chunk.AsSpan(pos, read - pos).CopyTo(carry);
+                carryLen = read - pos;
+            }
+        }
     }
 
     // Decompresses the whole LZF payload: its structure-of-arrays layout needs every field to read any point.
@@ -490,7 +579,7 @@ public sealed class PcdScan : PclScan
         uint compressedSize = Bytes.ReadUInt32LE(sizes.AsSpan(0, 4));
         uint uncompressedSize = Bytes.ReadUInt32LE(sizes.AsSpan(4, 4));
 
-        long expect = PointCount * (long)_header.RecordSize;
+        long expect = PcdDocument.CheckedPointBytes(PointCount, _header.RecordSize);
         if (uncompressedSize != expect)
             throw FormatError.Corrupted("PCD compressed data does not hold the declared points.");
         if (compressedSize > fs.Length - _header.DataStart - 8) throw FormatError.Truncated("compressed point data");
@@ -513,6 +602,26 @@ public sealed class PcdScan : PclScan
         }
 
         return records;
+    }
+
+    // Reads one data line with a bounded length, so a crafted multi-gigabyte line fails instead of exhausting
+    // memory. Returns null at the end of the stream.
+    private static string? ReadDataLine(StreamReader reader)
+    {
+        var sb = new System.Text.StringBuilder();
+        int c;
+        while ((c = reader.Read()) >= 0)
+        {
+            if (c == '\n') break;
+            if (c == '\r')
+            {
+                if (reader.Peek() == '\n') reader.Read();
+                break;
+            }
+            sb.Append((char)c);
+            if (sb.Length > PcdDocument.MaxLineLength) throw FormatError.Corrupted("PCD point line is too long.");
+        }
+        return c < 0 && sb.Length == 0 ? null : sb.ToString();
     }
 
     // Parses one ASCII line with exactly one value per field element.
@@ -556,8 +665,8 @@ public sealed class PcdScan : PclScan
             if (!long.TryParse(token, System.Globalization.NumberStyles.Integer,
                 System.Globalization.CultureInfo.InvariantCulture, out long value))
                 throw FormatError.Corrupted($"PCD value '{token}' is not an integer.");
-            long min = field.Size == 1 ? sbyte.MinValue : field.Size == 2 ? short.MinValue : int.MinValue;
-            long max = field.Size == 1 ? sbyte.MaxValue : field.Size == 2 ? short.MaxValue : int.MaxValue;
+            long min = field.Size == 1 ? sbyte.MinValue : field.Size == 2 ? short.MinValue : field.Size == 4 ? int.MinValue : long.MinValue;
+            long max = field.Size == 1 ? sbyte.MaxValue : field.Size == 2 ? short.MaxValue : field.Size == 4 ? int.MaxValue : long.MaxValue;
             if (value < min || value > max) throw FormatError.Corrupted($"PCD value '{token}' does not fit its field.");
             return value;
         }
@@ -565,7 +674,7 @@ public sealed class PcdScan : PclScan
         if (!ulong.TryParse(token, System.Globalization.NumberStyles.Integer,
             System.Globalization.CultureInfo.InvariantCulture, out ulong unsigned))
             throw FormatError.Corrupted($"PCD value '{token}' is not an integer.");
-        ulong umax = field.Size == 1 ? byte.MaxValue : field.Size == 2 ? ushort.MaxValue : uint.MaxValue;
+        ulong umax = field.Size == 1 ? byte.MaxValue : field.Size == 2 ? ushort.MaxValue : field.Size == 4 ? uint.MaxValue : ulong.MaxValue;
         if (unsigned > umax) throw FormatError.Corrupted($"PCD value '{token}' does not fit its field.");
         return unsigned;
     }
@@ -591,11 +700,16 @@ public sealed class PcdScan : PclScan
             ('I', 1) => (sbyte)bytes[0],
             ('I', 2) => Bytes.ReadInt16LE(bytes),
             ('I', 4) => Bytes.ReadInt32LE(bytes),
+            ('I', 8) => Bytes.ReadInt64LE(bytes),
             ('U', 1) => bytes[0],
             ('U', 2) => Bytes.ReadUInt16LE(bytes),
             ('U', 4) => Bytes.ReadUInt32LE(bytes),
+            ('U', 8) => Bytes.ReadUInt64LE(bytes),
             ('F', 4) => Bytes.ReadSingleLE(bytes),
-            _ => Bytes.ReadDoubleLE(bytes),
+            ('F', 8) => Bytes.ReadDoubleLE(bytes),
+            // A one- or two-byte float has no representation; such a field is gated out of every channel and its
+            // value is never used, so it reads as zero rather than running past the span.
+            _ => 0,
         };
 
     // Builds a point from the flat values: x, y and z decide validity, the rest fills the channels.

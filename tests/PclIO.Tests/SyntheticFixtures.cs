@@ -875,7 +875,7 @@ internal static class SyntheticFixtures
     private static string PcdAsciiValue(PcdSamplePoint p, (string Name, int Size, char Type, int Count) field, int index)
     {
         if (index > 0) return "0";
-        // Packed colour travels as the float holding its bits, like PCL writes it; other shapes hold no colour.
+        // Packed colour travels as the float holding its bits; other shapes hold no colour.
         if (field.Name is "rgb" or "rgba")
         {
             if (field is not { Size: 4, Type: 'F' }) return "0";

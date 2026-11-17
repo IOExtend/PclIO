@@ -2768,4 +2768,132 @@ public sealed class FormatTests
 
         Assert.Throws<InvalidDataException>(() => PcdDocument.Open(dir.Write("sample.pcd", bytes)));
     }
+
+    [Fact]
+    public void Pcd_Huge_Point_Count_With_No_Data_Is_Rejected_At_Open()
+    {
+        // POINTS * record size wraps past zero unchecked; the checked product rejects the file instead of
+        // opening it and crashing mid-read.
+        using var dir = new TempDirectory();
+        var header = new[]
+        {
+            "# .PCD v.7", "VERSION 0.7", "FIELDS x y z", "SIZE 4 4 4", "TYPE F F F", "COUNT 1 1 1",
+            "WIDTH 4611686018427387904", "HEIGHT 1", "VIEWPOINT 0 0 0 1 0 0 0",
+            "POINTS 4611686018427387904", "DATA binary",
+        };
+        byte[] bytes = SyntheticFixtures.CreatePcdFile(header, []);
+
+        Assert.Throws<InvalidDataException>(() => PcdDocument.Open(dir.Write("sample.pcd", bytes)));
+    }
+
+    [Fact]
+    public void Pcd_Intensity_Of_Uninterpretable_Shape_Stays_Unread()
+    {
+        // A one-byte float intensity has no representation; the points come without intensity rather than
+        // crashing on the short span.
+        using var dir = new TempDirectory();
+        var header = new[]
+        {
+            "# .PCD v.7", "VERSION 0.7", "FIELDS x y z intensity", "SIZE 4 4 4 1", "TYPE F F F F",
+            "COUNT 1 1 1 1", "WIDTH 1", "HEIGHT 1", "VIEWPOINT 0 0 0 1 0 0 0", "POINTS 1", "DATA binary",
+        };
+        byte[] body = new byte[13];
+        System.Buffers.Binary.BinaryPrimitives.WriteSingleLittleEndian(body.AsSpan(0, 4), 1f);
+        System.Buffers.Binary.BinaryPrimitives.WriteSingleLittleEndian(body.AsSpan(4, 4), 2f);
+        System.Buffers.Binary.BinaryPrimitives.WriteSingleLittleEndian(body.AsSpan(8, 4), 3f);
+        body[12] = 200;
+        using var doc = PcdDocument.Open(dir.Write("sample.pcd", SyntheticFixtures.CreatePcdFile(header, body)));
+
+        var scan = Assert.Single(doc.Scans);
+        Assert.False(scan.HasIntensities);
+        var point = Assert.Single(scan.ReadPoints(NoTransform));
+        AssertNear(new PclVector3(1, 2, 3), point.Position);
+        Assert.Null(point.Intensity);
+    }
+
+    [Fact]
+    public void Pcd_Repeated_Padding_Field_Names_Are_Accepted()
+    {
+        // "_" is the padding placeholder and may repeat; the format allows repeated padding names.
+        using var dir = new TempDirectory();
+        var header = new[]
+        {
+            "# .PCD v.7", "VERSION 0.7", "FIELDS x y z _ rgb", "SIZE 4 4 4 4 4", "TYPE F F F F U",
+            "COUNT 1 1 1 1 1", "WIDTH 1", "HEIGHT 1", "VIEWPOINT 0 0 0 1 0 0 0", "POINTS 1", "DATA binary",
+        };
+        byte[] body = new byte[20];
+        System.Buffers.Binary.BinaryPrimitives.WriteSingleLittleEndian(body.AsSpan(0, 4), 1f);
+        System.Buffers.Binary.BinaryPrimitives.WriteSingleLittleEndian(body.AsSpan(4, 4), 2f);
+        System.Buffers.Binary.BinaryPrimitives.WriteSingleLittleEndian(body.AsSpan(8, 4), 3f);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(body.AsSpan(16, 4), (10u << 16) | (20u << 8) | 30u);
+        using var doc = PcdDocument.Open(dir.Write("sample.pcd", SyntheticFixtures.CreatePcdFile(header, body)));
+
+        var scan = Assert.Single(doc.Scans);
+        Assert.True(scan.HasColors);
+        var point = Assert.Single(scan.ReadPoints(NoTransform));
+        AssertNear(new PclVector3(1, 2, 3), point.Position);
+        Assert.Equal(new PclColor(10, 20, 30), point.Color);
+    }
+
+    [Fact]
+    public void Pcd_Viewpoint_May_Precede_Width_And_Height()
+    {
+        // The format lets VERSION, WIDTH, HEIGHT and VIEWPOINT float; only the field entries keep order.
+        using var dir = new TempDirectory();
+        var header = new[]
+        {
+            "# .PCD v.7", "VERSION 0.7", "VIEWPOINT 0 0 0 1 0 0 0", "FIELDS x y z", "SIZE 4 4 4",
+            "TYPE F F F", "HEIGHT 1", "WIDTH 1", "POINTS 1", "DATA ascii",
+        };
+        using var doc = PcdDocument.Open(dir.Write("sample.pcd", SyntheticFixtures.CreatePcdFile(header, "1 2 3"u8.ToArray())));
+
+        AssertNear(new PclVector3(1, 2, 3), Assert.Single(doc.Scans[0].ReadPoints(NoTransform)).Position);
+        Assert.Equal(PclFileKind.Pcd, PclFile.DetectKind(dir.Write("detect.pcd", SyntheticFixtures.CreatePcdFile(header, "1 2 3"u8.ToArray()))));
+    }
+
+    [Fact]
+    public void Pcd_Binary_Read_Streams_Records_Across_Chunk_Boundaries()
+    {
+        // A twelve-byte record does not divide the 64 KiB chunk; records that straddle a boundary must stay aligned.
+        var points = Enumerable.Range(0, 7000).Select(i => new PcdSamplePoint(i % 1000, i / 1000, 0)).ToList();
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticPcd(points,
+            fields: [("x", 4, 'F', 1), ("y", 4, 'F', 1), ("z", 4, 'F', 1)], data: "binary");
+        using var doc = PcdDocument.Open(dir.Write("sample.pcd", bytes));
+
+        var all = doc.Scans[0].ReadPoints(NoTransform).ToList();
+        Assert.Equal(7000, all.Count);
+        AssertNear(new PclVector3(553, 6, 0), all[6553].Position);
+        AssertNear(new PclVector3(999, 6, 0), all[6999].Position);
+    }
+
+    [Fact]
+    public void Pcd_Overlong_Ascii_Line_Is_Rejected()
+    {
+        using var dir = new TempDirectory();
+        var header = new[]
+        {
+            "# .PCD v.7", "VERSION 0.7", "FIELDS x y z", "SIZE 4 4 4", "TYPE F F F", "COUNT 1 1 1",
+            "WIDTH 1", "HEIGHT 1", "VIEWPOINT 0 0 0 1 0 0 0", "POINTS 1", "DATA ascii",
+        };
+        byte[] body = System.Text.Encoding.ASCII.GetBytes(new string('1', (1 << 20) + 1) + "\n");
+        using var doc = PcdDocument.Open(dir.Write("sample.pcd", SyntheticFixtures.CreatePcdFile(header, body)));
+
+        Assert.Throws<InvalidDataException>(() => doc.Scans[0].ReadPoints().ToList());
+    }
+
+    [Fact]
+    public void Pcd_Detection_Accepts_A_Long_Comment_Line()
+    {
+        // The probe's line bound matches the reader's, so a long comment does not hide the format.
+        using var dir = new TempDirectory();
+        var header = new[]
+        {
+            "# " + new string('c', 5000), "# .PCD v.7", "VERSION 0.7", "FIELDS x y z", "SIZE 4 4 4",
+            "TYPE F F F", "COUNT 1 1 1", "WIDTH 1", "HEIGHT 1", "VIEWPOINT 0 0 0 1 0 0 0", "POINTS 1", "DATA ascii",
+        };
+        byte[] bytes = SyntheticFixtures.CreatePcdFile(header, "1 2 3"u8.ToArray());
+
+        Assert.Equal(PclFileKind.Pcd, PclFile.DetectKind(dir.Write("sample.pcd", bytes)));
+    }
 }

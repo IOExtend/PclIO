@@ -109,7 +109,8 @@ internal static class KindDetector
     private static bool IsPcdHeader(Stream stream, long origin)
     {
         const int maxProbeBytes = 256 * 1024;
-        string[] order = ["VERSION", "FIELDS", "SIZE", "TYPE", "COUNT", "WIDTH", "HEIGHT", "VIEWPOINT", "POINTS", "DATA"];
+        const int maxLineLength = 1 << 20;
+        string[] ordered = ["FIELDS", "SIZE", "TYPE", "COUNT", "POINTS"];
 
         long length = stream.CanSeek ? stream.Length : long.MaxValue;
         int toRead = (int)Math.Min(maxProbeBytes, Math.Max(0, length - origin));
@@ -127,7 +128,8 @@ internal static class KindDetector
                 got += n;
             }
 
-            int stage = 0;
+            int lastOrdered = -1;
+            var seen = new HashSet<string>(StringComparer.Ordinal);
             int position = 0;
             int lines = 0;
             while (position < got)
@@ -136,7 +138,7 @@ internal static class KindDetector
                 if (end < 0) return false;
                 int lineLength = end - position;
                 if (lineLength > 0 && buffer[end - 1] == (byte)'\r') lineLength--;
-                if (lineLength > 4096) return false;
+                if (lineLength > maxLineLength) return false;
 
                 bool comment = lineLength > 0 && buffer[position] == (byte)'#';
                 if (!comment && lineLength > 0)
@@ -154,9 +156,13 @@ internal static class KindDetector
                     if (space < 0) return false;
                     string keyword = System.Text.Encoding.ASCII.GetString(buffer, position, space - position);
 
-                    while (stage < order.Length && order[stage] == "COUNT" && keyword != "COUNT") stage++;
-                    if (stage >= order.Length || keyword != order[stage]) return false;
-                    stage++;
+                    if (!seen.Add(keyword)) return false;
+                    int orderIndex = Array.IndexOf(ordered, keyword);
+                    if (orderIndex >= 0)
+                    {
+                        if (orderIndex <= lastOrdered) return false;
+                        lastOrdered = orderIndex;
+                    }
                     if (keyword == "DATA") return true;
                 }
 
