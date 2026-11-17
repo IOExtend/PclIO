@@ -151,8 +151,10 @@ internal static class SyntheticFixtures
     /// the container assigns its points to its setups. False leaves the setup entries without a range.
     /// </param>
     /// <param name="overlappingSetupRanges">True lets every setup declare the range of the first block.</param>
+    /// <param name="collidingSetupNames">True names the second setup so its id after the last dash equals the first's.</param>
     public static byte[] CreateSyntheticLgsx(IReadOnlyList<LeicaSamplePoint>? points = null, bool withColorAndIntensity = false, bool withPointData = true,
-        IReadOnlyList<byte[]>? extraPlanes = null, int setupCount = 1, bool assignPointsToSetups = false, bool overlappingSetupRanges = false)
+        IReadOnlyList<byte[]>? extraPlanes = null, int setupCount = 1, bool assignPointsToSetups = false, bool overlappingSetupRanges = false,
+        bool collidingSetupNames = false)
     {
         points ??= DefaultLeicaPoints;
         using var ms = new MemoryStream();
@@ -170,6 +172,8 @@ internal static class SyntheticFixtures
 
         // The point data follows the container entries, so its start is known before they are written.
         var setupNames = Enumerable.Range(0, setupCount).Select(i => "SETUP-" + (3 + i)).ToList();
+        if (collidingSetupNames && setupCount >= 2)
+            setupNames[1] = "SETUP-A-" + setupNames[0]["SETUP-".Length..];
         long payloadStart = ms.Position + setupNames.Sum(EntrySize) + EntrySize("PointCloud");
 
         // Container entries as the reader expects them.

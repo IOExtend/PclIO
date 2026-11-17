@@ -401,6 +401,24 @@ public sealed class FormatTests
     }
 
     [Fact]
+    public void A_Lgsx_Container_Whose_Setup_Names_Share_An_Id_Stays_One_Scan()
+    {
+        // Two entry names ending in the same suffix share the id after the last dash. Assigning blocks by that id
+        // would hand both setups the same blocks and return every point twice, so the points stay together.
+        using var dir = new TempDirectory();
+        using var doc = LgsxDocument.Open(dir.Write("site.lgsx",
+            SyntheticFixtures.CreateSyntheticLgsx(setupCount: 2, assignPointsToSetups: true, collidingSetupNames: true)));
+
+        Assert.Equal(["3", "3"], doc.Setups.Select(s => s.Id));
+        var scan = Assert.Single(doc.Scans);
+        Assert.Equal("unified-cloud", scan.Id);
+        Assert.Equal(5, scan.PointCount);
+        Assert.Equal(5, scan.ReadPoints().Count());
+        Assert.Equal(5, doc.TotalPointCount);
+        Assert.Contains(doc.Warnings, w => w.Contains("points are not assigned to them", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void A_Lgsx_Block_Is_Not_Cut_At_65536_Points()
     {
         // Codes are never zero, because a point at the block origin is dropped as padding.

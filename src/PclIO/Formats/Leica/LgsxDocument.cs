@@ -264,6 +264,14 @@ public sealed class LgsxDocument : PclDocument
 
         if (owners.Count == 0) return null;
 
+        // Setups are matched by the id after the last dash of their entry name. Two entries whose names end in the
+        // same suffix share that id, and both would receive the blocks assigned to it, returning points twice.
+        // The assignment is ambiguous, so the points stay together.
+        for (int i = 0; i < setups.Count; i++)
+            for (int j = i + 1; j < setups.Count; j++)
+                if (setups[i].Id.Equals(setups[j].Id, StringComparison.Ordinal))
+                    return null;
+
         // Two setups that claim the same part of the point data would make the assignment ambiguous.
         for (int i = 0; i < owners.Count; i++)
             for (int j = i + 1; j < owners.Count; j++)
