@@ -54,6 +54,14 @@ public readonly record struct PntsSamplePoint(
     PclVector3? Normal = null,
     byte? Classification = null);
 
+/// <summary>One point of a synthetic Potree dataset: position, colour, intensity, normal and classification.</summary>
+public readonly record struct PotreeSamplePoint(
+    double X, double Y, double Z,
+    PclColor? Color = null,
+    float? Intensity = null,
+    PclVector3? Normal = null,
+    byte? Classification = null);
+
 /// <summary>Generates small synthetic scan files for the tests. Every layout is written from what the readers implement;
 /// no byte of any of them comes from a real scan.</summary>
 internal static class SyntheticFixtures
@@ -2025,5 +2033,387 @@ internal static class SyntheticFixtures
         };
 
         return JsonSerializer.Serialize(root, new JsonSerializerOptions { WriteIndented = true });
+    }
+
+    /// <summary>Encodes a 3D unit normal vector using Potree's Lambert spheremap projection.</summary>
+    public static (byte b0, byte b1) EncodeSpheremap(PclVector3 n)
+    {
+        double len = Math.Sqrt(n.X * n.X + n.Y * n.Y + n.Z * n.Z);
+        if (len > 0.0)
+            n = new PclVector3(n.X / len, n.Y / len, n.Z / len);
+        else
+            n = new PclVector3(0, 0, 1);
+
+        double nz = Math.Clamp(n.Z, -1.0, 1.0);
+        double g = (1.0 - nz) * 0.5;
+        double p = Math.Sqrt(Math.Max(0.0, 1.0 - g));
+        double u = 0.0;
+        double v = 0.0;
+        if (p > 1e-6)
+        {
+            u = n.X / (2.0 * p);
+            v = n.Y / (2.0 * p);
+        }
+        byte b0 = (byte)Math.Clamp((int)Math.Round(((u + 1.0) * 0.5) * 255.0), 0, 255);
+        byte b1 = (byte)Math.Clamp((int)Math.Round(((v + 1.0) * 0.5) * 255.0), 0, 255);
+        return (b0, b1);
+    }
+
+    /// <summary>Generates a synthetic Potree 1.x dataset (cloud.js, r.bin, r.hrc).</summary>
+    public static (string cloudJs, byte[] rBin, byte[] rHrc) CreateSyntheticPotree1x(
+        IReadOnlyList<PotreeSamplePoint> points,
+        PclVector3 scale,
+        PclVector3 offset,
+        bool hasColors = true,
+        bool hasAlpha = true,
+        string normalType = "NORMAL_SPHEREMAPPED",
+        bool hasIntensity = true,
+        bool hasClassification = true,
+        bool floatPositions = false)
+    {
+        var attrs = new List<string>();
+        attrs.Add("POSITION_CARTESIAN");
+        if (hasColors)
+            attrs.Add(hasAlpha ? "COLOR_PACKED" : "RGB");
+        if (!string.IsNullOrEmpty(normalType))
+            attrs.Add(normalType);
+        if (hasIntensity)
+            attrs.Add("INTENSITY");
+        if (hasClassification)
+            attrs.Add("CLASSIFICATION");
+
+        int posSize = 12;
+        int colSize = hasColors ? (hasAlpha ? 4 : 3) : 0;
+        int normSize = normalType switch
+        {
+            "NORMAL_SPHEREMAPPED" or "NORMAL_OCT16" => 2,
+            "NORMAL_FLOATS" => 12,
+            _ => 0
+        };
+        int intSize = hasIntensity ? 2 : 0;
+        int classSize = hasClassification ? 1 : 0;
+        int recordSize = posSize + colSize + normSize + intSize + classSize;
+
+        byte[] rBin = new byte[points.Count * recordSize];
+        int writePos = 0;
+
+        double minX = double.PositiveInfinity, minY = double.PositiveInfinity, minZ = double.PositiveInfinity;
+        double maxX = double.NegativeInfinity, maxY = double.NegativeInfinity, maxZ = double.NegativeInfinity;
+
+        foreach (var pt in points)
+        {
+            minX = Math.Min(minX, pt.X); minY = Math.Min(minY, pt.Y); minZ = Math.Min(minZ, pt.Z);
+            maxX = Math.Max(maxX, pt.X); maxY = Math.Max(maxY, pt.Y); maxZ = Math.Max(maxZ, pt.Z);
+
+            if (floatPositions)
+            {
+                BinaryPrimitives.WriteSingleLittleEndian(rBin.AsSpan(writePos, 4), (float)pt.X);
+                BinaryPrimitives.WriteSingleLittleEndian(rBin.AsSpan(writePos + 4, 4), (float)pt.Y);
+                BinaryPrimitives.WriteSingleLittleEndian(rBin.AsSpan(writePos + 8, 4), (float)pt.Z);
+            }
+            else
+            {
+                int rx = (int)Math.Round((pt.X - offset.X) / scale.X);
+                int ry = (int)Math.Round((pt.Y - offset.Y) / scale.Y);
+                int rz = (int)Math.Round((pt.Z - offset.Z) / scale.Z);
+                BinaryPrimitives.WriteInt32LittleEndian(rBin.AsSpan(writePos, 4), rx);
+                BinaryPrimitives.WriteInt32LittleEndian(rBin.AsSpan(writePos + 4, 4), ry);
+                BinaryPrimitives.WriteInt32LittleEndian(rBin.AsSpan(writePos + 8, 4), rz);
+            }
+            writePos += 12;
+
+            if (hasColors)
+            {
+                var c = pt.Color ?? new PclColor(255, 255, 255, 255);
+                rBin[writePos] = c.R;
+                rBin[writePos + 1] = c.G;
+                rBin[writePos + 2] = c.B;
+                if (hasAlpha)
+                {
+                    rBin[writePos + 3] = c.A;
+                    writePos += 4;
+                }
+                else
+                {
+                    writePos += 3;
+                }
+            }
+
+            if (!string.IsNullOrEmpty(normalType))
+            {
+                var n = pt.Normal ?? new PclVector3(0, 0, 1);
+                if (normalType == "NORMAL_SPHEREMAPPED")
+                {
+                    var (b0, b1) = EncodeSpheremap(n);
+                    rBin[writePos] = b0;
+                    rBin[writePos + 1] = b1;
+                    writePos += 2;
+                }
+                else if (normalType == "NORMAL_OCT16")
+                {
+                    var (b0, b1) = EncodeOct16p(n.X, n.Y, n.Z);
+                    rBin[writePos] = b0;
+                    rBin[writePos + 1] = b1;
+                    writePos += 2;
+                }
+                else if (normalType == "NORMAL_FLOATS")
+                {
+                    BinaryPrimitives.WriteSingleLittleEndian(rBin.AsSpan(writePos, 4), (float)n.X);
+                    BinaryPrimitives.WriteSingleLittleEndian(rBin.AsSpan(writePos + 4, 4), (float)n.Y);
+                    BinaryPrimitives.WriteSingleLittleEndian(rBin.AsSpan(writePos + 8, 4), (float)n.Z);
+                    writePos += 12;
+                }
+            }
+
+            if (hasIntensity)
+            {
+                ushort intVal = (ushort)(pt.Intensity.HasValue ? Math.Clamp((int)pt.Intensity.Value, 0, 65535) : 0);
+                BinaryPrimitives.WriteUInt16LittleEndian(rBin.AsSpan(writePos, 2), intVal);
+                writePos += 2;
+            }
+
+            if (hasClassification)
+            {
+                rBin[writePos] = pt.Classification ?? 0;
+                writePos += 1;
+            }
+        }
+
+        if (points.Count == 0)
+        {
+            minX = minY = minZ = 0;
+            maxX = maxY = maxZ = 1;
+        }
+
+        var manifest = new Dictionary<string, object>
+        {
+            ["version"] = "1.7",
+            ["octreeDir"] = "data",
+            ["boundingBox"] = new Dictionary<string, double>
+            {
+                ["lx"] = offset.X, ["ly"] = offset.Y, ["lz"] = offset.Z,
+                ["ux"] = offset.X + 100, ["uy"] = offset.Y + 100, ["uz"] = offset.Z + 100
+            },
+            ["tightBoundingBox"] = new Dictionary<string, double>
+            {
+                ["lx"] = minX, ["ly"] = minY, ["lz"] = minZ,
+                ["ux"] = maxX, ["uy"] = maxY, ["uz"] = maxZ
+            },
+            ["pointAttributes"] = attrs,
+            ["spacing"] = 0.05,
+            ["scale"] = new double[] { scale.X, scale.Y, scale.Z },
+            ["hierarchyStepSize"] = 5
+        };
+
+        string cloudJs = JsonSerializer.Serialize(manifest, new JsonSerializerOptions { WriteIndented = true });
+
+        // 1 node entry in .hrc: 1 byte mask (0 = no children), 4 bytes point count
+        byte[] rHrc = new byte[5];
+        rHrc[0] = 0;
+        BinaryPrimitives.WriteUInt32LittleEndian(rHrc.AsSpan(1, 4), (uint)points.Count);
+
+        return (cloudJs, rBin, rHrc);
+    }
+
+    /// <summary>Generates a synthetic Potree 2.x dataset (metadata.json, octree.bin).</summary>
+    public static (string metadataJson, byte[] octreeBin) CreateSyntheticPotree2x(
+        IReadOnlyList<PotreeSamplePoint> points,
+        PclVector3 scale,
+        PclVector3 offset,
+        bool hasColors = true,
+        bool hasAlpha = true,
+        bool color16Bit = false,
+        bool hasNormals = true,
+        bool normalOct16 = true,
+        bool hasIntensity = true,
+        bool hasClassification = true,
+        bool floatPositions = false)
+    {
+        var attrs = new List<Dictionary<string, object>>();
+        attrs.Add(new Dictionary<string, object>
+        {
+            ["name"] = "position",
+            ["size"] = 12,
+            ["numElements"] = 3,
+            ["elementSize"] = 4,
+            ["type"] = floatPositions ? "float" : "int32"
+        });
+
+        if (hasColors)
+        {
+            int elemSize = color16Bit ? 2 : 1;
+            int numElem = hasAlpha ? 4 : 3;
+            attrs.Add(new Dictionary<string, object>
+            {
+                ["name"] = hasAlpha ? "rgba" : "rgb",
+                ["size"] = numElem * elemSize,
+                ["numElements"] = numElem,
+                ["elementSize"] = elemSize,
+                ["type"] = color16Bit ? "uint16" : "uint8"
+            });
+        }
+
+        if (hasNormals)
+        {
+            attrs.Add(new Dictionary<string, object>
+            {
+                ["name"] = "normal",
+                ["size"] = normalOct16 ? 2 : 12,
+                ["numElements"] = normalOct16 ? 2 : 3,
+                ["elementSize"] = normalOct16 ? 1 : 4,
+                ["type"] = normalOct16 ? "uint8" : "float"
+            });
+        }
+
+        if (hasIntensity)
+        {
+            attrs.Add(new Dictionary<string, object>
+            {
+                ["name"] = "intensity",
+                ["size"] = 2,
+                ["numElements"] = 1,
+                ["elementSize"] = 2,
+                ["type"] = "uint16"
+            });
+        }
+
+        if (hasClassification)
+        {
+            attrs.Add(new Dictionary<string, object>
+            {
+                ["name"] = "classification",
+                ["size"] = 1,
+                ["numElements"] = 1,
+                ["elementSize"] = 1,
+                ["type"] = "uint8"
+            });
+        }
+
+        int recordSize = attrs.Sum(a => (int)a["size"]);
+        byte[] octreeBin = new byte[points.Count * recordSize];
+        int writePos = 0;
+
+        double minX = double.PositiveInfinity, minY = double.PositiveInfinity, minZ = double.PositiveInfinity;
+        double maxX = double.NegativeInfinity, maxY = double.NegativeInfinity, maxZ = double.NegativeInfinity;
+
+        foreach (var pt in points)
+        {
+            minX = Math.Min(minX, pt.X); minY = Math.Min(minY, pt.Y); minZ = Math.Min(minZ, pt.Z);
+            maxX = Math.Max(maxX, pt.X); maxY = Math.Max(maxY, pt.Y); maxZ = Math.Max(maxZ, pt.Z);
+
+            if (floatPositions)
+            {
+                BinaryPrimitives.WriteSingleLittleEndian(octreeBin.AsSpan(writePos, 4), (float)pt.X);
+                BinaryPrimitives.WriteSingleLittleEndian(octreeBin.AsSpan(writePos + 4, 4), (float)pt.Y);
+                BinaryPrimitives.WriteSingleLittleEndian(octreeBin.AsSpan(writePos + 8, 4), (float)pt.Z);
+            }
+            else
+            {
+                int rx = (int)Math.Round((pt.X - offset.X) / scale.X);
+                int ry = (int)Math.Round((pt.Y - offset.Y) / scale.Y);
+                int rz = (int)Math.Round((pt.Z - offset.Z) / scale.Z);
+                BinaryPrimitives.WriteInt32LittleEndian(octreeBin.AsSpan(writePos, 4), rx);
+                BinaryPrimitives.WriteInt32LittleEndian(octreeBin.AsSpan(writePos + 4, 4), ry);
+                BinaryPrimitives.WriteInt32LittleEndian(octreeBin.AsSpan(writePos + 8, 4), rz);
+            }
+            writePos += 12;
+
+            if (hasColors)
+            {
+                var c = pt.Color ?? new PclColor(255, 255, 255, 255);
+                if (color16Bit)
+                {
+                    BinaryPrimitives.WriteUInt16LittleEndian(octreeBin.AsSpan(writePos, 2), (ushort)(c.R << 8));
+                    BinaryPrimitives.WriteUInt16LittleEndian(octreeBin.AsSpan(writePos + 2, 2), (ushort)(c.G << 8));
+                    BinaryPrimitives.WriteUInt16LittleEndian(octreeBin.AsSpan(writePos + 4, 2), (ushort)(c.B << 8));
+                    if (hasAlpha)
+                    {
+                        BinaryPrimitives.WriteUInt16LittleEndian(octreeBin.AsSpan(writePos + 6, 2), (ushort)(c.A << 8));
+                        writePos += 8;
+                    }
+                    else
+                    {
+                        writePos += 6;
+                    }
+                }
+                else
+                {
+                    octreeBin[writePos] = c.R;
+                    octreeBin[writePos + 1] = c.G;
+                    octreeBin[writePos + 2] = c.B;
+                    if (hasAlpha)
+                    {
+                        octreeBin[writePos + 3] = c.A;
+                        writePos += 4;
+                    }
+                    else
+                    {
+                        writePos += 3;
+                    }
+                }
+            }
+
+            if (hasNormals)
+            {
+                var n = pt.Normal ?? new PclVector3(0, 0, 1);
+                if (normalOct16)
+                {
+                    var (b0, b1) = EncodeOct16p(n.X, n.Y, n.Z);
+                    octreeBin[writePos] = b0;
+                    octreeBin[writePos + 1] = b1;
+                    writePos += 2;
+                }
+                else
+                {
+                    BinaryPrimitives.WriteSingleLittleEndian(octreeBin.AsSpan(writePos, 4), (float)n.X);
+                    BinaryPrimitives.WriteSingleLittleEndian(octreeBin.AsSpan(writePos + 4, 4), (float)n.Y);
+                    BinaryPrimitives.WriteSingleLittleEndian(octreeBin.AsSpan(writePos + 8, 4), (float)n.Z);
+                    writePos += 12;
+                }
+            }
+
+            if (hasIntensity)
+            {
+                ushort intVal = (ushort)(pt.Intensity.HasValue ? Math.Clamp((int)pt.Intensity.Value, 0, 65535) : 0);
+                BinaryPrimitives.WriteUInt16LittleEndian(octreeBin.AsSpan(writePos, 2), intVal);
+                writePos += 2;
+            }
+
+            if (hasClassification)
+            {
+                octreeBin[writePos] = pt.Classification ?? 0;
+                writePos += 1;
+            }
+        }
+
+        if (points.Count == 0)
+        {
+            minX = minY = minZ = 0;
+            maxX = maxY = maxZ = 1;
+        }
+
+        var manifest = new Dictionary<string, object>
+        {
+            ["version"] = "2.0",
+            ["name"] = "SyntheticPotree2",
+            ["points"] = points.Count,
+            ["boundingBox"] = new Dictionary<string, double[]>
+            {
+                ["min"] = new double[] { minX, minY, minZ },
+                ["max"] = new double[] { maxX, maxY, maxZ }
+            },
+            ["attributes"] = attrs,
+            ["scale"] = new double[] { scale.X, scale.Y, scale.Z },
+            ["offset"] = new double[] { offset.X, offset.Y, offset.Z },
+            ["hierarchy"] = new Dictionary<string, object>
+            {
+                ["firstChunkSize"] = 100,
+                ["stepSize"] = 4,
+                ["depth"] = 1
+            }
+        };
+
+        string metadataJson = JsonSerializer.Serialize(manifest, new JsonSerializerOptions { WriteIndented = true });
+        return (metadataJson, octreeBin);
     }
 }

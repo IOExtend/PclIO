@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using Xunit;
 
 namespace PclIO.Tests;
@@ -357,6 +358,50 @@ public sealed class KindDetectionTests
         Assert.Equal(PclFileKind.Unknown, Detect("{\"name\": \"John\", \"age\": 30}"u8.ToArray(), "data.json"));
     }
 
+    [Theory]
+    [InlineData("cloud.js")]
+    [InlineData("CLOUD.JS")]
+    [InlineData("data.js")]
+    public void Detects_Potree_CloudJs(string name)
+    {
+        var (cloudJs, _, _) = SyntheticFixtures.CreateSyntheticPotree1x(
+            [new(1, 2, 3)], new PclVector3(0.01, 0.01, 0.01), PclVector3.Zero);
+        Assert.Equal(PclFileKind.Potree, Detect(System.Text.Encoding.UTF8.GetBytes(cloudJs), name));
+    }
+
+    [Theory]
+    [InlineData("metadata.json")]
+    [InlineData("METADATA.JSON")]
+    [InlineData("meta.json")]
+    public void Detects_Potree_MetadataJson(string name)
+    {
+        var (metaJson, _) = SyntheticFixtures.CreateSyntheticPotree2x(
+            [new(1, 2, 3)], new PclVector3(0.01, 0.01, 0.01), PclVector3.Zero);
+        Assert.Equal(PclFileKind.Potree, Detect(System.Text.Encoding.UTF8.GetBytes(metaJson), name));
+    }
+
+    [Fact]
+    public void Detects_Potree_Hrc()
+    {
+        byte[] hrc = new byte[10]; // 2 valid nodes
+        BinaryPrimitives.WriteUInt32LittleEndian(hrc.AsSpan(1, 4), 100);
+        BinaryPrimitives.WriteUInt32LittleEndian(hrc.AsSpan(6, 4), 200);
+        Assert.Equal(PclFileKind.Potree, Detect(hrc, "r.hrc"));
+    }
+
+    [Fact]
+    public void Potree_Rejects_Invalid_Hrc_Or_Js()
+    {
+        // Not divisible by 5
+        Assert.Equal(PclFileKind.Unknown, Detect(new byte[7], "r.hrc"));
+        // Count too high
+        byte[] badHrc = new byte[5];
+        BinaryPrimitives.WriteUInt32LittleEndian(badHrc.AsSpan(1, 4), 600_000_000);
+        Assert.Equal(PclFileKind.Unknown, Detect(badHrc, "r.hrc"));
+        // Invalid JS/JSON
+        Assert.Equal(PclFileKind.Unknown, Detect("var x = 42;"u8.ToArray(), "cloud.js"));
+    }
+
     [Fact]
     public void Detects_Files_On_Disk_The_Same_Way()
     {
@@ -368,6 +413,18 @@ public sealed class KindDetectionTests
         Assert.Equal(PclFileKind.Tiles3d, PclFile.DetectKind(dir.WriteText("tileset.json", SyntheticFixtures.CreateSyntheticTilesetJson("points.pnts"))));
         // Directory with tileset.json
         Assert.Equal(PclFileKind.Tiles3d, PclFile.DetectKind(dir.Root));
+
+        // Potree directory and ancestor .bin
+        using var potreeDir = new TempDirectory();
+        var (cloudJs, rBin, rHrc) = SyntheticFixtures.CreateSyntheticPotree1x([new(1, 2, 3)], new PclVector3(0.01, 0.01, 0.01), PclVector3.Zero);
+        potreeDir.WriteText("cloud.js", cloudJs);
+        string dataR = Path.Combine(potreeDir.Root, "data", "r");
+        Directory.CreateDirectory(dataR);
+        string binPath = Path.Combine(dataR, "r.bin");
+        File.WriteAllBytes(binPath, rBin);
+
+        Assert.Equal(PclFileKind.Potree, PclFile.DetectKind(potreeDir.Root));
+        Assert.Equal(PclFileKind.Potree, PclFile.DetectKind(binPath));
     }
 
     private sealed class NonSeekableStream(byte[] bytes) : MemoryStream(bytes)

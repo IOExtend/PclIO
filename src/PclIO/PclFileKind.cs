@@ -53,4 +53,7 @@ public enum PclFileKind
 
     /// <summary>OGC 3D Tiles point cloud (.pnts, .glb, tileset.json).</summary>
     Tiles3d = 16,
+
+    /// <summary>Potree octree point cloud (cloud.js, metadata.json, .hrc, .bin).</summary>
+    Potree = 17,
 }

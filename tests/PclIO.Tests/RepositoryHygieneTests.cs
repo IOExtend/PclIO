@@ -66,7 +66,7 @@ public sealed class RepositoryHygieneTests
         // Sibling projects and other implementations are not referred to.
         ("other project or implementation", Rx(
             @"\b(?:Rvt|Pla|Tdb|Nwc|Dwg|Ifc)" + @"IO\b|\bIO(?:Sc" + "ene|Vie" + @"wer)\b|lib" + "e57|cloud" + "compare|" + @"\bpd" + @"al\b|\bla" + @"spy\b"
-            + "|pye" + "57|open" + "3d|las" + "tools|lib" + "las|pot" + "ree")),
+            + "|pye" + "57|open" + "3d|las" + "tools|lib" + "las|pot" + "reeconverter")),
     ];
 
     private static string? TryFindRepoRoot()

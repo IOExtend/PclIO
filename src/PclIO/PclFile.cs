@@ -6,6 +6,7 @@ using PclIO.Formats.Leica;
 using PclIO.Formats.Pcd;
 using PclIO.Formats.PinPoint;
 using PclIO.Formats.Ply;
+using PclIO.Formats.Potree;
 using PclIO.Formats.Pts;
 using PclIO.Formats.Ptx;
 using PclIO.Formats.Recap;
@@ -64,6 +65,7 @@ public static class PclFile
             PclFileKind.Xyz => XyzDocument.Open(path, options),
             PclFileKind.Sbf => SbfDocument.Open(path, options),
             PclFileKind.Tiles3d => Tiles3dDocument.Open(path, options),
+            PclFileKind.Potree => PotreeDocument.Open(path, options),
             _ => throw new NotSupportedException($"Unsupported or unrecognized point cloud file: '{path}'"),
         };
     }

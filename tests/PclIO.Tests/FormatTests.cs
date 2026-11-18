@@ -7,6 +7,7 @@ using PclIO.Formats.Leica;
 using PclIO.Formats.Pcd;
 using PclIO.Formats.PinPoint;
 using PclIO.Formats.Ply;
+using PclIO.Formats.Potree;
 using PclIO.Formats.Pts;
 using PclIO.Formats.Ptx;
 using PclIO.Formats.Recap;
@@ -5153,5 +5154,367 @@ public sealed class FormatTests
         string tilesetPath = dir.WriteText("tileset.json", "{ not valid json ... ");
 
         Assert.Throws<InvalidDataException>(() => Tiles3dDocument.Open(tilesetPath));
+    }
+
+    // ---- Potree 1.x & 2.x tests --------------------------------------------------------------------------
+
+    [Fact]
+    public void Potree1x_Reads_Basic_Dataset()
+    {
+        using var dir = new TempDirectory();
+        var points = new PotreeSamplePoint[]
+        {
+            new(10.1, 20.2, 30.3, new PclColor(255, 0, 0, 255), 100, new PclVector3(0, 0, 1), 2),
+            new(11.1, 21.2, 31.3, new PclColor(0, 255, 0, 255), 200, new PclVector3(0, 1, 0), 3),
+            new(12.1, 22.2, 32.3, new PclColor(0, 0, 255, 255), 300, new PclVector3(1, 0, 0), 4),
+        };
+
+        var scale = new PclVector3(0.001, 0.001, 0.001);
+        var offset = new PclVector3(10.0, 20.0, 30.0);
+        var (cloudJs, rBin, rHrc) = SyntheticFixtures.CreateSyntheticPotree1x(points, scale, offset);
+
+        string cloudPath = dir.WriteText("cloud.js", cloudJs);
+        string dataR = Path.Combine(dir.Root, "data", "r");
+        Directory.CreateDirectory(dataR);
+        File.WriteAllBytes(Path.Combine(dataR, "r.bin"), rBin);
+        File.WriteAllBytes(Path.Combine(dataR, "r.hrc"), rHrc);
+
+        using var doc = PotreeDocument.Open(cloudPath);
+        Assert.Equal(PclFileKind.Potree, doc.Kind);
+        Assert.Equal("1.7", doc.PotreeVersion);
+        Assert.Equal(3, doc.TotalPoints);
+        Assert.Single(doc.Scans);
+
+        var scan = doc.Scans[0];
+        Assert.Equal(3, scan.PointCount);
+        Assert.True(scan.HasColors);
+        Assert.True(scan.HasNormals);
+        Assert.True(scan.HasIntensities);
+
+        var pts = scan.ReadPoints().ToList();
+        Assert.Equal(3, pts.Count);
+
+        Assert.Equal(10.1, pts[0].Position.X, 2);
+        Assert.Equal(20.2, pts[0].Position.Y, 2);
+        Assert.Equal(30.3, pts[0].Position.Z, 2);
+        Assert.Equal(new PclColor(255, 0, 0, 255), pts[0].Color);
+        Assert.Equal(100f, pts[0].Intensity);
+        Assert.Equal((byte)2, pts[0].Classification);
+        Assert.NotNull(pts[0].Normal);
+        Assert.True(Math.Abs(pts[0].Normal!.Value.Z - 1.0) < 0.05);
+
+        Assert.Equal(11.1, pts[1].Position.X, 2);
+        Assert.Equal(new PclColor(0, 255, 0, 255), pts[1].Color);
+        Assert.Equal(200f, pts[1].Intensity);
+        Assert.Equal((byte)3, pts[1].Classification);
+        Assert.NotNull(pts[1].Normal);
+        Assert.True(Math.Abs(pts[1].Normal!.Value.Y - 1.0) < 0.05);
+    }
+
+    [Fact]
+    public void Potree1x_Reads_Oct16_Normals()
+    {
+        using var dir = new TempDirectory();
+        var points = new PotreeSamplePoint[]
+        {
+            new(1.0, 2.0, 3.0, Normal: new PclVector3(0, 0, 1)),
+            new(4.0, 5.0, 6.0, Normal: new PclVector3(1, 0, 0)),
+        };
+
+        var scale = new PclVector3(0.01, 0.01, 0.01);
+        var offset = PclVector3.Zero;
+        var (cloudJs, rBin, rHrc) = SyntheticFixtures.CreateSyntheticPotree1x(
+            points, scale, offset, normalType: "NORMAL_OCT16");
+
+        string cloudPath = dir.WriteText("cloud.js", cloudJs);
+        string dataR = Path.Combine(dir.Root, "data", "r");
+        Directory.CreateDirectory(dataR);
+        File.WriteAllBytes(Path.Combine(dataR, "r.bin"), rBin);
+
+        using var doc = PotreeDocument.Open(cloudPath);
+        var pts = doc.Scans[0].ReadPoints().ToList();
+        Assert.Equal(2, pts.Count);
+        Assert.NotNull(pts[0].Normal);
+        Assert.True(Math.Abs(pts[0].Normal!.Value.Z - 1.0) < 0.05);
+        Assert.NotNull(pts[1].Normal);
+        Assert.True(Math.Abs(pts[1].Normal!.Value.X - 1.0) < 0.05);
+    }
+
+    [Fact]
+    public void Potree1x_Reads_Float_Normals()
+    {
+        using var dir = new TempDirectory();
+        var points = new PotreeSamplePoint[]
+        {
+            new(1.0, 2.0, 3.0, Normal: new PclVector3(0, 0.707106, 0.707106)),
+        };
+
+        var scale = new PclVector3(0.01, 0.01, 0.01);
+        var offset = PclVector3.Zero;
+        var (cloudJs, rBin, rHrc) = SyntheticFixtures.CreateSyntheticPotree1x(
+            points, scale, offset, normalType: "NORMAL_FLOATS");
+
+        string cloudPath = dir.WriteText("cloud.js", cloudJs);
+        string dataR = Path.Combine(dir.Root, "data", "r");
+        Directory.CreateDirectory(dataR);
+        File.WriteAllBytes(Path.Combine(dataR, "r.bin"), rBin);
+
+        using var doc = PotreeDocument.Open(cloudPath);
+        var pts = doc.Scans[0].ReadPoints().ToList();
+        Assert.Single(pts);
+        Assert.NotNull(pts[0].Normal);
+        Assert.Equal(0.0, pts[0].Normal!.Value.X, 3);
+        Assert.Equal(0.707, pts[0].Normal!.Value.Y, 3);
+        Assert.Equal(0.707, pts[0].Normal!.Value.Z, 3);
+    }
+
+    [Fact]
+    public void Potree1x_Reads_Rgb_Without_Alpha()
+    {
+        using var dir = new TempDirectory();
+        var points = new PotreeSamplePoint[]
+        {
+            new(1.0, 2.0, 3.0, Color: new PclColor(12, 34, 56, 255)),
+        };
+
+        var scale = new PclVector3(0.01, 0.01, 0.01);
+        var offset = PclVector3.Zero;
+        var (cloudJs, rBin, _) = SyntheticFixtures.CreateSyntheticPotree1x(
+            points, scale, offset, hasColors: true, hasAlpha: false);
+
+        string cloudPath = dir.WriteText("cloud.js", cloudJs);
+        string dataR = Path.Combine(dir.Root, "data", "r");
+        Directory.CreateDirectory(dataR);
+        File.WriteAllBytes(Path.Combine(dataR, "r.bin"), rBin);
+
+        using var doc = PotreeDocument.Open(cloudPath);
+        var pt = doc.Scans[0].ReadPoints().Single();
+        Assert.Equal(new PclColor(12, 34, 56, 255), pt.Color);
+    }
+
+    [Fact]
+    public void Potree1x_Reads_Multiple_Nodes()
+    {
+        using var dir = new TempDirectory();
+        var pointsNode1 = new PotreeSamplePoint[] { new(1, 2, 3), new(4, 5, 6) };
+        var pointsNode2 = new PotreeSamplePoint[] { new(7, 8, 9) };
+
+        var scale = new PclVector3(0.01, 0.01, 0.01);
+        var offset = PclVector3.Zero;
+        var (cloudJs, rBin1, _) = SyntheticFixtures.CreateSyntheticPotree1x(pointsNode1, scale, offset, hasColors: false, normalType: "", hasIntensity: false, hasClassification: false);
+        var (_, rBin2, _) = SyntheticFixtures.CreateSyntheticPotree1x(pointsNode2, scale, offset, hasColors: false, normalType: "", hasIntensity: false, hasClassification: false);
+
+        string cloudPath = dir.WriteText("cloud.js", cloudJs);
+        string dataR = Path.Combine(dir.Root, "data", "r");
+        Directory.CreateDirectory(dataR);
+        File.WriteAllBytes(Path.Combine(dataR, "r.bin"), rBin1);
+        File.WriteAllBytes(Path.Combine(dataR, "r0.bin"), rBin2);
+
+        using var doc = PotreeDocument.Open(cloudPath);
+        Assert.Equal(3, doc.TotalPoints);
+        var pts = doc.Scans[0].ReadPoints().ToList();
+        Assert.Equal(3, pts.Count);
+        Assert.Equal(1.0, pts[0].Position.X, 2);
+        Assert.Equal(4.0, pts[1].Position.X, 2);
+        Assert.Equal(7.0, pts[2].Position.X, 2);
+    }
+
+    [Fact]
+    public void Potree1x_Can_Open_From_Directory_And_Bin()
+    {
+        using var dir = new TempDirectory();
+        var points = new PotreeSamplePoint[] { new(1, 2, 3) };
+        var (cloudJs, rBin, _) = SyntheticFixtures.CreateSyntheticPotree1x(points, PclVector3.One, PclVector3.Zero);
+
+        dir.WriteText("cloud.js", cloudJs);
+        string dataR = Path.Combine(dir.Root, "data", "r");
+        Directory.CreateDirectory(dataR);
+        string binPath = Path.Combine(dataR, "r.bin");
+        File.WriteAllBytes(binPath, rBin);
+
+        // Open directory
+        using (var docDir = PclFile.Open(dir.Root))
+        {
+            Assert.Equal(PclFileKind.Potree, docDir.Kind);
+            Assert.Equal(1, docDir.TotalPointCount);
+        }
+
+        // Open .bin file
+        using (var docBin = PclFile.Open(binPath))
+        {
+            Assert.Equal(PclFileKind.Potree, docBin.Kind);
+            Assert.Equal(1, docBin.TotalPointCount);
+        }
+    }
+
+    [Fact]
+    public void Potree2x_Reads_Basic_Dataset()
+    {
+        using var dir = new TempDirectory();
+        var points = new PotreeSamplePoint[]
+        {
+            new(10.5, 20.5, 30.5, new PclColor(10, 20, 30, 255), 500, new PclVector3(0, 0, 1), 1),
+            new(40.5, 50.5, 60.5, new PclColor(40, 50, 60, 255), 600, new PclVector3(0, 1, 0), 2),
+        };
+
+        var scale = new PclVector3(0.01, 0.01, 0.01);
+        var offset = new PclVector3(10.0, 20.0, 30.0);
+        var (metaJson, octreeBin) = SyntheticFixtures.CreateSyntheticPotree2x(points, scale, offset);
+
+        string metaPath = dir.WriteText("metadata.json", metaJson);
+        File.WriteAllBytes(Path.Combine(dir.Root, "octree.bin"), octreeBin);
+
+        using var doc = PotreeDocument.Open(metaPath);
+        Assert.Equal(PclFileKind.Potree, doc.Kind);
+        Assert.Equal("2.0", doc.PotreeVersion);
+        Assert.Equal(2, doc.TotalPoints);
+
+        var pts = doc.Scans[0].ReadPoints().ToList();
+        Assert.Equal(2, pts.Count);
+        Assert.Equal(10.5, pts[0].Position.X, 2);
+        Assert.Equal(20.5, pts[0].Position.Y, 2);
+        Assert.Equal(30.5, pts[0].Position.Z, 2);
+        Assert.Equal(new PclColor(10, 20, 30, 255), pts[0].Color);
+        Assert.Equal(500f, pts[0].Intensity);
+        Assert.Equal((byte)1, pts[0].Classification);
+        Assert.NotNull(pts[0].Normal);
+        Assert.True(Math.Abs(pts[0].Normal!.Value.Z - 1.0) < 0.05);
+    }
+
+    [Fact]
+    public void Potree2x_Reads_16Bit_Colors()
+    {
+        using var dir = new TempDirectory();
+        var points = new PotreeSamplePoint[]
+        {
+            new(1.0, 2.0, 3.0, Color: new PclColor(200, 100, 50, 255)),
+        };
+
+        var scale = new PclVector3(0.01, 0.01, 0.01);
+        var offset = PclVector3.Zero;
+        var (metaJson, octreeBin) = SyntheticFixtures.CreateSyntheticPotree2x(
+            points, scale, offset, color16Bit: true, hasNormals: false, hasIntensity: false, hasClassification: false);
+
+        string metaPath = dir.WriteText("metadata.json", metaJson);
+        File.WriteAllBytes(Path.Combine(dir.Root, "octree.bin"), octreeBin);
+
+        using var doc = PotreeDocument.Open(metaPath);
+        var pt = doc.Scans[0].ReadPoints().Single();
+        Assert.Equal(new PclColor(200, 100, 50, 255), pt.Color);
+    }
+
+    [Fact]
+    public void Potree2x_Reads_Float_Positions()
+    {
+        using var dir = new TempDirectory();
+        var points = new PotreeSamplePoint[]
+        {
+            new(123.456, 789.012, 345.678),
+        };
+
+        var scale = PclVector3.One;
+        var offset = PclVector3.Zero;
+        var (metaJson, octreeBin) = SyntheticFixtures.CreateSyntheticPotree2x(
+            points, scale, offset, floatPositions: true, hasColors: false, hasNormals: false, hasIntensity: false, hasClassification: false);
+
+        string metaPath = dir.WriteText("metadata.json", metaJson);
+        File.WriteAllBytes(Path.Combine(dir.Root, "octree.bin"), octreeBin);
+
+        using var doc = PotreeDocument.Open(metaPath);
+        var pt = doc.Scans[0].ReadPoints().Single();
+        Assert.Equal(123.456, pt.Position.X, 3);
+        Assert.Equal(789.012, pt.Position.Y, 3);
+        Assert.Equal(345.678, pt.Position.Z, 3);
+    }
+
+    [Fact]
+    public void Potree_Applies_ReadOptions()
+    {
+        using var dir = new TempDirectory();
+        var points = Enumerable.Range(0, 10).Select(i => new PotreeSamplePoint(i, i, i)).ToArray();
+        var (cloudJs, rBin, _) = SyntheticFixtures.CreateSyntheticPotree1x(points, PclVector3.One, PclVector3.Zero);
+
+        string cloudPath = dir.WriteText("cloud.js", cloudJs);
+        string dataR = Path.Combine(dir.Root, "data", "r");
+        Directory.CreateDirectory(dataR);
+        File.WriteAllBytes(Path.Combine(dataR, "r.bin"), rBin);
+
+        using var doc = PotreeDocument.Open(cloudPath);
+        var scan = doc.Scans[0];
+
+        // MaxPoints
+        var limited = scan.ReadPoints(new PclReadOptions { MaxPoints = 3 }).ToList();
+        Assert.Equal(3, limited.Count);
+
+        // SubsampleStep
+        var stepped = scan.ReadPoints(new PclReadOptions { SubsampleStep = 2 }).ToList();
+        Assert.Equal(5, stepped.Count);
+        Assert.Equal(0.0, stepped[0].Position.X);
+        Assert.Equal(2.0, stepped[1].Position.X);
+
+        // ApplyTransform
+        var transform = new PclTransform { Translation = new PclVector3(100, 200, 300) };
+        typeof(PclScan).GetProperty("Transform")!.SetValue(scan, transform);
+
+        var transformed = scan.ReadPoints(new PclReadOptions { ApplyTransform = true, MaxPoints = 1 }).Single();
+        Assert.Equal(100.0, transformed.Position.X);
+        Assert.Equal(200.0, transformed.Position.Y);
+        Assert.Equal(300.0, transformed.Position.Z);
+    }
+
+    [Fact]
+    public void Potree_Rejects_Corrupt_Json()
+    {
+        using var dir = new TempDirectory();
+        string cloudPath = dir.WriteText("cloud.js", "{ broken json ... ");
+        Assert.Throws<InvalidDataException>(() => PotreeDocument.Open(cloudPath));
+    }
+
+    [Fact]
+    public void Potree_Rejects_Truncated_Bin()
+    {
+        using var dir = new TempDirectory();
+        var points = new PotreeSamplePoint[] { new(1, 2, 3), new(4, 5, 6) };
+        var (cloudJs, rBin, _) = SyntheticFixtures.CreateSyntheticPotree1x(points, PclVector3.One, PclVector3.Zero);
+
+        string cloudPath = dir.WriteText("cloud.js", cloudJs);
+        string dataR = Path.Combine(dir.Root, "data", "r");
+        Directory.CreateDirectory(dataR);
+        // Truncate by 1 byte so length % recordSize != 0
+        File.WriteAllBytes(Path.Combine(dataR, "r.bin"), rBin[..^1]);
+
+        Assert.Throws<InvalidDataException>(() => PotreeDocument.Open(cloudPath));
+    }
+
+    [Fact]
+    public void Potree_Rejects_NonFinite_Scale()
+    {
+        using var dir = new TempDirectory();
+        string cloudJs = """
+            {
+                "version": "1.7",
+                "octreeDir": "data",
+                "scale": 0,
+                "boundingBox": { "lx": 0, "ly": 0, "lz": 0, "ux": 1, "uy": 1, "uz": 1 },
+                "pointAttributes": [ "POSITION_CARTESIAN" ]
+            }
+            """;
+        string cloudPath = dir.WriteText("cloud.js", cloudJs);
+        string dataR = Path.Combine(dir.Root, "data", "r");
+        Directory.CreateDirectory(dataR);
+        File.WriteAllBytes(Path.Combine(dataR, "r.bin"), new byte[12]);
+
+        Assert.Throws<InvalidDataException>(() => PotreeDocument.Open(cloudPath));
+    }
+
+    [Fact]
+    public void Potree_Rejects_Missing_Bin_File()
+    {
+        using var dir = new TempDirectory();
+        var (cloudJs, _, _) = SyntheticFixtures.CreateSyntheticPotree1x([new(1, 2, 3)], PclVector3.One, PclVector3.Zero);
+        string cloudPath = dir.WriteText("cloud.js", cloudJs);
+        // Do not create dataDir / r.bin
+
+        Assert.Throws<InvalidDataException>(() => PotreeDocument.Open(cloudPath));
     }
 }

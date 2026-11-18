@@ -45,6 +45,12 @@ internal static class KindDetector
                 return PclFileKind.Tiles3d;
             }
 
+            if (File.Exists(Path.Combine(path, "cloud.js")) ||
+                File.Exists(Path.Combine(path, "metadata.json")))
+            {
+                return PclFileKind.Potree;
+            }
+
             return PclFileKind.Unknown;
         }
 
@@ -52,6 +58,18 @@ internal static class KindDetector
             throw new FileNotFoundException($"Point cloud file not found: {path}", path);
 
         string ext = Path.GetExtension(path).ToLowerInvariant();
+        if (ext == ".bin")
+        {
+            string? dir = Path.GetDirectoryName(Path.GetFullPath(path));
+            for (int depth = 0; depth < 5 && dir != null; depth++)
+            {
+                if (File.Exists(Path.Combine(dir, "cloud.js")) || File.Exists(Path.Combine(dir, "metadata.json")))
+                    return PclFileKind.Potree;
+                string? parent = Path.GetDirectoryName(dir);
+                if (parent == dir) break;
+                dir = parent;
+            }
+        }
 
         using var stream = File.OpenRead(path);
         return Detect(stream, ext);
@@ -144,6 +162,14 @@ internal static class KindDetector
         // 3D Tiles tileset manifest (tileset.json).
         if (IsTilesetJsonHeader(stream, origin, extension))
             return PclFileKind.Tiles3d;
+
+        // Potree octree point clouds (cloud.js or metadata.json).
+        if (IsPotreeJsonHeader(stream, origin, extension))
+            return PclFileKind.Potree;
+
+        // Potree hierarchy file (.hrc).
+        if (IsPotreeHrcHeader(stream, origin, extension))
+            return PclFileKind.Potree;
 
         return PclFileKind.Unknown;
     }
@@ -904,6 +930,99 @@ internal static class KindDetector
             return root.ValueKind == JsonValueKind.Object &&
                    root.TryGetProperty("asset", out _) &&
                    root.TryGetProperty("root", out _);
+        }
+        catch
+        {
+            return false;
+        }
+        finally
+        {
+            stream.Position = origin;
+        }
+    }
+
+    // Potree manifest: cloud.js (1.x) or metadata.json (2.x)
+    private static bool IsPotreeJsonHeader(Stream stream, long origin, string? extension)
+    {
+        if (extension != null && extension != ".js" && extension != ".json")
+            return false;
+
+        long length = stream.CanSeek ? stream.Length : long.MaxValue;
+        if (length - origin < 10) return false;
+
+        int toRead = (int)Math.Min(8192, length - origin);
+        byte[] buf = new byte[toRead];
+        stream.Position = origin;
+        try
+        {
+            int got = stream.ReadAtLeast(buf, toRead, throwOnEndOfStream: false);
+            if (got < 10) return false;
+
+            int start = 0;
+            if (got >= 3 && buf[0] == 0xEF && buf[1] == 0xBB && buf[2] == 0xBF)
+                start = 3;
+            while (start < got && char.IsWhiteSpace((char)buf[start]))
+                start++;
+
+            if (start >= got || buf[start] != (byte)'{')
+                return false;
+
+            using var doc = JsonDocument.Parse(buf.AsMemory(start, got - start));
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
+                return false;
+
+            // Potree 1.x (cloud.js)
+            if (root.TryGetProperty("octreeDir", out _) &&
+                (root.TryGetProperty("pointAttributes", out _) || root.TryGetProperty("hierarchyStepSize", out _) || root.TryGetProperty("spacing", out _)))
+            {
+                return true;
+            }
+
+            // Potree 2.x (metadata.json)
+            if (root.TryGetProperty("version", out var verElem) &&
+                verElem.GetString() is { } v && v.StartsWith("2.") &&
+                root.TryGetProperty("points", out _) &&
+                (root.TryGetProperty("hierarchy", out _) || root.TryGetProperty("attributes", out _)))
+            {
+                return true;
+            }
+
+            return false;
+        }
+        catch
+        {
+            return false;
+        }
+        finally
+        {
+            stream.Position = origin;
+        }
+    }
+
+    // Potree hierarchy file (.hrc): entries of 5 bytes (1 byte mask + 4 bytes point count)
+    private static bool IsPotreeHrcHeader(Stream stream, long origin, string? extension)
+    {
+        if (extension != ".hrc") return false;
+
+        long length = stream.CanSeek ? stream.Length : long.MaxValue;
+        if (length - origin < 5 || (length - origin) % 5 != 0) return false;
+
+        int toRead = (int)Math.Min(100, length - origin);
+        Span<byte> buf = stackalloc byte[toRead];
+        stream.Position = origin;
+        try
+        {
+            int got = stream.ReadAtLeast(buf, toRead, throwOnEndOfStream: false);
+            if (got < 5 || got % 5 != 0) return false;
+
+            for (int i = 0; i < got; i += 5)
+            {
+                uint count = BinaryPrimitives.ReadUInt32LittleEndian(buf.Slice(i + 1, 4));
+                if (count > 500_000_000) return false;
+            }
+
+            return true;
         }
         catch
         {
