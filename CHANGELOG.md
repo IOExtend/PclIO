@@ -76,6 +76,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transformation matrix) and points across 3, 4, 6 and 7 column layouts (with intensity and 8-bit RGB colour).
   Empty grid cells (coordinates 0, 0, 0) and non-finite coordinates are skipped. Scans apply their 4x4 transformation
   matrices unless `ApplyTransform` is false.
+- Delimited text point clouds are read (`PclFileKind.Xyz`): `.xyz`, `.asc`, `.txt` and `.csv` files using comma,
+  semicolon, tab or whitespace delimiters. Reads column layouts from a header line (e.g. `x,y,z,nx,ny,nz`), explicit
+  `PclReadOptions.TextColumns`, or column count heuristics across 3, 4, 6, 7, 8, 9 and 10 column layouts (with intensity,
+  8-bit RGB colour or unit normals, and alpha). Options for `TextColumns`, `TextDelimiter`, `TextCommentPrefix` and
+  `TextCoordinateScale`. Comment lines (`#`, `//` or `TextCommentPrefix`) and points with non-finite coordinates are skipped.
 - Leica scans read a block range with opt-in parallel decoding: the new `PclReadOptions.Blocks` selects the blocks of the
   scan in file order (per scan) and the new `PclReadOptions.MaxDegreeOfParallelism` (default 1, sequential streaming)
   decodes the selected blocks in parallel, keeping file order, consecutive `Index` values and `MaxPoints`/`SubsampleStep`

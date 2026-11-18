@@ -10,6 +10,7 @@ using PclIO.Formats.Ply;
 using PclIO.Formats.Pts;
 using PclIO.Formats.Ptx;
 using PclIO.Formats.Recap;
+using PclIO.Formats.Xyz;
 using Xunit;
 
 namespace PclIO.Tests;
@@ -3834,5 +3835,380 @@ public sealed class FormatTests
         using var doc2 = PtxDocument.Open(dir.WriteText("long2.ptx", header2 + "1 2 3\n" + longLine));
         var scan2 = Assert.Single(doc2.Scans);
         Assert.Throws<InvalidDataException>(() => scan2.ReadPoints().ToList());
+    }
+
+    [Fact]
+    public void Xyz_Reads_Document_Properties_And_Metadata()
+    {
+        using var dir = new TempDirectory();
+        using var doc = XyzDocument.Open(dir.Write("sample.xyz", SyntheticFixtures.CreateSyntheticXyz()));
+
+        Assert.Equal(PclFileKind.Xyz, doc.Kind);
+        Assert.Equal(3, doc.Columns);
+        Assert.Equal(' ', doc.Delimiter);
+        Assert.False(doc.HasHeader);
+        Assert.Equal("x,y,z", doc.ColumnLayout);
+        Assert.Equal(1.0, doc.CoordinateScale);
+        Assert.Equal(3, doc.TotalPoints);
+
+        Assert.Equal("Delimited Text (XYZ)", doc.Metadata["Format"]);
+        Assert.Equal("space", doc.Metadata["Delimiter"]);
+        Assert.Equal(" ", doc.Metadata["DelimiterChar"]);
+        Assert.Equal("3", doc.Metadata["Columns"]);
+        Assert.Equal("x,y,z", doc.Metadata["ColumnLayout"]);
+        Assert.Equal("False", doc.Metadata["HasHeader"]);
+        Assert.Equal("1", doc.Metadata["CoordinateScale"]);
+        Assert.Equal("3", doc.Metadata["TotalPoints"]);
+
+        var scan = Assert.Single(doc.Scans);
+        Assert.Equal("0", scan.Id);
+        Assert.Equal("sample", scan.Name);
+        Assert.Equal(3, scan.PointCount);
+        Assert.False(scan.HasColors);
+        Assert.False(scan.HasIntensities);
+        Assert.False(scan.HasNormals);
+        Assert.Equal(' ', ((XyzScan)scan).Delimiter);
+        Assert.Equal("x,y,z", ((XyzScan)scan).ColumnLayout);
+        Assert.Equal(1.0, ((XyzScan)scan).CoordinateScale);
+
+        Assert.Equal("3", scan.Properties["Columns"]);
+        Assert.Equal("space", scan.Properties["Delimiter"]);
+        Assert.Equal(" ", scan.Properties["DelimiterChar"]);
+        Assert.Equal("x,y,z", scan.Properties["ColumnLayout"]);
+        Assert.Equal("False", scan.Properties["HasHeader"]);
+
+        var points = scan.ReadPoints().ToList();
+        Assert.Equal(3, points.Count);
+        Assert.Equal(0u, points[0].Index);
+        Assert.Equal(1u, points[1].Index);
+        Assert.Equal(2u, points[2].Index);
+        AssertNear(new PclVector3(1, 2, 3), points[0].Position);
+        AssertNear(new PclVector3(-4.5, 5.25, 6.125), points[1].Position);
+        AssertNear(new PclVector3(7, 8, 9), points[2].Position);
+    }
+
+    [Theory]
+    [InlineData(',', ',')]
+    [InlineData(';', ';')]
+    [InlineData('\t', '\t')]
+    [InlineData(' ', ' ')]
+    public void Xyz_Supports_Various_Delimiters(char delimiter, char expectedChar)
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticXyz(delimiter: delimiter);
+        string filename = delimiter switch
+        {
+            ',' => "sample.csv",
+            ';' => "sample.txt",
+            '\t' => "sample.asc",
+            _ => "sample.xyz",
+        };
+
+        using var doc = XyzDocument.Open(dir.Write(filename, bytes));
+        Assert.Equal(expectedChar, doc.Delimiter);
+        var points = doc.ReadAllPoints().ToList();
+        Assert.Equal(3, points.Count);
+        AssertNear(new PclVector3(1, 2, 3), points[0].Position);
+        AssertNear(new PclVector3(-4.5, 5.25, 6.125), points[1].Position);
+        AssertNear(new PclVector3(7, 8, 9), points[2].Position);
+    }
+
+    [Fact]
+    public void Xyz_Parses_Header_Line_With_Normals()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticXyz(
+            delimiter: ',',
+            header: "x,y,z,nx,ny,nz",
+            columns: 6);
+
+        using var doc = XyzDocument.Open(dir.Write("normals.csv", bytes));
+        Assert.True(doc.HasHeader);
+        Assert.Equal(6, doc.Columns);
+        Assert.Equal(',', doc.Delimiter);
+        Assert.Equal("x,y,z,nx,ny,nz", doc.ColumnLayout);
+
+        var scan = Assert.Single(doc.Scans);
+        Assert.True(scan.HasNormals);
+        Assert.False(scan.HasColors);
+        Assert.False(scan.HasIntensities);
+
+        var points = scan.ReadPoints().ToList();
+        Assert.Equal(3, points.Count);
+        Assert.NotNull(points[0].Normal);
+        Assert.NotNull(points[1].Normal);
+    }
+
+    [Fact]
+    public void Xyz_Parses_Header_Line_With_Intensity_And_Colors()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticXyz(
+            delimiter: ';',
+            header: "x;y;z;intensity;r;g;b",
+            columns: 7);
+
+        using var doc = XyzDocument.Open(dir.Write("colors.txt", bytes));
+        Assert.True(doc.HasHeader);
+        Assert.Equal(7, doc.Columns);
+        Assert.Equal(';', doc.Delimiter);
+
+        var scan = Assert.Single(doc.Scans);
+        Assert.True(scan.HasColors);
+        Assert.True(scan.HasIntensities);
+        Assert.False(scan.HasNormals);
+
+        var points = scan.ReadPoints().ToList();
+        Assert.Equal(3, points.Count);
+        Assert.NotNull(points[0].Intensity);
+        Assert.NotNull(points[0].Color);
+        Assert.Equal(10, points[0].Color!.Value.R);
+        Assert.Equal(20, points[0].Color!.Value.G);
+        Assert.Equal(30, points[0].Color!.Value.B);
+    }
+
+    [Theory]
+    [InlineData(3, false, false, false)]
+    [InlineData(4, false, true, false)]
+    [InlineData(6, true, false, false)]
+    [InlineData(7, true, true, false)]
+    [InlineData(8, true, true, false)]
+    [InlineData(9, true, false, true)]
+    [InlineData(10, true, true, true)]
+    public void Xyz_Column_Heuristics_For_Headerless_Files(int columns, bool hasColors, bool hasIntensities, bool hasNormals)
+    {
+        using var dir = new TempDirectory();
+        // Use positive normal for color cases so heuristic chooses color for 6 and 7 cols
+        var points = new List<XyzSamplePoint>
+        {
+            new(1, 2, 3, 500f, new PclColor(100, 150, 200), new PclVector3(0, 0, 1)),
+            new(4, 5, 6, 750f, new PclColor(200, 220, 240), new PclVector3(0, 1, 0)),
+        };
+
+        byte[] bytes = SyntheticFixtures.CreateSyntheticXyz(points, columns: columns);
+        using var doc = XyzDocument.Open(dir.Write("sample.xyz", bytes));
+        var scan = Assert.Single(doc.Scans);
+
+        Assert.Equal(hasColors, scan.HasColors);
+        Assert.Equal(hasIntensities, scan.HasIntensities);
+        Assert.Equal(hasNormals, scan.HasNormals);
+
+        var readPts = scan.ReadPoints().ToList();
+        Assert.Equal(2, readPts.Count);
+    }
+
+    [Fact]
+    public void Xyz_Detects_Normals_In_Headerless_6_Columns_When_Negative()
+    {
+        using var dir = new TempDirectory();
+        var normalPoints = new List<XyzSamplePoint>
+        {
+            new(1, 2, 3, Normal: new PclVector3(-0.3, -0.8, -0.5)),
+            new(4, 5, 6, Normal: new PclVector3(-0.1, -0.9, 0.1)),
+        };
+
+        byte[] bytes = SyntheticFixtures.CreateSyntheticXyz(normalPoints, columns: 6);
+        using var doc = XyzDocument.Open(dir.Write("sample.xyz", bytes));
+        var scan = Assert.Single(doc.Scans);
+
+        Assert.True(scan.HasNormals);
+        Assert.False(scan.HasColors);
+
+        var readPts = scan.ReadPoints().ToList();
+        Assert.Equal(2, readPts.Count);
+        Assert.NotNull(readPts[0].Normal);
+    }
+
+    [Fact]
+    public void Xyz_Honors_TextColumns_Option()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticXyz(columns: 4);
+
+        var options = new PclReadOptions { TextColumns = "x,y,z,scalar" };
+        using var doc = XyzDocument.Open(dir.Write("sample.xyz", bytes), options);
+
+        var scan = Assert.Single(doc.Scans);
+        Assert.True(scan.HasIntensities);
+        Assert.False(scan.HasColors);
+
+        var points = scan.ReadPoints().ToList();
+        Assert.Equal(3, points.Count);
+        Assert.NotNull(points[0].Intensity);
+    }
+
+    [Fact]
+    public void Xyz_Honors_TextDelimiter_Option()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticXyz(delimiter: ';');
+
+        var options = new PclReadOptions { TextDelimiter = ';' };
+        using var doc = XyzDocument.Open(dir.Write("sample.xyz", bytes), options);
+
+        Assert.Equal(';', doc.Delimiter);
+        var points = doc.ReadAllPoints().ToList();
+        Assert.Equal(3, points.Count);
+    }
+
+    [Fact]
+    public void Xyz_Honors_TextCoordinateScale_Option()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticXyz();
+
+        var options = new PclReadOptions { TextCoordinateScale = 0.001 };
+        using var doc = XyzDocument.Open(dir.Write("sample.xyz", bytes), options);
+
+        Assert.Equal(0.001, doc.CoordinateScale);
+        var points = doc.ReadAllPoints().ToList();
+        Assert.Equal(3, points.Count);
+        AssertNear(new PclVector3(0.001, 0.002, 0.003), points[0].Position);
+    }
+
+    [Fact]
+    public void Xyz_Honors_TextCommentPrefix_And_Skips_Comments()
+    {
+        using var dir = new TempDirectory();
+        var comments = new[] { "Generated by scanner", "Date: 2026-11-18", "Coordinate system: local" };
+        byte[] bytes = SyntheticFixtures.CreateSyntheticXyz(comments: comments, commentPrefix: "# ");
+
+        using var doc = XyzDocument.Open(dir.Write("comments.xyz", bytes));
+        Assert.Equal(3, doc.TotalPoints);
+        var points = doc.ReadAllPoints().ToList();
+        Assert.Equal(3, points.Count);
+    }
+
+    [Fact]
+    public void Xyz_Recognizes_Header_In_Comment_Line()
+    {
+        using var dir = new TempDirectory();
+        var comments = new[] { "x,y,z,nx,ny,nz" };
+        byte[] bytes = SyntheticFixtures.CreateSyntheticXyz(delimiter: ',', comments: comments, commentPrefix: "# ", columns: 6);
+
+        using var doc = XyzDocument.Open(dir.Write("comment_header.csv", bytes));
+        Assert.True(doc.HasHeader);
+        Assert.True(doc.Scans[0].HasNormals);
+        var points = doc.ReadAllPoints().ToList();
+        Assert.Equal(3, points.Count);
+    }
+
+    [Fact]
+    public void Xyz_Skips_Non_Finite_Coordinates()
+    {
+        using var dir = new TempDirectory();
+        var points = new List<XyzSamplePoint>
+        {
+            new(1, 2, 3),
+            new(double.NaN, 5, 6),
+            new(7, double.PositiveInfinity, 9),
+            new(10, 11, 12),
+        };
+
+        byte[] bytes = SyntheticFixtures.CreateSyntheticXyz(points);
+        using var doc = XyzDocument.Open(dir.Write("nan.xyz", bytes));
+
+        var readPts = doc.ReadAllPoints().ToList();
+        Assert.Equal(2, readPts.Count);
+        AssertNear(new PclVector3(1, 2, 3), readPts[0].Position);
+        AssertNear(new PclVector3(10, 11, 12), readPts[1].Position);
+    }
+
+    [Fact]
+    public void Xyz_Supports_MaxPoints_And_SubsampleStep()
+    {
+        using var dir = new TempDirectory();
+        var points = Enumerable.Range(0, 10)
+            .Select(i => new XyzSamplePoint(i, i * 2, i * 3))
+            .ToList();
+
+        byte[] bytes = SyntheticFixtures.CreateSyntheticXyz(points);
+        using var doc = XyzDocument.Open(dir.Write("sample.xyz", bytes));
+
+        var scan = Assert.Single(doc.Scans);
+        var stepped = scan.ReadPoints(new PclReadOptions { SubsampleStep = 2 }).ToList();
+        Assert.Equal(5, stepped.Count);
+        AssertNear(new PclVector3(0, 0, 0), stepped[0].Position);
+        AssertNear(new PclVector3(2, 4, 6), stepped[1].Position);
+
+        var limited = scan.ReadPoints(new PclReadOptions { MaxPoints = 2 }).ToList();
+        Assert.Equal(2, limited.Count);
+    }
+
+    [Fact]
+    public void Xyz_Supports_ApplyTransform()
+    {
+        using var dir = new TempDirectory();
+        using var doc = XyzDocument.Open(dir.Write("sample.xyz", SyntheticFixtures.CreateSyntheticXyz()));
+
+        // Scan transform
+        var transform = new PclTransform { Translation = new PclVector3(10, 20, 30) };
+        var scan = (XyzScan)Assert.Single(doc.Scans);
+        typeof(PclScan).GetProperty("Transform")!.SetValue(scan, transform);
+
+        var points = scan.ReadPoints(new PclReadOptions { ApplyTransform = true }).ToList();
+        AssertNear(new PclVector3(11, 22, 33), points[0].Position);
+
+        var untransformed = scan.ReadPoints(new PclReadOptions { ApplyTransform = false }).ToList();
+        AssertNear(new PclVector3(1, 2, 3), untransformed[0].Position);
+    }
+
+    [Fact]
+    public void Xyz_Rejects_Corrupted_Points()
+    {
+        using var dir = new TempDirectory();
+        // Mismatched column count
+        string badColCount = "1.0 2.0 3.0\n4.0 5.0\n";
+        using var doc1 = XyzDocument.Open(dir.WriteText("bad_col.xyz", badColCount));
+        var scan1 = Assert.Single(doc1.Scans);
+        Assert.Throws<InvalidDataException>(() => scan1.ReadPoints().ToList());
+
+        // Invalid numeric values on first point line
+        string badNumFirst = "1.0 abc 3.0\n4.0 5.0 6.0\n";
+        Assert.Throws<InvalidDataException>(() => XyzDocument.Open(dir.WriteText("bad_num1.xyz", badNumFirst)));
+
+        // Invalid numeric values on second point line
+        string badNumSecond = "1.0 2.0 3.0\n4.0 abc 6.0\n";
+        using var doc2 = XyzDocument.Open(dir.WriteText("bad_num2.xyz", badNumSecond));
+        var scan2 = Assert.Single(doc2.Scans);
+        Assert.Throws<InvalidDataException>(() => scan2.ReadPoints().ToList());
+    }
+
+    [Fact]
+    public void Xyz_Rejects_Empty_And_Truncated_Files()
+    {
+        using var dir = new TempDirectory();
+        Assert.Throws<InvalidDataException>(() => XyzDocument.Open(dir.Write("empty.xyz", [])));
+        Assert.Throws<InvalidDataException>(() => XyzDocument.Open(dir.WriteText("comments_only.xyz", "# comment\n# comment 2\n")));
+    }
+
+    [Fact]
+    public void Xyz_Rejects_Line_Exceeding_Max_Length()
+    {
+        using var dir = new TempDirectory();
+        string longLine = "1 2 3 " + new string('9', (1 << 20) + 10) + "\n";
+        Assert.Throws<InvalidDataException>(() =>
+            XyzDocument.Open(dir.WriteText("long.xyz", longLine)));
+    }
+
+    [Fact]
+    public void Xyz_Rejects_Unsupported_Column_Count_Without_Header()
+    {
+        using var dir = new TempDirectory();
+        string fiveCols = "1 2 3 4 5\n6 7 8 9 10\n";
+        Assert.Throws<NotSupportedException>(() =>
+            XyzDocument.Open(dir.WriteText("five.xyz", fiveCols)));
+    }
+
+    [Fact]
+    public void Xyz_Opens_Via_PclFile_Open()
+    {
+        using var dir = new TempDirectory();
+        string path = dir.Write("sample.xyz", SyntheticFixtures.CreateSyntheticXyz());
+
+        using var doc = PclFile.Open(path);
+        Assert.Equal(PclFileKind.Xyz, doc.Kind);
+        Assert.IsType<XyzDocument>(doc);
+        Assert.Equal(3, doc.ReadAllPoints().Count());
     }
 }

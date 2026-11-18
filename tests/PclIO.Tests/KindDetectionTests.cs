@@ -120,6 +120,46 @@ public sealed class KindDetectionTests
         Assert.Equal(PclFileKind.Unknown, Detect(new byte[100], "sample.ptx"));
     }
 
+    [Theory]
+    [InlineData("sample.xyz")]
+    [InlineData("SAMPLE.XYZ")]
+    [InlineData("sample.asc")]
+    [InlineData("SAMPLE.ASC")]
+    [InlineData("sample.txt")]
+    [InlineData("SAMPLE.TXT")]
+    [InlineData("sample.csv")]
+    [InlineData("SAMPLE.CSV")]
+    public void Detects_Xyz_Numeric_Lines_By_Extension(string name) =>
+        Assert.Equal(PclFileKind.Xyz, Detect(SyntheticFixtures.CreateSyntheticXyz(), name));
+
+    [Theory]
+    [InlineData("sample.xyz")]
+    [InlineData("sample.csv")]
+    [InlineData("sample.asc")]
+    [InlineData("sample.txt")]
+    [InlineData("sample.dat")]
+    public void Detects_Xyz_Explicit_Header_In_Any_Extension(string name)
+    {
+        byte[] bytes = SyntheticFixtures.CreateSyntheticXyz(delimiter: ',', header: "x,y,z,nx,ny,nz", columns: 6);
+        Assert.Equal(PclFileKind.Xyz, Detect(bytes, name));
+    }
+
+    [Theory]
+    [InlineData("sample.xyz")]
+    [InlineData("sample.csv")]
+    [InlineData("sample.asc")]
+    [InlineData("sample.txt")]
+    public void Xyz_Rejects_Right_Extension_With_Wrong_Content(string name)
+    {
+        Assert.Equal(PclFileKind.Unknown, Detect("just some text\nline two\nline three"u8.ToArray(), name));
+        Assert.Equal(PclFileKind.Unknown, Detect("Name,Age,City\nAlice,30,London\nBob,25,Paris"u8.ToArray(), name));
+        Assert.Equal(PclFileKind.Unknown, Detect(new byte[100], name));
+    }
+
+    [Fact]
+    public void Xyz_Headerless_Needs_Recognized_Extension() =>
+        Assert.Equal(PclFileKind.Unknown, Detect(SyntheticFixtures.CreateSyntheticXyz(), "sample.dat"));
+
     [Fact]
     public void Faro_Needs_The_Container_Signature_Not_Just_The_Extension() =>
         Assert.Equal(PclFileKind.Unknown, Detect(new byte[100], "scanner.fls"));

@@ -86,6 +86,7 @@ public static class Program
           PLY           by header structure (.ply)
           PTS           a line with the point count followed by point lines, or point lines with the extension .pts
           PTX           by header structure: grid dimensions, scanner pose and transformation matrix (.ptx)
+          XYZ / text    delimited text point clouds with numeric coordinate lines or a column header (.xyz, .asc, .txt, .csv)
 
         Output formats (--format, or the output extension; any other extension needs --format):
           las    ASPRS LAS 1.2, point data record format 2 (XYZ, intensity, RGB)
