@@ -51,6 +51,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prototype limit is the packet header bound of 65535 fields.
 - The EdgeWise cluster position scale is now `PclReadOptions.EdgeWiseCoordinateScale`, so the caller states it; the
   default keeps the long-standing assumption (32768 units = 0.128 m).
+- The LAS exporter writes 1.4 with point formats 6 to 8 (`PclLasOptions` selects version, format, scale and offset);
+  1.2 with point format 2 stays the default and is byte-identical to before. A projected `EPSG:NNNN` coordinate system
+  of the source is written as a GeoTIFF record for LAS 1.2 when asked; LAS 1.4 point formats 6 and above require WKT,
+  which the exporter does not produce, so a 1.4 file carries no coordinate system record.
 
 ## [0.1.0] - 2026-11-15
 

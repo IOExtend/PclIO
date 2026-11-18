@@ -12,6 +12,9 @@ internal sealed class FakeDocument(Func<IEnumerable<PclPoint>> source, string fi
 {
     private readonly FakeScan _scan = new(source, declaredCount);
 
+    public FakeDocument(Func<IEnumerable<PclPoint>> source, string filePath, long declaredCount, string? coordinateSystem)
+        : this(source, filePath, declaredCount) => CoordinateSystem = coordinateSystem;
+
     public override PclFileKind Kind => PclFileKind.RecapScan;
 
     public override IReadOnlyList<PclScan> Scans => [_scan];
@@ -181,6 +184,13 @@ public sealed class ExportTests
         return ms.ToArray();
     }
 
+    private static byte[] Las(PclDocument doc, PclLasOptions lasOptions)
+    {
+        using var ms = new MemoryStream();
+        PclLasExporter.Export(doc, ms, null, lasOptions);
+        return ms.ToArray();
+    }
+
     [Fact]
     public void Las_Header_Describes_The_Records_That_Follow()
     {
@@ -313,6 +323,243 @@ public sealed class ExportTests
 
         Assert.Equal(LasHeaderSize + (2 * LasRecordSize), bytes.Length);
         Assert.Equal(2u, BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(107, 4)));
+    }
+
+    [Fact]
+    public void Las14_Header_Describes_Version_Format_Scale_Offset_And_Counts()
+    {
+        var points = new[]
+        {
+            new PclPoint(new PclVector3(1, 2, 3), new PclColor(10, 20, 30), 0.25f, null, 5),
+            new PclPoint(new PclVector3(-4.5, 5.25, 6.125), null, 0.5f),
+            new PclPoint(new PclVector3(7, 8, 9)),
+        };
+        using var doc = new FakeDocument(() => points, "sample.xyz", points.Length, "EPSG:3857");
+        var las = new PclLasOptions
+        {
+            Version = LasVersion.V14,
+            PointFormat = 7,
+            Scale = 0.01,
+            Offset = new PclVector3(1, 2, 3),
+            WriteCoordinateSystem = true,
+        };
+        byte[] bytes = Las(doc, las);
+
+        Assert.Equal(1, bytes[24]);
+        Assert.Equal(4, bytes[25]);
+        Assert.Equal(375, BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(94, 2)));
+        Assert.Equal(375u, BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(96, 4)));
+        Assert.Equal(0u, BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(100, 4)));
+        Assert.Equal(7, bytes[104]);
+        Assert.Equal(36, BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(105, 2)));
+        // Format 7 keeps the legacy counts at zero; the extended counts carry the number.
+        Assert.Equal(0u, BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(107, 4)));
+        Assert.Equal(0u, BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(111, 4)));
+        Assert.Equal(3ul, BinaryPrimitives.ReadUInt64LittleEndian(bytes.AsSpan(247, 8)));
+        Assert.Equal(3ul, BinaryPrimitives.ReadUInt64LittleEndian(bytes.AsSpan(255, 8)));
+
+        Assert.Equal(0.01, BinaryPrimitives.ReadDoubleLittleEndian(bytes.AsSpan(131, 8)));
+        Assert.Equal(1.0, BinaryPrimitives.ReadDoubleLittleEndian(bytes.AsSpan(155, 8)));
+        Assert.Equal(2.0, BinaryPrimitives.ReadDoubleLittleEndian(bytes.AsSpan(163, 8)));
+        Assert.Equal(3.0, BinaryPrimitives.ReadDoubleLittleEndian(bytes.AsSpan(171, 8)));
+        Assert.Equal(7.0, BinaryPrimitives.ReadDoubleLittleEndian(bytes.AsSpan(179, 8)));
+        Assert.Equal(-4.5, BinaryPrimitives.ReadDoubleLittleEndian(bytes.AsSpan(187, 8)));
+
+        Assert.Equal(375 + (3 * 36), bytes.Length);
+    }
+
+    [Fact]
+    public void Las14_Writes_No_Coordinate_System_Record_Even_When_Requested()
+    {
+        // LAS 1.4 point formats 6 and above require WKT, which the exporter does not produce, so the record is
+        // skipped rather than written in the GeoTIFF form that only LAS 1.2 may carry.
+        using var doc = new FakeDocument(() => [], "sample.xyz", 0, "EPSG:3857");
+        byte[] bytes = Las(doc, new PclLasOptions { Version = LasVersion.V14, PointFormat = 6, WriteCoordinateSystem = true });
+
+        Assert.Equal(375, bytes.Length);
+        Assert.Equal(0u, BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(100, 4)));
+    }
+
+    [Fact]
+    public void Las12_Coordinate_System_Writes_A_Geotiff_Record()
+    {
+        using var doc = new FakeDocument(() => [], "sample.xyz", 0, "EPSG:3857");
+        byte[] bytes = Las(doc, new PclLasOptions { WriteCoordinateSystem = true });
+
+        Assert.Equal(LasHeaderSize + 78, bytes.Length);
+        Assert.Equal(0, BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(LasHeaderSize, 2)));
+        Assert.Equal("LASF_Projection", Encoding.ASCII.GetString(bytes, LasHeaderSize + 2, 15));
+        Assert.Equal(34735, BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(LasHeaderSize + 18, 2)));
+        Assert.Equal(24u, BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(LasHeaderSize + 20, 4)));
+        Assert.Equal("GeoTIFF", Encoding.ASCII.GetString(bytes, LasHeaderSize + 24, 7));
+
+        int keys = LasHeaderSize + 54;
+        Assert.Equal(1, BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(keys, 2)));
+        Assert.Equal(2, BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(keys + 6, 2)));
+        Assert.Equal(1024, BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(keys + 8, 2)));
+        Assert.Equal(1, BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(keys + 14, 2)));
+        Assert.Equal(3072, BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(keys + 16, 2)));
+        Assert.Equal(3857, BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(keys + 22, 2)));
+    }
+
+    [Theory]
+    [InlineData("LOCAL_GRID_SYSTEM")]
+    [InlineData("EPSG:999999")]
+    [InlineData("EPSG:12x4")]
+    [InlineData("EPSG:4326")]
+    [InlineData("EPSG:32767")]
+    [InlineData("epsg:3857")]
+    public void Las_Coordinate_System_Record_Needs_A_Projected_Epsg_Code_That_Fits(string? coordinateSystem)
+    {
+        bool written = coordinateSystem is "epsg:3857";
+        using var doc = new FakeDocument(() => [], "sample.xyz", 0, coordinateSystem);
+        byte[] bytes = Las(doc, new PclLasOptions { WriteCoordinateSystem = true });
+
+        Assert.Equal(written ? LasHeaderSize + 78 : LasHeaderSize, bytes.Length);
+        Assert.Equal(written ? 1u : 0u, BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(100, 4)));
+    }
+
+    [Fact]
+    public void Las_Writes_No_Coordinate_System_Record_By_Default()
+    {
+        using var doc = new FakeDocument(() => [], "sample.xyz", 0, "EPSG:3857");
+
+        Assert.Equal(LasHeaderSize, Las(doc).Length);
+    }
+
+    [Fact]
+    public void Las14_Round_Trip_Reads_Back_Positions_Intensity_Colour_And_Classification()
+    {
+        var points = new[]
+        {
+            new PclPoint(new PclVector3(1, 2, 3), new PclColor(10, 20, 30), 0.25f, null, 5),
+            new PclPoint(new PclVector3(-4.5, 5.25, 6.125), null, 0.5f),
+            new PclPoint(new PclVector3(7, 8, 9)),
+        };
+        using var doc = new FakeDocument(() => points);
+        var las = new PclLasOptions { Version = LasVersion.V14, PointFormat = 7, Scale = 0.01, Offset = new PclVector3(1, 2, 3) };
+        byte[] bytes = Las(doc, las);
+
+        const int recordSize = 36;
+        const int dataStart = 375;
+        Assert.Equal(dataStart + (3 * recordSize), bytes.Length);
+
+        // Raw stored integers, then the decoded values.
+        int[] rawX = [0, -550, 600];
+        int[] rawY = [0, 325, 600];
+        int[] rawZ = [0, 312, 600];
+        ushort[] rawIntensity = [16384, 32768, 65535];
+
+        for (int i = 0; i < 3; i++)
+        {
+            ReadOnlySpan<byte> rec = bytes.AsSpan(dataStart + (i * recordSize), recordSize);
+
+            Assert.Equal(rawX[i], BinaryPrimitives.ReadInt32LittleEndian(rec[..4]));
+            Assert.Equal(rawY[i], BinaryPrimitives.ReadInt32LittleEndian(rec.Slice(4, 4)));
+            Assert.Equal(rawZ[i], BinaryPrimitives.ReadInt32LittleEndian(rec.Slice(8, 4)));
+            Assert.Equal(rawIntensity[i], BinaryPrimitives.ReadUInt16LittleEndian(rec.Slice(12, 2)));
+
+            Assert.Equal(0x11, rec[14]);
+            Assert.Equal(0, rec[15]);
+            Assert.Equal(0.0, BinaryPrimitives.ReadDoubleLittleEndian(rec.Slice(22, 8)));
+
+            double x = (BinaryPrimitives.ReadInt32LittleEndian(rec[..4]) * 0.01) + 1;
+            double y = (BinaryPrimitives.ReadInt32LittleEndian(rec.Slice(4, 4)) * 0.01) + 2;
+            double z = (BinaryPrimitives.ReadInt32LittleEndian(rec.Slice(8, 4)) * 0.01) + 3;
+            Assert.Equal(points[i].X, x, 0.006);
+            Assert.Equal(points[i].Y, y, 0.006);
+            Assert.Equal(points[i].Z, z, 0.006);
+        }
+
+        Assert.Equal(new PclColor(10, 20, 30),
+            new PclColor((byte)(BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(dataStart + 30, 2)) / 257),
+                (byte)(BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(dataStart + 32, 2)) / 257),
+                (byte)(BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(dataStart + 34, 2)) / 257)));
+        Assert.Equal(5, bytes[dataStart + 16]);
+        Assert.Equal(new PclColor(255, 255, 255),
+            new PclColor((byte)(BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(dataStart + 36 + 30, 2)) / 257),
+                (byte)(BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(dataStart + 36 + 32, 2)) / 257),
+                (byte)(BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(dataStart + 36 + 34, 2)) / 257)));
+    }
+
+    [Fact]
+    public void Las14_Format_6_Has_No_Colour_And_Format_8_Has_Zero_Nir()
+    {
+        var points = new[] { new PclPoint(new PclVector3(1, 2, 3), new PclColor(10, 20, 30), 0.5f, null, 200) };
+        using var doc = new FakeDocument(() => points);
+
+        byte[] six = Las(doc, new PclLasOptions { Version = LasVersion.V14, PointFormat = 6 });
+        byte[] eight = Las(doc, new PclLasOptions { Version = LasVersion.V14, PointFormat = 8 });
+
+        Assert.Equal(375 + 30, six.Length);
+        Assert.Equal(375 + 38, eight.Length);
+        Assert.Equal(30, BinaryPrimitives.ReadUInt16LittleEndian(six.AsSpan(105, 2)));
+        Assert.Equal(38, BinaryPrimitives.ReadUInt16LittleEndian(eight.AsSpan(105, 2)));
+
+        // A full classification byte, not the five bits of LAS 1.2.
+        Assert.Equal(200, six[375 + 16]);
+        Assert.Equal(200, eight[375 + 16]);
+
+        // Format 8 stores no near infrared from points.
+        Assert.Equal(0, BinaryPrimitives.ReadUInt16LittleEndian(eight.AsSpan(375 + 36, 2)));
+
+        // The colour of format 8 defaults to white without a colour.
+        using var plain = new FakeDocument(() => [new PclPoint(new PclVector3(1, 2, 3))]);
+        byte[] white = Las(plain, new PclLasOptions { Version = LasVersion.V14, PointFormat = 8 });
+        Assert.Equal(65535, BinaryPrimitives.ReadUInt16LittleEndian(white.AsSpan(375 + 30, 2)));
+    }
+
+    [Theory]
+    [InlineData(LasVersion.V12, 6)]
+    [InlineData(LasVersion.V12, 7)]
+    [InlineData(LasVersion.V12, 8)]
+    [InlineData(LasVersion.V14, 2)]
+    public void Las_Rejects_A_Version_And_Format_That_Do_Not_Match(LasVersion version, int format)
+    {
+        using var doc = FakeDocument.Of(At(1, 2, 3));
+
+        Assert.Throws<NotSupportedException>(() =>
+            PclLasExporter.Export(doc, new MemoryStream(), null, new PclLasOptions { Version = version, PointFormat = format }));
+    }
+
+    [Fact]
+    public void Las_Writes_The_Configured_Scale_And_Offset()
+    {
+        using var doc = FakeDocument.Of(new PclPoint(new PclVector3(11, 21, 31)));
+        var las = new PclLasOptions { Scale = 1.0, Offset = new PclVector3(10, 20, 30) };
+        byte[] bytes = Las(doc, las);
+
+        Assert.Equal(1.0, BinaryPrimitives.ReadDoubleLittleEndian(bytes.AsSpan(131, 8)));
+        Assert.Equal(10.0, BinaryPrimitives.ReadDoubleLittleEndian(bytes.AsSpan(155, 8)));
+        Assert.Equal(1, BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(LasHeaderSize, 4)));
+        Assert.Equal(1, BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(LasHeaderSize + 4, 4)));
+        Assert.Equal(1, BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(LasHeaderSize + 8, 4)));
+    }
+
+    [Fact]
+    public void Las_Rejects_An_Offset_The_Coordinates_Do_Not_Fit()
+    {
+        using var doc = FakeDocument.Of(new PclPoint(new PclVector3(0, 0, 0)));
+        var las = new PclLasOptions { Offset = new PclVector3(1e15, 0, 0) };
+
+        Assert.Throws<NotSupportedException>(() => PclLasExporter.Export(doc, new MemoryStream(), null, las));
+    }
+
+    [Theory]
+    [InlineData(double.NaN, 0, 0)]
+    [InlineData(0, double.PositiveInfinity, 0)]
+    [InlineData(0, 0, double.NegativeInfinity)]
+    public void Las_Rejects_A_Non_Finite_Offset_Before_Writing(double x, double y, double z)
+    {
+        // A non-finite offset would slip through the extent check and write a corrupt header, so it is rejected
+        // when the options are built, before anything reaches the output.
+        Assert.Throws<ArgumentOutOfRangeException>(() => new PclLasOptions { Offset = new PclVector3(x, y, z) });
+
+        using var doc = FakeDocument.Of();
+        using var output = new MemoryStream();
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            PclLasExporter.Export(doc, output, null, new PclLasOptions { Offset = new PclVector3(x, y, z) }));
+        Assert.Equal(0, output.Length);
     }
 
     // ---- JSON ------------------------------------------------------------------------------------------------
