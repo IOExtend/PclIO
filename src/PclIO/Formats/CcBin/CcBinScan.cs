@@ -8,6 +8,8 @@ namespace PclIO.Formats.CcBin;
 public sealed class CcBinScan : PclScan
 {
     private const int BatchRecords = 1024;
+    private const int NormalLevels = 9;
+    private const uint ZeroNormalCode = 1u << (2 * NormalLevels + 3);
 
     private readonly string _filePath;
     private readonly long _pointOffset;
@@ -15,6 +17,8 @@ public sealed class CcBinScan : PclScan
     private readonly bool _hasColors;
     private readonly long _colorOffset;
     private readonly byte _colorChannels;
+    private readonly long _normalOffset;
+    private readonly PclTransform? _normalTransform;
     private readonly long _intensityOffset;
     private readonly long _intensityCount;
     private readonly double _shiftX;
@@ -35,6 +39,9 @@ public sealed class CcBinScan : PclScan
     public override bool HasColors => _hasColors;
 
     /// <inheritdoc />
+    public override bool HasNormals => _normalOffset >= 0;
+
+    /// <inheritdoc />
     public override bool HasIntensities => _intensityCount > 0;
 
     /// <summary>Global shift vector stored with the cloud entity.</summary>
@@ -52,6 +59,7 @@ public sealed class CcBinScan : PclScan
         bool hasColors,
         long colorOffset,
         byte colorChannels,
+        long normalOffset,
         long intensityOffset,
         long intensityCount,
         double shiftX,
@@ -59,6 +67,7 @@ public sealed class CcBinScan : PclScan
         double shiftZ,
         double scale,
         PclTransform transform,
+        PclTransform? normalTransform,
         IReadOnlyDictionary<string, string>? properties = null)
     {
         _filePath = filePath;
@@ -69,6 +78,8 @@ public sealed class CcBinScan : PclScan
         _hasColors = hasColors;
         _colorOffset = colorOffset;
         _colorChannels = colorChannels;
+        _normalOffset = normalOffset;
+        _normalTransform = normalTransform;
         _intensityOffset = intensityOffset;
         _intensityCount = intensityCount;
         _shiftX = shiftX;
@@ -79,6 +90,7 @@ public sealed class CcBinScan : PclScan
 
         _properties["TotalPoints"] = pointCount.ToString(CultureInfo.InvariantCulture);
         _properties["HasColors"] = hasColors ? "true" : "false";
+        _properties["HasNormals"] = HasNormals ? "true" : "false";
         _properties["HasIntensity"] = HasIntensities ? "true" : "false";
         _properties["GlobalShift"] = string.Create(CultureInfo.InvariantCulture, $"{shiftX:F6}, {shiftY:F6}, {shiftZ:F6}");
         _properties["GlobalScale"] = scale.ToString(CultureInfo.InvariantCulture);
@@ -105,6 +117,7 @@ public sealed class CcBinScan : PclScan
 
         byte[] ptBuf = new byte[BatchRecords * 12];
         byte[]? colBuf = _hasColors ? new byte[BatchRecords * _colorChannels] : null;
+        byte[]? normalBuf = HasNormals ? new byte[BatchRecords * sizeof(uint)] : null;
         byte[]? intBuf = HasIntensities ? new byte[BatchRecords * 4] : null;
 
         long yielded = 0;
@@ -141,6 +154,14 @@ public sealed class CcBinScan : PclScan
                     if (intRead < intBytesToRead)
                         throw FormatError.Truncated($"CC BIN file ended prematurely while reading intensity at index {pointIndex}.");
                 }
+            }
+
+            if (normalBuf != null)
+            {
+                int bytes = toRead * sizeof(uint);
+                fs.Position = _normalOffset + pointIndex * sizeof(uint);
+                if (fs.ReadAtLeast(normalBuf.AsSpan(0, bytes), bytes, throwOnEndOfStream: false) != bytes)
+                    throw FormatError.Truncated($"CC BIN normal codes at index {pointIndex}");
             }
 
             for (int p = 0; p < toRead; p++)
@@ -186,7 +207,19 @@ public sealed class CcBinScan : PclScan
                         continue;
                 }
 
-                yield return new PclPoint(pos, Color: color, Intensity: intensity, Index: (ulong)yielded);
+                PclVector3? normal = null;
+                if (normalBuf != null)
+                {
+                    uint code = BinaryPrimitives.ReadUInt32LittleEndian(normalBuf.AsSpan(p * sizeof(uint)));
+                    if (code > ZeroNormalCode)
+                        throw FormatError.Corrupted($"CC BIN normal code {code} is invalid at index {currentIdx}.");
+                    var direction = DecodeNormal(code);
+                    normal = options.ApplyTransform && _normalTransform != null
+                        ? _normalTransform.TransformVector(direction)
+                        : direction;
+                }
+
+                yield return new PclPoint(pos, Color: color, Intensity: intensity, Normal: normal, Index: (ulong)yielded);
                 yielded++;
                 if (yielded >= targetCount) yield break;
             }
@@ -194,5 +227,41 @@ public sealed class CcBinScan : PclScan
             pointIndex += toRead;
             pointsRemaining -= toRead;
         }
+    }
+
+    private static PclVector3 DecodeNormal(uint code)
+    {
+        if (code == ZeroNormalCode) return PclVector3.Zero;
+
+        // Each pair of bits selects a corner of the octahedral face or its reflected center.
+        int x = 0, y = 0, z = 0;
+        int step = 1 << NormalLevels;
+        for (int bit = 2 * (NormalLevels - 1); bit >= 0; bit -= 2)
+        {
+            step /= 2;
+            switch ((code >> bit) & 3)
+            {
+                case 0: x += step; break;
+                case 1: y += step; break;
+                case 2: z += step; break;
+                case 3:
+                    x += step;
+                    y += step;
+                    z += step;
+                    step = -step;
+                    break;
+            }
+        }
+
+        x = 2 * x + step;
+        y = 2 * y + step;
+        z = 2 * z + step;
+        uint signs = code >> (2 * NormalLevels);
+        if ((signs & 4) != 0) x = -x;
+        if ((signs & 2) != 0) y = -y;
+        if ((signs & 1) != 0) z = -z;
+
+        double length = Math.Sqrt(x * x + y * y + z * z);
+        return new PclVector3(x / length, y / length, z / length);
     }
 }
