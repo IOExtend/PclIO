@@ -8,6 +8,7 @@ using PclIO.Formats.Pcd;
 using PclIO.Formats.PinPoint;
 using PclIO.Formats.Ply;
 using PclIO.Formats.Pts;
+using PclIO.Formats.Ptx;
 using PclIO.Formats.Recap;
 using Xunit;
 
@@ -3505,5 +3506,333 @@ public sealed class FormatTests
         string longLine = "1 2 3 " + new string('9', (1 << 20) + 10) + "\n";
         Assert.Throws<InvalidDataException>(() =>
             PtsDocument.Open(dir.WriteText("long.pts", "1\n" + longLine)));
+    }
+
+    // ---- Leica Cyclone PTX ------------------------------------------------------------------------------------
+
+    [Fact]
+    public void Ptx_Reads_Header_And_Exposes_Properties_And_Metadata()
+    {
+        using var dir = new TempDirectory();
+        using var doc = PtxDocument.Open(dir.Write("sample.ptx", SyntheticFixtures.CreateSyntheticPtx()));
+
+        Assert.Equal(PclFileKind.Ptx, doc.Kind);
+        Assert.Equal("Leica Cyclone PTX", doc.Metadata["Format"]);
+        Assert.Equal("1", doc.Metadata["Scans"]);
+        Assert.Equal("3", doc.Metadata["TotalPoints"]);
+        Assert.Equal(3, doc.TotalPointCount);
+
+        var scan = Assert.Single(doc.Scans);
+        Assert.IsType<PtxScan>(scan);
+        var ptxScan = (PtxScan)scan;
+
+        Assert.Equal("0", ptxScan.Id);
+        Assert.Equal("sample", ptxScan.Name);
+        Assert.Equal(3, ptxScan.Columns);
+        Assert.Equal(1, ptxScan.Rows);
+        Assert.Equal(3, ptxScan.GridSize);
+        Assert.Equal(3, ptxScan.PointCount);
+        Assert.Equal(7, ptxScan.ColumnsPerPoint);
+        Assert.True(ptxScan.HasColors);
+        Assert.True(ptxScan.HasIntensities);
+        Assert.False(ptxScan.HasNormals);
+        Assert.Equal(PclBounds.Empty, ptxScan.Bounds);
+        Assert.Equal(PclTransform.Identity, ptxScan.Transform);
+        Assert.Equal(PclVector3.Zero, ptxScan.ScannerPosition);
+        Assert.Equal(new PclVector3(1, 0, 0), ptxScan.ScannerXAxis);
+        Assert.Equal(new PclVector3(0, 1, 0), ptxScan.ScannerYAxis);
+        Assert.Equal(new PclVector3(0, 0, 1), ptxScan.ScannerZAxis);
+        Assert.Equal("3", ptxScan.Properties["Columns"]);
+        Assert.Equal("1", ptxScan.Properties["Rows"]);
+        Assert.Equal("3", ptxScan.Properties["GridSize"]);
+        Assert.Equal("7", ptxScan.Properties["ColumnsPerPoint"]);
+    }
+
+    [Fact]
+    public void Ptx_Round_Trip_Positions_Intensity_And_Colour()
+    {
+        using var dir = new TempDirectory();
+        using var doc = PtxDocument.Open(dir.Write("sample.ptx", SyntheticFixtures.CreateSyntheticPtx()));
+
+        var points = doc.Scans[0].ReadPoints(NoTransform).ToList();
+
+        Assert.Equal(3, points.Count);
+        Assert.Equal([0UL, 1UL, 2UL], points.Select(p => p.Index));
+        AssertNear(new PclVector3(1, 2, 3), points[0].Position);
+        AssertNear(new PclVector3(-4.5, 5.25, 6.125), points[1].Position);
+        AssertNear(new PclVector3(7, 8, 9), points[2].Position);
+        Assert.Equal(0.5f, points[0].Intensity);
+        Assert.Equal(1.0f, points[1].Intensity);
+        Assert.Equal(0f, points[2].Intensity);
+        Assert.Equal(new PclColor(10, 20, 30), points[0].Color);
+        Assert.Equal(new PclColor(255, 255, 255), points[1].Color);
+        Assert.Equal(new PclColor(255, 255, 255), points[2].Color);
+        Assert.All(points, p => Assert.Null(p.Normal));
+        Assert.All(points, p => Assert.Null(p.Classification));
+    }
+
+    [Fact]
+    public void Ptx_Applies_Transformation_Matrix()
+    {
+        using var dir = new TempDirectory();
+        // Matrix in PTX: Row 4 is translation Tx, Ty, Tz, 1
+        double[] matrix =
+        [
+            1, 0, 0, 0,
+            0, 1, 0, 0,
+            0, 0, 1, 0,
+            10, 20, 30, 1
+        ];
+
+        using var doc = PtxDocument.Open(dir.Write("transformed.ptx",
+            SyntheticFixtures.CreateSyntheticPtx(matrix: matrix)));
+
+        var scan = doc.Scans[0];
+        Assert.False(scan.Transform.IsIdentity);
+        Assert.Equal(new PclVector3(10, 20, 30), scan.Transform.Translation);
+
+        // With ApplyTransform = true (default)
+        var transformed = scan.ReadPoints().ToList();
+        Assert.Equal(3, transformed.Count);
+        AssertNear(new PclVector3(11, 22, 33), transformed[0].Position);
+        AssertNear(new PclVector3(5.5, 25.25, 36.125), transformed[1].Position);
+        AssertNear(new PclVector3(17, 28, 39), transformed[2].Position);
+
+        // With ApplyTransform = false
+        var raw = scan.ReadPoints(NoTransform).ToList();
+        AssertNear(new PclVector3(1, 2, 3), raw[0].Position);
+    }
+
+    [Fact]
+    public void Ptx_Skips_Empty_Grid_Cells_And_Non_Finite_Coordinates()
+    {
+        using var dir = new TempDirectory();
+        PtxSamplePoint[] pointsWithEmpty =
+        [
+            new(1, 2, 3, 0.5f, new PclColor(10, 20, 30)),
+            new(0, 0, 0, 0.0f, new PclColor(0, 0, 0)),        // Empty cell (0, 0, 0)
+            new(double.NaN, 5, 6, 0.5f, new PclColor(0, 0, 0)), // Non-finite NaN
+            new(double.PositiveInfinity, 0, 0, 0.5f, null),    // Non-finite Inf
+            new(7, 8, 9, 1.0f, new PclColor(255, 255, 255)),   // Valid
+        ];
+
+        using var doc = PtxDocument.Open(dir.Write("empty_cells.ptx",
+            SyntheticFixtures.CreateSyntheticPtx(pointsWithEmpty, cols: 5, rows: 1)));
+
+        Assert.Equal(5, doc.Scans[0].PointCount);
+
+        var points = doc.Scans[0].ReadPoints(NoTransform).ToList();
+        Assert.Equal(2, points.Count);
+        Assert.Equal(0UL, points[0].Index);
+        AssertNear(new PclVector3(1, 2, 3), points[0].Position);
+        Assert.Equal(1UL, points[1].Index);
+        AssertNear(new PclVector3(7, 8, 9), points[1].Position);
+    }
+
+    [Fact]
+    public void Ptx_Supports_Multiple_Scans_In_Single_File()
+    {
+        using var dir = new TempDirectory();
+
+        PtxSamplePoint[] scan1Points =
+        [
+            new(1, 2, 3, 0.5f, new PclColor(10, 20, 30)),
+            new(0, 0, 0, 0f, new PclColor(0, 0, 0)),
+            new(4, 5, 6, 0.8f, new PclColor(40, 50, 60)),
+            new(7, 8, 9, 1.0f, new PclColor(70, 80, 90)),
+        ];
+
+        PtxSamplePoint[] scan2Points =
+        [
+            new(10, 20, 30, 0.2f),
+            new(40, 50, 60, 0.9f),
+        ];
+
+        double[] identityMatrix = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+        double[] transMatrix = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 100, 200, 300, 1];
+
+        PtxSampleScan[] scans =
+        [
+            new(2, 2, PclVector3.Zero, new(1, 0, 0), new(0, 1, 0), new(0, 0, 1), identityMatrix, scan1Points, 7),
+            new(2, 1, new(100, 200, 300), new(1, 0, 0), new(0, 1, 0), new(0, 0, 1), transMatrix, scan2Points, 4),
+        ];
+
+        byte[] ptxBytes = SyntheticFixtures.CreateSyntheticMultiScanPtx(scans);
+        using var doc = PtxDocument.Open(dir.Write("multi.ptx", ptxBytes));
+
+        Assert.Equal(2, doc.Scans.Count);
+        Assert.Equal("multi_0", doc.Scans[0].Name);
+        Assert.Equal("multi_1", doc.Scans[1].Name);
+        Assert.Equal(4, doc.Scans[0].PointCount);
+        Assert.Equal(2, doc.Scans[1].PointCount);
+        Assert.Equal(6, doc.TotalPointCount);
+
+        Assert.True(doc.Scans[0].HasColors);
+        Assert.True(doc.Scans[0].HasIntensities);
+
+        Assert.False(doc.Scans[1].HasColors);
+        Assert.True(doc.Scans[1].HasIntensities);
+
+        // Read Scan 0 points (1 zero cell skipped)
+        var s0Points = doc.Scans[0].ReadPoints().ToList();
+        Assert.Equal(3, s0Points.Count);
+        AssertNear(new PclVector3(1, 2, 3), s0Points[0].Position);
+        AssertNear(new PclVector3(4, 5, 6), s0Points[1].Position);
+        AssertNear(new PclVector3(7, 8, 9), s0Points[2].Position);
+
+        // Read Scan 1 points with transform applied (translation 100, 200, 300)
+        var s1Points = doc.Scans[1].ReadPoints().ToList();
+        Assert.Equal(2, s1Points.Count);
+        AssertNear(new PclVector3(110, 220, 330), s1Points[0].Position);
+        AssertNear(new PclVector3(140, 250, 360), s1Points[1].Position);
+
+        // Read all points across both scans
+        var allPoints = doc.ReadAllPoints().ToList();
+        Assert.Equal(5, allPoints.Count);
+    }
+
+    [Theory]
+    [InlineData(3, false, false)]
+    [InlineData(4, false, true)]
+    [InlineData(6, true, false)]
+    [InlineData(7, true, true)]
+    public void Ptx_Reads_Various_Column_Counts(int columns, bool expectedColors, bool expectedIntensities)
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticPtx(columnsPerPoint: columns);
+        using var doc = PtxDocument.Open(dir.Write($"cols_{columns}.ptx", bytes));
+
+        var scan = Assert.Single(doc.Scans);
+        Assert.Equal(expectedColors, scan.HasColors);
+        Assert.Equal(expectedIntensities, scan.HasIntensities);
+
+        var points = scan.ReadPoints(NoTransform).ToList();
+        Assert.Equal(3, points.Count);
+        AssertNear(new PclVector3(1, 2, 3), points[0].Position);
+
+        if (expectedIntensities)
+            Assert.NotNull(points[0].Intensity);
+        else
+            Assert.Null(points[0].Intensity);
+
+        if (expectedColors)
+            Assert.NotNull(points[0].Color);
+        else
+            Assert.Null(points[0].Color);
+    }
+
+    [Fact]
+    public void Ptx_Honors_MaxPoints_And_SubsampleStep()
+    {
+        using var dir = new TempDirectory();
+        using var doc = PtxDocument.Open(dir.Write("sample.ptx", SyntheticFixtures.CreateSyntheticPtx()));
+
+        var scan = doc.Scans[0];
+        Assert.Equal(2, scan.ReadPoints(new PclReadOptions { MaxPoints = 2 }).Count());
+        Assert.Empty(scan.ReadPoints(new PclReadOptions { MaxPoints = 0 }));
+
+        // SubsampleStep: step 2 of 3 points yields points at index 0 and index 2
+        var stepped = scan.ReadPoints(new PclReadOptions { SubsampleStep = 2, ApplyTransform = false }).ToList();
+        Assert.Equal(2, stepped.Count);
+        AssertNear(new PclVector3(1, 2, 3), stepped[0].Position);
+        AssertNear(new PclVector3(7, 8, 9), stepped[1].Position);
+    }
+
+    [Fact]
+    public void Ptx_Handles_Empty_Grid_Scan()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticPtx(points: [], cols: 0, rows: 0);
+        using var doc = PtxDocument.Open(dir.Write("empty.ptx", bytes));
+
+        var scan = Assert.Single(doc.Scans);
+        Assert.Equal(0, scan.PointCount);
+        Assert.Empty(scan.ReadPoints());
+    }
+
+    [Fact]
+    public void Ptx_Rejects_Negative_Grid_Dimensions()
+    {
+        using var dir = new TempDirectory();
+        string badHeader = "-5\n10\n0 0 0\n1 0 0\n0 1 0\n0 0 1\n1 0 0 0\n0 1 0 0\n0 0 1 0\n0 0 0 1\n";
+        Assert.Throws<InvalidDataException>(() =>
+            PtxDocument.Open(dir.WriteText("bad.ptx", badHeader + "1 2 3\n")));
+    }
+
+    [Fact]
+    public void Ptx_Rejects_Grid_Count_Exceeding_Physical_Capacity()
+    {
+        using var dir = new TempDirectory();
+        string badHeader = "1000000000\n1000000000\n0 0 0\n1 0 0\n0 1 0\n0 0 1\n1 0 0 0\n0 1 0 0\n0 0 1 0\n0 0 0 1\n";
+        Assert.Throws<InvalidDataException>(() =>
+            PtxDocument.Open(dir.WriteText("huge.ptx", badHeader + "1 2 3\n")));
+    }
+
+    [Fact]
+    public void Ptx_Rejects_Truncated_Scan_Header()
+    {
+        using var dir = new TempDirectory();
+        Assert.Throws<InvalidDataException>(() =>
+            PtxDocument.Open(dir.WriteText("trunc.ptx", "10\n10\n0 0 0\n1 0 0\n")));
+    }
+
+    [Fact]
+    public void Ptx_Rejects_Truncated_Points()
+    {
+        using var dir = new TempDirectory();
+        string header = "3\n1\n0 0 0\n1 0 0\n0 1 0\n0 0 1\n1 0 0 0\n0 1 0 0\n0 0 1 0\n0 0 0 1\n";
+        // 3 points declared, but only 2 lines present
+        string content = header + "1.0 2.0 3.0 1.0 255 0 0\n4.0 5.0 6.0 1.0 0 255 0\n";
+        using var doc = PtxDocument.Open(dir.WriteText("trunc_pts.ptx", content));
+        var scan = Assert.Single(doc.Scans);
+        Assert.Throws<InvalidDataException>(() => scan.ReadPoints().ToList());
+    }
+
+    [Fact]
+    public void Ptx_Rejects_Unsupported_Column_Count()
+    {
+        using var dir = new TempDirectory();
+        string header = "1\n1\n0 0 0\n1 0 0\n0 1 0\n0 0 1\n1 0 0 0\n0 1 0 0\n0 0 1 0\n0 0 0 1\n";
+        // 5 columns (unsupported)
+        Assert.Throws<NotSupportedException>(() =>
+            PtxDocument.Open(dir.WriteText("five_cols.ptx", header + "1 2 3 4 5\n")));
+    }
+
+    [Fact]
+    public void Ptx_Rejects_Invalid_Numeric_Header_Values()
+    {
+        using var dir = new TempDirectory();
+        string header = "10\nabc\n0 0 0\n1 0 0\n0 1 0\n0 0 1\n1 0 0 0\n0 1 0 0\n0 0 1 0\n0 0 0 1\n";
+        Assert.Throws<InvalidDataException>(() =>
+            PtxDocument.Open(dir.WriteText("bad.ptx", header + "1 2 3\n")));
+    }
+
+    [Fact]
+    public void Ptx_Rejects_Invalid_Numeric_Point_Values()
+    {
+        using var dir = new TempDirectory();
+        string header = "1\n1\n0 0 0\n1 0 0\n0 1 0\n0 0 1\n1 0 0 0\n0 1 0 0\n0 0 1 0\n0 0 0 1\n";
+        Assert.Throws<InvalidDataException>(() =>
+            PtxDocument.Open(dir.WriteText("bad_pt.ptx", header + "1 abc 3\n")));
+
+        string header2 = "2\n1\n0 0 0\n1 0 0\n0 1 0\n0 0 1\n1 0 0 0\n0 1 0 0\n0 0 1 0\n0 0 0 1\n";
+        using var doc2 = PtxDocument.Open(dir.WriteText("bad_pt2.ptx", header2 + "1.0 2.0 3.0\n1.0 abc 3.0\n"));
+        var scan2 = Assert.Single(doc2.Scans);
+        Assert.Throws<InvalidDataException>(() => scan2.ReadPoints().ToList());
+    }
+
+    [Fact]
+    public void Ptx_Rejects_Line_Exceeding_Max_Length()
+    {
+        using var dir = new TempDirectory();
+        string header = "1\n1\n0 0 0\n1 0 0\n0 1 0\n0 0 1\n1 0 0 0\n0 1 0 0\n0 0 1 0\n0 0 0 1\n";
+        string longLine = "1 2 3 " + new string('9', (1 << 20) + 10) + "\n";
+        Assert.Throws<InvalidDataException>(() =>
+            PtxDocument.Open(dir.WriteText("long.ptx", header + longLine)));
+
+        string header2 = "2\n1\n0 0 0\n1 0 0\n0 1 0\n0 0 1\n1 0 0 0\n0 1 0 0\n0 0 1 0\n0 0 0 1\n";
+        using var doc2 = PtxDocument.Open(dir.WriteText("long2.ptx", header2 + "1 2 3\n" + longLine));
+        var scan2 = Assert.Single(doc2.Scans);
+        Assert.Throws<InvalidDataException>(() => scan2.ReadPoints().ToList());
     }
 }

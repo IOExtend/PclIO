@@ -106,6 +106,20 @@ public sealed class KindDetectionTests
         Assert.Equal(PclFileKind.Unknown, Detect(new byte[100], "sample.pts"));
     }
 
+    [Theory]
+    [InlineData("sample.ptx")]
+    [InlineData("SAMPLE.PTX")]
+    [InlineData("sample.dat")]
+    public void Detects_Ptx_By_Header_Structure(string name) =>
+        Assert.Equal(PclFileKind.Ptx, Detect(SyntheticFixtures.CreateSyntheticPtx(), name));
+
+    [Fact]
+    public void Ptx_Needs_The_Header_Structure_Not_Just_The_Extension()
+    {
+        Assert.Equal(PclFileKind.Unknown, Detect("just some text"u8.ToArray(), "sample.ptx"));
+        Assert.Equal(PclFileKind.Unknown, Detect(new byte[100], "sample.ptx"));
+    }
+
     [Fact]
     public void Faro_Needs_The_Container_Signature_Not_Just_The_Extension() =>
         Assert.Equal(PclFileKind.Unknown, Detect(new byte[100], "scanner.fls"));

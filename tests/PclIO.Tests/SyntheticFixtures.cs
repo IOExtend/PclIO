@@ -27,6 +27,21 @@ public readonly record struct PlySamplePoint(double X, double Y, double Z, PclCo
 /// <summary>One point of a synthetic PTS file: position, intensity, colour and normal.</summary>
 public readonly record struct PtsSamplePoint(double X, double Y, double Z, float? Intensity = null, PclColor? Color = null, PclVector3? Normal = null, byte Alpha = 255);
 
+/// <summary>One point of a synthetic PTX file: position, intensity and colour.</summary>
+public readonly record struct PtxSamplePoint(double X, double Y, double Z, float? Intensity = null, PclColor? Color = null);
+
+/// <summary>One scan in a synthetic PTX file: grid dimensions, scanner pose, matrix, and point data.</summary>
+public readonly record struct PtxSampleScan(
+    int Columns,
+    int Rows,
+    PclVector3 ScannerPosition,
+    PclVector3 ScannerXAxis,
+    PclVector3 ScannerYAxis,
+    PclVector3 ScannerZAxis,
+    double[] Matrix16,
+    IReadOnlyList<PtxSamplePoint> Points,
+    int ColumnsPerPoint = 7);
+
 /// <summary>Generates small synthetic scan files for the tests. Every layout is written from what the readers implement;
 /// no byte of any of them comes from a real scan.</summary>
 internal static class SyntheticFixtures
@@ -1255,6 +1270,84 @@ internal static class SyntheticFixtures
             };
             sb.Append(line);
             sb.Append('\n');
+        }
+
+        return System.Text.Encoding.UTF8.GetBytes(sb.ToString());
+    }
+
+    public static IReadOnlyList<PtxSamplePoint> DefaultPtxPoints =>
+    [
+        new(1, 2, 3, 0.5f, new PclColor(10, 20, 30)),
+        new(-4.5, 5.25, 6.125, 1.0f, new PclColor(255, 255, 255)),
+        new(7, 8, 9, 0f, new PclColor(255, 255, 255)),
+    ];
+
+    public static byte[] CreateSyntheticPtx(
+        IReadOnlyList<PtxSamplePoint>? points = null,
+        int? cols = null,
+        int? rows = null,
+        int columnsPerPoint = 7,
+        PclVector3? scannerPos = null,
+        PclVector3? scannerX = null,
+        PclVector3? scannerY = null,
+        PclVector3? scannerZ = null,
+        double[]? matrix = null,
+        string? customHeader = null)
+    {
+        points ??= DefaultPtxPoints;
+        int c = cols ?? points.Count;
+        int r = rows ?? 1;
+        var pos = scannerPos ?? PclVector3.Zero;
+        var ax = scannerX ?? new PclVector3(1, 0, 0);
+        var ay = scannerY ?? new PclVector3(0, 1, 0);
+        var az = scannerZ ?? new PclVector3(0, 0, 1);
+        var m = matrix ?? [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+
+        var scan = new PtxSampleScan(c, r, pos, ax, ay, az, m, points, columnsPerPoint);
+        return CreateSyntheticMultiScanPtx([scan], customHeader);
+    }
+
+    public static byte[] CreateSyntheticMultiScanPtx(
+        IReadOnlyList<PtxSampleScan> scans,
+        string? customFirstHeader = null)
+    {
+        var sb = new StringBuilder();
+
+        for (int s = 0; s < scans.Count; s++)
+        {
+            var scan = scans[s];
+
+            if (s == 0 && customFirstHeader != null)
+            {
+                sb.Append(customFirstHeader);
+            }
+            else
+            {
+                sb.Append(scan.Columns.ToString(CultureInfo.InvariantCulture)).Append('\n');
+                sb.Append(scan.Rows.ToString(CultureInfo.InvariantCulture)).Append('\n');
+                sb.Append(string.Create(CultureInfo.InvariantCulture, $"{scan.ScannerPosition.X:F6} {scan.ScannerPosition.Y:F6} {scan.ScannerPosition.Z:F6}")).Append('\n');
+                sb.Append(string.Create(CultureInfo.InvariantCulture, $"{scan.ScannerXAxis.X:F6} {scan.ScannerXAxis.Y:F6} {scan.ScannerXAxis.Z:F6}")).Append('\n');
+                sb.Append(string.Create(CultureInfo.InvariantCulture, $"{scan.ScannerYAxis.X:F6} {scan.ScannerYAxis.Y:F6} {scan.ScannerYAxis.Z:F6}")).Append('\n');
+                sb.Append(string.Create(CultureInfo.InvariantCulture, $"{scan.ScannerZAxis.X:F6} {scan.ScannerZAxis.Y:F6} {scan.ScannerZAxis.Z:F6}")).Append('\n');
+                var m = scan.Matrix16;
+                sb.Append(string.Create(CultureInfo.InvariantCulture, $"{m[0]:G} {m[1]:G} {m[2]:G} {m[3]:G}")).Append('\n');
+                sb.Append(string.Create(CultureInfo.InvariantCulture, $"{m[4]:G} {m[5]:G} {m[6]:G} {m[7]:G}")).Append('\n');
+                sb.Append(string.Create(CultureInfo.InvariantCulture, $"{m[8]:G} {m[9]:G} {m[10]:G} {m[11]:G}")).Append('\n');
+                sb.Append(string.Create(CultureInfo.InvariantCulture, $"{m[12]:G} {m[13]:G} {m[14]:G} {m[15]:G}")).Append('\n');
+            }
+
+            foreach (var pt in scan.Points)
+            {
+                string line = scan.ColumnsPerPoint switch
+                {
+                    3 => string.Create(CultureInfo.InvariantCulture, $"{pt.X:F4} {pt.Y:F4} {pt.Z:F4}"),
+                    4 => string.Create(CultureInfo.InvariantCulture, $"{pt.X:F4} {pt.Y:F4} {pt.Z:F4} {pt.Intensity ?? 0f:F4}"),
+                    6 => string.Create(CultureInfo.InvariantCulture, $"{pt.X:F4} {pt.Y:F4} {pt.Z:F4} {pt.Color?.R ?? 255} {pt.Color?.G ?? 255} {pt.Color?.B ?? 255}"),
+                    7 => string.Create(CultureInfo.InvariantCulture, $"{pt.X:F4} {pt.Y:F4} {pt.Z:F4} {pt.Intensity ?? 0f:F4} {pt.Color?.R ?? 255} {pt.Color?.G ?? 255} {pt.Color?.B ?? 255}"),
+                    _ => throw new ArgumentException($"Unsupported column count {scan.ColumnsPerPoint}", nameof(scans)),
+                };
+                sb.Append(line).Append('\n');
+            }
         }
 
         return System.Text.Encoding.UTF8.GetBytes(sb.ToString());

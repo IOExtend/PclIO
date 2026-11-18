@@ -46,6 +46,7 @@ The library targets .NET 8 and .NET 10. It is managed code with no dependencies 
 | PCD | `.pcd` | Points decoded from the 0.7 header in ASCII, binary and binary compressed (LZF) form: XYZ from x, y and z, colour from packed rgb or rgba, intensity, and normals from normal_x, normal_y and normal_z. Points with non-finite coordinates are not returned. The viewpoint is kept as metadata and not applied. |
 | PLY | `.ply` | Vertices decoded from ASCII and binary little and big endian files: XYZ from x, y and z, 8-bit colour from red, green and blue (with alpha when present), intensity, and normals from nx, ny and nz. Faces and other elements are ignored. Points with non-finite coordinates are not returned. |
 | PTS | `.pts` | Leica Cyclone ASCII exchange point clouds: XYZ coordinates with or without point count header, intensity, 8-bit RGB colour, or unit normals across 3, 4, 6, 7, 8, 9 and 10 column layouts. Points with non-finite coordinates are not returned. |
+| PTX | `.ptx` | Leica Cyclone gridded ASCII exchange point clouds: one or more gridded scans per file, each with a 10-line header defining grid dimensions (columns and rows), scanner position and axes, and a 4x4 transformation matrix. XYZ coordinates across 3, 4, 6 and 7 column layouts (with intensity and 8-bit RGB colour). Empty grid cells (coordinates 0, 0, 0) and non-finite coordinates are skipped. Transform matrices are applied to point positions unless `ApplyTransform` is false. |
 
 ### Format detection
 
@@ -55,7 +56,7 @@ regard to case.
 
 - E57, ReCap scan and Leica files are recognised by their content and accepted with any extension; for Leica, `.lgs` selects the
   older container and any other extension `.lgsx`. EdgeWise files are also recognised by content when the extension is none of its own.
-  A LAS file is recognised by the `LASF` signature with any extension except `.laz`, which shares the signature and stays unknown. A PCD file is recognised by its header structure with any extension. A PLY file is recognised by its magic word and header structure with any extension. A PTS file is recognised by an integer point count header line followed by coordinate lines with any extension, or coordinate lines with the `.pts` extension.
+  A LAS file is recognised by the `LASF` signature with any extension except `.laz`, which shares the signature and stays unknown. A PCD file is recognised by its header structure with any extension. A PLY file is recognised by its magic word and header structure with any extension. A PTS file is recognised by an integer point count header line followed by coordinate lines with any extension, or coordinate lines with the `.pts` extension. A PTX file is recognised by its 10-line header structure (grid dimensions, scanner pose, 4x4 matrix) with any extension.
 - A FARO file must be an OLE2 compound file with the extension `.fls`. A ReCap project must be a ZIP archive with the extension
   `.rcp`. A PinPoint file must be a JSON text file with the extension `.smf` or `.srf`.
 - The extensions `.c3db` and `.c3ptx` select EdgeWise without a content check. A `.c3ptx` file is read as one cluster file and any

@@ -14,7 +14,7 @@ format-specific members can change when the support for that format changes.
 | Type | Use |
 |---|---|
 | `PclFile` | Static entry point. `DetectKind(path)` and `DetectKind(stream, extension)` return a `PclFileKind`; `Open(path, options)` detects the format and returns a `PclDocument`. |
-| `PclFileKind` | `Unknown`, `E57`, `RecapProject`, `RecapScan`, `LeicaLgsx`, `LeicaLgs`, `FaroFls`, `PinPoint`, `EdgeWise`, `Las`, `Pcd`, `Ply` and `Pts`. |
+| `PclFileKind` | `Unknown`, `E57`, `RecapProject`, `RecapScan`, `LeicaLgsx`, `LeicaLgs`, `FaroFls`, `PinPoint`, `EdgeWise`, `Las`, `Pcd`, `Ply`, `Pts` and `Ptx`. |
 | `PclReadOptions` | `MaxPoints` (limit of one read call, null for all, 0 for none), `MaxCoordinateMagnitude` (default 5000, null for no limit; NaN and infinite coordinates are never returned; currently only PinPoint applies it), `EdgeWiseCoordinateScale` (default 0.128 / 32768 metres per unit; the files do not declare it), `SubsampleStep` (1 keeps every point, N keeps about one in N), `Blocks` (range of the scan's blocks in file order, null for all; currently only Leica honours it), `MaxDegreeOfParallelism` (default 1: sequential; above 1 decodes the selected Leica blocks in parallel, keeping file order), `ApplyTransform` (default true), `Strict` (default false: a reader that finds incomplete data fails with `InvalidDataException` instead of adding a warning) and `ExcludeFilteredPoints` (default false: points the file marks as filtered are excluded; currently the `FilterBits` channel of the PinPoint sectioned layout). Negative `MaxPoints`, a negative magnitude limit, a negative block start or count, a non-positive or non-finite EdgeWise scale and a step or parallelism below 1 throw `ArgumentOutOfRangeException`. `PclReadOptions.Default` has no limit. |
 | `BlockRange` | `StartBlock` (zero-based index of the first block to read) and `BlockCount` (how many blocks at most, null for all from the start on; a range past the last block yields no points, 0 yields none). |
 
@@ -36,6 +36,7 @@ is the argument, which may also be a file name.
   `Pcd` is recognised by its header structure (the documented entries in order) with any extension.
   `Ply` is recognised by its magic word and header structure with any extension.
   `Pts` is recognised by an integer point count header line followed by coordinate lines with any extension, or coordinate lines with the `.pts` extension.
+  `Ptx` is recognised by its 10-line header structure (grid dimensions, scanner pose, 4x4 matrix) with any extension.
 - `FaroFls` needs an OLE2 compound file with the extension `.fls`, `RecapProject` a ZIP archive with the extension `.rcp`, and
   `PinPoint` a JSON text file with the extension `.smf` or `.srf`.
 - The extensions `.c3db` and `.c3ptx` select `EdgeWise` without a content check, so a damaged file with one of these extensions is
@@ -83,7 +84,7 @@ no colour.
 ## Format documents
 
 `E57Document`/`E57Scan`, `RcsScanDocument`/`RcsScan`, `RcpProjectDocument`/`RcpScan`, `LgsxDocument`/`LgsxScan`/`LgsxEntry`/`LgsxSetup`,
-`FaroFlsDocument`/`FaroScan`, `PinPointDocument`/`PinPointScan`, `EdgeWiseDocument`/`EdgeWiseScan`, `LasDocument`/`LasScan`, `PcdDocument`/`PcdScan`, `PlyDocument`/`PlyScan` and `PtsDocument`/`PtsScan` are the readers behind
+`FaroFlsDocument`/`FaroScan`, `PinPointDocument`/`PinPointScan`, `EdgeWiseDocument`/`EdgeWiseScan`, `LasDocument`/`LasScan`, `PcdDocument`/`PcdScan`, `PlyDocument`/`PlyScan`, `PtsDocument`/`PtsScan` and `PtxDocument`/`PtxScan` are the readers behind
 `PclFile.Open`. Each has a static `Open` method and format-specific properties (for example the E57 version or the FARO scanner model).
 Their XML documentation states what each reader supports. Prefer `PclFile.Open`, which detects the format and chooses the reader.
 

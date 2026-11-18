@@ -87,6 +87,9 @@ public sealed class RealFileTests
     public void Read_Real_Pts_Points() => AssertReadsPoints(".pts", PclFileKind.Pts);
 
     [SkippableFact]
+    public void Read_Real_Ptx_Points() => AssertReadsPoints(".ptx", PclFileKind.Ptx);
+
+    [SkippableFact]
     public void Export_Real_File_To_Las_Matches_The_Requested_Count()
     {
         // Any one of the available formats is enough; the first one found is used.
