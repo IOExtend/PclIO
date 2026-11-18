@@ -9,6 +9,7 @@ using PclIO.Formats.Ply;
 using PclIO.Formats.Pts;
 using PclIO.Formats.Ptx;
 using PclIO.Formats.Recap;
+using PclIO.Formats.Sbf;
 using PclIO.Formats.Xyz;
 using PclIO.Internal;
 
@@ -60,6 +61,7 @@ public static class PclFile
             PclFileKind.Pts => PtsDocument.Open(path, options),
             PclFileKind.Ptx => PtxDocument.Open(path, options),
             PclFileKind.Xyz => XyzDocument.Open(path, options),
+            PclFileKind.Sbf => SbfDocument.Open(path, options),
             _ => throw new NotSupportedException($"Unsupported or unrecognized point cloud file: '{path}'"),
         };
     }

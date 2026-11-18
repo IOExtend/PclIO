@@ -264,6 +264,37 @@ public sealed class KindDetectionTests
         Assert.Equal(PclFileKind.Unknown, PclFile.DetectKind(empty));
     }
 
+    [Theory]
+    [InlineData("sample.sbf")]
+    [InlineData("SAMPLE.SBF")]
+    [InlineData("sample.txt")]
+    [InlineData("sample.dat")]
+    public void Detects_Sbf_Text_Header_By_Content(string name)
+    {
+        var (header, _) = SyntheticFixtures.CreateSyntheticSbf();
+        Assert.Equal(PclFileKind.Sbf, Detect(header, name));
+    }
+
+    [Theory]
+    [InlineData("sample.sbf.data")]
+    [InlineData("sample.data")]
+    [InlineData("sample.bin")]
+    public void Detects_Sbf_Binary_Data_By_Structure(string name)
+    {
+        var (_, data) = SyntheticFixtures.CreateSyntheticSbf();
+        Assert.Equal(PclFileKind.Sbf, Detect(data, name));
+    }
+
+    [Theory]
+    [InlineData("sample.sbf")]
+    [InlineData("SAMPLE.SBF")]
+    public void Sbf_Rejects_Right_Extension_With_Wrong_Content(string name)
+    {
+        Assert.Equal(PclFileKind.Unknown, Detect("just some text\nline two"u8.ToArray(), name));
+        Assert.Equal(PclFileKind.Unknown, Detect("POINTS 100\n1 2 3"u8.ToArray(), name));
+        Assert.Equal(PclFileKind.Unknown, Detect(new byte[100], name));
+    }
+
     [Fact]
     public void Detects_Files_On_Disk_The_Same_Way()
     {

@@ -81,6 +81,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `PclReadOptions.TextColumns`, or column count heuristics across 3, 4, 6, 7, 8, 9 and 10 column layouts (with intensity,
   8-bit RGB colour or unit normals, and alpha). Options for `TextColumns`, `TextDelimiter`, `TextCommentPrefix` and
   `TextCoordinateScale`. Comment lines (`#`, `//` or `TextCommentPrefix`) and points with non-finite coordinates are skipped.
+- Simple Binary Format point clouds are read (`PclFileKind.Sbf`): binary files (`.sbf.data`, `.data`) and companion
+  INI-style header text files (`.sbf`). Reads 32-bit floating point XYZ coordinates and optional 32-bit scalar fields
+  mapped to intensity, 8-bit RGB colour or unit normals. Big-endian and little-endian byte orders supported. Applies
+  global shift and scale transformations when `ApplyTransform` is true. Points with non-finite coordinates are skipped.
 - Leica scans read a block range with opt-in parallel decoding: the new `PclReadOptions.Blocks` selects the blocks of the
   scan in file order (per scan) and the new `PclReadOptions.MaxDegreeOfParallelism` (default 1, sequential streaming)
   decodes the selected blocks in parallel, keeping file order, consecutive `Index` values and `MaxPoints`/`SubsampleStep`

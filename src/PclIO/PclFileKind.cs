@@ -47,4 +47,7 @@ public enum PclFileKind
 
     /// <summary>Delimited text point cloud (.xyz, .asc, .txt, .csv).</summary>
     Xyz = 14,
+
+    /// <summary>Simple Binary Format point cloud (.sbf, .sbf.data).</summary>
+    Sbf = 15,
 }

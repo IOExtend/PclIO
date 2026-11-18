@@ -115,6 +115,10 @@ internal static class KindDetector
         if (IsPtsHeader(stream, origin, extension))
             return PclFileKind.Pts;
 
+        // SBF files (.sbf text header or .sbf.data binary stream).
+        if (IsSbfHeader(stream, origin, extension))
+            return PclFileKind.Sbf;
+
         // XYZ / delimited text files (.xyz, .asc, .txt, .csv) with numeric coordinates or an XYZ header.
         if (IsXyzHeader(stream, origin, extension))
             return PclFileKind.Xyz;
@@ -670,5 +674,73 @@ internal static class KindDetector
         }
 
         return xIdx >= 0 && yIdx >= 0 && zIdx >= 0;
+    }
+
+    // True when the stream starts with an SBF layout:
+    // A companion text header starting with "[SBF]", or a binary stream starting with magic 0x2A, 0x2A ('**')
+    // followed by a 64-byte header matching the point record size formula.
+    private static bool IsSbfHeader(Stream stream, long origin, string? extension)
+    {
+        long length = stream.CanSeek ? stream.Length : long.MaxValue;
+        if (length - origin < 5) return false;
+
+        Span<byte> head = stackalloc byte[64];
+        stream.Position = origin;
+        try
+        {
+            int got = stream.ReadAtLeast(head, Math.Min(64, (int)Math.Min(64, length - origin)), throwOnEndOfStream: false);
+            if (got < 5) return false;
+
+            // Check for companion / text header "[SBF]"
+            if (head[..got].StartsWith("[SBF]"u8))
+                return true;
+
+            // Check for binary data file starting with magic bytes 0x2A, 0x2A ('**')
+            if (got >= 12 && head[0] == 0x2A && head[1] == 0x2A)
+            {
+                // Try Big-Endian
+                ulong countBE = System.Buffers.Binary.BinaryPrimitives.ReadUInt64BigEndian(head[2..10]);
+                ushort sfBE = System.Buffers.Binary.BinaryPrimitives.ReadUInt16BigEndian(head[10..12]);
+
+                if (sfBE <= 1024)
+                {
+                    long recSizeBE = 12L + 4L * sfBE;
+                    if (countBE <= (ulong)((long.MaxValue - 64) / recSizeBE))
+                    {
+                        long expectedSizeBE = 64L + (long)countBE * recSizeBE;
+                        if (stream.CanSeek && length - origin == expectedSizeBE)
+                            return true;
+                    }
+                }
+
+                // Try Little-Endian
+                ulong countLE = System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(head[2..10]);
+                ushort sfLE = System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(head[10..12]);
+
+                if (sfLE <= 1024)
+                {
+                    long recSizeLE = 12L + 4L * sfLE;
+                    if (countLE <= (ulong)((long.MaxValue - 64) / recSizeLE))
+                    {
+                        long expectedSizeLE = 64L + (long)countLE * recSizeLE;
+                        if (stream.CanSeek && length - origin == expectedSizeLE)
+                            return true;
+                    }
+                }
+
+                // If extension is .data or .sbf and counts are plausible
+                if (extension is ".data" or ".sbf")
+                {
+                    if (sfBE <= 1024 && (countBE == 0 || (length - origin >= 64)))
+                        return true;
+                }
+            }
+
+            return false;
+        }
+        finally
+        {
+            stream.Position = origin;
+        }
     }
 }

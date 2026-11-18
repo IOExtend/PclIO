@@ -96,6 +96,9 @@ public sealed class RealFileTests
     public void Read_Real_Csv_Points() => AssertReadsPoints(".csv", PclFileKind.Xyz);
 
     [SkippableFact]
+    public void Read_Real_Sbf_Points() => AssertReadsPoints(".sbf", PclFileKind.Sbf);
+
+    [SkippableFact]
     public void Export_Real_File_To_Las_Matches_The_Requested_Count()
     {
         // Any one of the available formats is enough; the first one found is used.

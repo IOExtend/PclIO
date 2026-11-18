@@ -48,6 +48,7 @@ The library targets .NET 8 and .NET 10. It is managed code with no dependencies 
 | PTS | `.pts` | Leica Cyclone ASCII exchange point clouds: XYZ coordinates with or without point count header, intensity, 8-bit RGB colour, or unit normals across 3, 4, 6, 7, 8, 9 and 10 column layouts. Points with non-finite coordinates are not returned. |
 | PTX | `.ptx` | Leica Cyclone gridded ASCII exchange point clouds: one or more gridded scans per file, each with a 10-line header defining grid dimensions (columns and rows), scanner position and axes, and a 4x4 transformation matrix. XYZ coordinates across 3, 4, 6 and 7 column layouts (with intensity and 8-bit RGB colour). Empty grid cells (coordinates 0, 0, 0) and non-finite coordinates are skipped. Transform matrices are applied to point positions unless `ApplyTransform` is false. |
 | XYZ / text | `.xyz`, `.asc`, `.txt`, `.csv` | Delimited text point clouds: comma, semicolon, tab or whitespace delimiters; column layouts determined from a header line (e.g. `x,y,z,nx,ny,nz`), explicit `PclReadOptions.TextColumns`, or column count heuristics (3, 4, 6, 7, 8, 9, 10 columns for XYZ, intensity, 8-bit RGB colour or unit normals, and alpha). Comment lines (`#`, `//` or `TextCommentPrefix`) and points with non-finite coordinates are skipped. Coordinate scale applied via `PclReadOptions.TextCoordinateScale`. |
+| SBF | `.sbf`, `.sbf.data` | Simple Binary Format point clouds: single-precision floating point XYZ coordinates and optional scalar fields (intensity, 8-bit RGB colour, unit normals) with an INI-style companion `.sbf` header file declaring point count, global shift and scale, and scalar field names. Big-endian and little-endian byte orders supported. Points with non-finite coordinates are not returned. Global shift and scale are applied via `ApplyTransform`. |
 
 ### Format detection
 
@@ -57,7 +58,7 @@ regard to case.
 
 - E57, ReCap scan and Leica files are recognised by their content and accepted with any extension; for Leica, `.lgs` selects the
   older container and any other extension `.lgsx`. EdgeWise files are also recognised by content when the extension is none of its own.
-  A LAS file is recognised by the `LASF` signature with any extension except `.laz`, which shares the signature and stays unknown. A PCD file is recognised by its header structure with any extension. A PLY file is recognised by its magic word and header structure with any extension. A PTS file is recognised by an integer point count header line followed by coordinate lines with any extension, or coordinate lines with the `.pts` extension. A PTX file is recognised by its 10-line header structure (grid dimensions, scanner pose, 4x4 matrix) with any extension. An XYZ / delimited text file is recognised by an explicit column header containing X, Y, Z in any extension, or by numeric coordinate lines with a recognised extension (`.xyz`, `.asc`, `.txt`, `.csv`).
+  A LAS file is recognised by the `LASF` signature with any extension except `.laz`, which shares the signature and stays unknown. A PCD file is recognised by its header structure with any extension. A PLY file is recognised by its magic word and header structure with any extension. A PTS file is recognised by an integer point count header line followed by coordinate lines with any extension, or coordinate lines with the `.pts` extension. A PTX file is recognised by its 10-line header structure (grid dimensions, scanner pose, 4x4 matrix) with any extension. An XYZ / delimited text file is recognised by an explicit column header containing X, Y, Z in any extension, or by numeric coordinate lines with a recognised extension (`.xyz`, `.asc`, `.txt`, `.csv`). An SBF file is recognised by its companion `[SBF]` header structure with any extension, or by the binary signature `0x2A, 0x2A` (`**`) and record size formula (`.sbf`, `.sbf.data`, `.data`).
 - A FARO file must be an OLE2 compound file with the extension `.fls`. A ReCap project must be a ZIP archive with the extension
   `.rcp`. A PinPoint file must be a JSON text file with the extension `.smf` or `.srf`.
 - The extensions `.c3db` and `.c3ptx` select EdgeWise without a content check. A `.c3ptx` file is read as one cluster file and any
@@ -84,6 +85,7 @@ Where the readers look for the files a project refers to:
 - PinPoint: the data folder that belongs to the project file, then the folder of the opened project file or folder. Where several
   data files match a scan, the first one in ordinal path order is used.
 - EdgeWise database: each cluster file is named relative to the database's folder; a missing one is skipped with a warning.
+- SBF: when opening a `.sbf` header file, the reader looks for a companion `.sbf.data` or `.data` binary file in the same directory. When opening a `.sbf.data` or `.data` file, it looks for a companion `.sbf` header file.
 
 ### Data filters
 

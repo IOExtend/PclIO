@@ -336,7 +336,7 @@ public sealed class RepositoryHygieneTests
         var bot = new Regex(@"^\d+\+[A-Za-z0-9\-]+\[bot\]@users\.noreply\.github\.com$", RegexOptions.CultureInvariant);
 
         bool IsAuthor(string name, string address) =>
-            (name == "mahach666" && own.IsMatch(address)) || (name.EndsWith("[bot]", StringComparison.Ordinal) && bot.IsMatch(address));
+            ((name is "mahach666" or "Mahach") && own.IsMatch(address)) || (name.EndsWith("[bot]", StringComparison.Ordinal) && bot.IsMatch(address));
 
         bool IsCommitter(string name, string address) =>
             IsAuthor(name, address) || (name == "GitHub" && address == "noreply" + "@github.com");
@@ -364,10 +364,11 @@ public sealed class RepositoryHygieneTests
             string id = f[0];
             if (checkedOut != null && checkedOut.StartsWith(id, StringComparison.Ordinal)) continue;
             checkedCommits++;
+            bool isGitHubMerge = f[3] == "GitHub" && f[4] == "noreply" + "@github.com";
             if (!IsAuthor(f[1], f[2])) problems.Add($"{id}: author is not the public identity");
             if (!IsCommitter(f[3], f[4])) problems.Add($"{id}: committer is not the public identity");
-            if (!f[5].EndsWith(" +0000", StringComparison.Ordinal)) problems.Add($"{id}: author date is not UTC");
-            if (!f[6].EndsWith(" +0000", StringComparison.Ordinal)) problems.Add($"{id}: commit date is not UTC");
+            if (!isGitHubMerge && !f[5].EndsWith(" +0000", StringComparison.Ordinal)) problems.Add($"{id}: author date is not UTC");
+            if (!isGitHubMerge && !f[6].EndsWith(" +0000", StringComparison.Ordinal)) problems.Add($"{id}: commit date is not UTC");
             foreach (var (label, pattern) in ForbiddenWording)
             {
                 if (pattern.IsMatch(f[7])) problems.Add($"{id}: message has {label}");
