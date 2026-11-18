@@ -6362,6 +6362,7 @@ public sealed class FormatTests
         Assert.Equal(3, scan.PointCount);
         Assert.True(scan.HasColors);
         Assert.True(scan.HasIntensities);
+        Assert.False(scan.HasNormals);
 
         var points = scan.ReadPoints().ToList();
         Assert.Equal(3, points.Count);
@@ -6421,6 +6422,83 @@ public sealed class FormatTests
         Assert.Equal(40.0, transformed.X, precision: 4);
         Assert.Equal(80.0, transformed.Y, precision: 4);
         Assert.Equal(120.0, transformed.Z, precision: 4);
+    }
+
+    [Theory]
+    [InlineData(41u, false)]
+    [InlineData(42u, true)]
+    [InlineData(50u, false)]
+    [InlineData(50u, true)]
+    public void Cc_Bin_Reads_Normals_Across_Batches_And_Optional_Colors(uint version, bool withColors)
+    {
+        using var dir = new TempDirectory();
+        var points = Enumerable.Range(0, 1027).Select(i => new CcBinSamplePoint(i, 0, 0, Intensity: i)).ToArray();
+        var codes = new uint[points.Length];
+        codes[513] = 0x130000;
+        codes[1026] = 0x200000;
+        byte[] bytes = SyntheticFixtures.CreateSyntheticCcBin(points, version: version, withColors: withColors,
+            normalCodes: codes);
+
+        using var doc = PclFile.Open(dir.Write("normals.bin", bytes));
+        var scan = Assert.Single(doc.Scans);
+        Assert.True(scan.HasNormals);
+        Assert.True(scan.HasIntensities);
+        Assert.Equal(withColors, scan.HasColors);
+
+        var sample = scan.ReadPoints(new PclReadOptions { SubsampleStep = 513, MaxPoints = 3 }).ToArray();
+        Assert.Equal(new[] { 0d, 513d, 1026d }, sample.Select(p => p.X));
+        Assert.Equal(new float?[] { 0, 513, 1026 }, sample.Select(p => p.Intensity));
+        double axisLength = Math.Sqrt(1023 * 1023 + 2);
+        Assert.Equal(new PclVector3(1023 / axisLength, 1 / axisLength, 1 / axisLength), sample[0].Normal);
+        double reflectedLength = Math.Sqrt(1 + 2 * 511 * 511);
+        Assert.Equal(new PclVector3(-1 / reflectedLength, 511 / reflectedLength, 511 / reflectedLength), sample[1].Normal);
+        Assert.Equal(PclVector3.Zero, sample[2].Normal);
+    }
+
+    [Fact]
+    public void Cc_Bin_Transforms_Normal_Directions_Without_Shift_Or_Scale_Magnitude()
+    {
+        using var dir = new TempDirectory();
+        double[] matrix = [0, -1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+        byte[] bytes = SyntheticFixtures.CreateSyntheticCcBin([new(1, 0, 0)], version: 50, normalCodes: [0],
+            matrix16: matrix, shiftX: 12, scale: 1e-200);
+
+        using var doc = PclFile.Open(dir.Write("rotated.bin", bytes));
+        var a = Assert.Single(doc.ReadAllPoints(new PclReadOptions { ApplyTransform = false })).Normal!.Value;
+        var b = Assert.Single(doc.ReadAllPoints()).Normal!.Value;
+        Assert.Equal(-a.Y, b.X, precision: 14);
+        Assert.Equal(a.X, b.Y, precision: 14);
+        Assert.Equal(a.Z, b.Z, precision: 14);
+    }
+
+    [Fact]
+    public void Cc_Bin_Rejects_Truncated_And_Mismatched_Normal_Arrays()
+    {
+        using var dir = new TempDirectory();
+        byte[] mismatch = SyntheticFixtures.CreateSyntheticCcBin([new(1, 2, 3), new(4, 5, 6)], version: 50,
+            normalCodes: [0]);
+        Assert.Throws<InvalidDataException>(() => CcBinDocument.Open(dir.Write("bad_count.bin", mismatch)));
+
+        byte[] truncated = SyntheticFixtures.CreateSyntheticCcBin([new(1, 2, 3)], version: 50,
+            normalCodes: [0], withIntensity: false);
+        Assert.Throws<InvalidDataException>(() => CcBinDocument.Open(dir.Write("cut_normals.bin", truncated[..^5])));
+    }
+
+    [Fact]
+    public void Cc_Bin_Rejects_Out_Of_Range_Normal_Codes()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticCcBin([new(1, 2, 3)], version: 50, normalCodes: [0x200001]);
+        using var doc = CcBinDocument.Open(dir.Write("bad_index.bin", bytes));
+        Assert.Throws<InvalidDataException>(() => doc.ReadAllPoints().Single());
+    }
+
+    [Fact]
+    public void Cc_Bin_Rejects_Normals_In_An_Unsupported_Version()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticCcBin([new(1, 2, 3)], version: 47, normalCodes: [0]);
+        Assert.Throws<NotSupportedException>(() => CcBinDocument.Open(dir.Write("unsupported_normals.bin", bytes)));
     }
 
     [Fact]

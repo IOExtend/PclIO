@@ -2961,7 +2961,8 @@ internal static class SyntheticFixtures
         bool truncatePoints = false,
         bool truncateColorBlock = false,
         bool truncateIntensityData = false,
-        int? declaredIntensityCount = null)
+        int? declaredIntensityCount = null,
+        IReadOnlyList<uint>? normalCodes = null)
     {
         using var ms = new MemoryStream();
 
@@ -2984,6 +2985,8 @@ internal static class SyntheticFixtures
             scale: scale,
             withColors: withColors,
             withIntensity: withIntensity,
+            version: version,
+            normalCodes: normalCodes,
             declaredIntensityCount: declaredIntensityCount,
             matrix16: matrix16,
             doubleProperties: doubleProperties,
@@ -3012,7 +3015,8 @@ internal static class SyntheticFixtures
                 ms,
                 clouds[c],
                 name: $"Cloud_{c + 1}",
-                id: (uint)(100 + c));
+                id: (uint)(100 + c),
+                version: version);
         }
 
         return ms.ToArray();
@@ -3029,6 +3033,8 @@ internal static class SyntheticFixtures
         double scale = 1.0,
         bool withColors = true,
         bool withIntensity = true,
+        uint version = 47,
+        IReadOnlyList<uint>? normalCodes = null,
         int? declaredIntensityCount = null,
         double[]? matrix16 = null,
         IReadOnlyDictionary<string, double>? doubleProperties = null,
@@ -3080,8 +3086,8 @@ internal static class SyntheticFixtures
         // 5. Flags (8 bytes), shift (24 bytes), scale (8 bytes), marker (3 bytes)
         ms.WriteByte(0x01);
         ms.WriteByte(0x00);
-        ms.WriteByte(0x01);
-        ms.WriteByte(0x00);
+        ms.WriteByte(withColors ? (byte)1 : (byte)0);
+        ms.WriteByte(normalCodes != null ? (byte)1 : (byte)0);
         ms.WriteByte(0x00);
         ms.WriteByte(0x00);
         ms.WriteByte(0x00);
@@ -3168,32 +3174,34 @@ internal static class SyntheticFixtures
             ms.WriteByte(0x00);
         }
 
-        // 9. Matrix 4x4 (8 bytes + 64 bytes)
-        Span<byte> zeros8 = stackalloc byte[8];
-        ms.Write(zeros8);
+        int footerSize = version is 41 or 42 ? 8 : 72;
+        if (withColors) WriteCcBinArrayFooter(ms, footerSize, matrix16);
 
-        Span<byte> matBuf = stackalloc byte[64];
-        for (int m = 0; m < 16; m++)
+        // 9. Optional packed normals.
+        ms.WriteByte(normalCodes != null ? (byte)1 : (byte)0);
+        if (normalCodes != null)
         {
-            float val;
-            if (matrix16 != null && m < matrix16.Length)
+            byte[] normalsName = Encoding.BigEndianUnicode.GetBytes("Normals");
+            Span<byte> header = stackalloc byte[16];
+            BinaryPrimitives.WriteUInt64LittleEndian(header, 0x40000012);
+            BinaryPrimitives.WriteUInt32LittleEndian(header[8..], 102);
+            BinaryPrimitives.WriteUInt32BigEndian(header[12..], (uint)normalsName.Length);
+            ms.Write(header);
+            ms.Write(normalsName);
+            ms.Write(new byte[] { 6, 0, 0, 0, 0, 0, 0, 0, 1 });
+            BinaryPrimitives.WriteUInt32LittleEndian(u32Buf, (uint)normalCodes.Count);
+            ms.Write(u32Buf);
+            foreach (uint code in normalCodes)
             {
-                val = (float)matrix16[m];
+                BinaryPrimitives.WriteUInt32LittleEndian(u32Buf, code);
+                ms.Write(u32Buf);
             }
-            else
-            {
-                int row = m / 4;
-                int col = m % 4;
-                val = row == col ? 1f : 0f;
-            }
-            BinaryPrimitives.WriteSingleLittleEndian(matBuf.Slice(m * 4, 4), val);
+            WriteCcBinArrayFooter(ms, footerSize);
         }
-        ms.Write(matBuf);
 
         // 10. Scalar fields (Intensity)
         if (withIntensity)
         {
-            ms.WriteByte(0x00);
             BinaryPrimitives.WriteUInt32LittleEndian(u32Buf, 1); // 1 scalar field
             ms.Write(u32Buf);
 
@@ -3224,9 +3232,19 @@ internal static class SyntheticFixtures
         }
         else
         {
-            ms.WriteByte(0x00);
             BinaryPrimitives.WriteUInt32LittleEndian(u32Buf, 0);
             ms.Write(u32Buf);
         }
+    }
+
+    private static void WriteCcBinArrayFooter(Stream ms, int size, double[]? matrix = null)
+    {
+        byte[] footer = new byte[size];
+        for (int i = 0; i < (size - 8) / 4; i++)
+        {
+            float value = matrix != null && i < matrix.Length ? (float)matrix[i] : i % 5 == 0 ? 1f : 0f;
+            BinaryPrimitives.WriteSingleLittleEndian(footer.AsSpan(8 + i * 4), value);
+        }
+        ms.Write(footer);
     }
 }

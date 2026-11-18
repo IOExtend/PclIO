@@ -8,6 +8,8 @@ namespace PclIO.Formats.CcBin;
 /// <summary>Represents a CC BIN point cloud file (.bin, CCB2).</summary>
 public sealed class CcBinDocument : PclDocument
 {
+    private const int ArrayFooterPrefixSize = 8;
+    private const int ArrayFooterWithMatrixSize = ArrayFooterPrefixSize + 16 * sizeof(float);
     private static readonly byte[] Magic = "CCB2"u8.ToArray();
 
     /// <inheritdoc />
@@ -223,99 +225,55 @@ public sealed class CcBinDocument : PclDocument
 
         // Check for colors right after points
         fs.Position = pointsEndOffset;
-        int colorFlag = fs.ReadByte();
-        bool hasColors = false;
+        bool hasColors = ReadArrayFlag(fs, "color");
         long colorOffset = -1;
         byte channels = 3;
 
-        if (colorFlag == 1)
+        if (hasColors)
         {
-            byte[] colH = new byte[16];
-            if (fs.Read(colH) < 16)
-                throw new InvalidDataException("CC BIN RGB color header is truncated.");
-
-            uint colNameLen = BinaryPrimitives.ReadUInt32BigEndian(colH.AsSpan(12, 4));
-            if (colNameLen > 500 || fs.Position + colNameLen + 9 > fileLength)
-                throw new InvalidDataException("CC BIN RGB color name or properties are truncated.");
-
-            fs.Position += colNameLen;
-            byte[] colProps = new byte[9];
-            if (fs.Read(colProps) < 9)
-                throw new InvalidDataException("CC BIN RGB color properties are truncated.");
-
-            channels = colProps[8];
+            var (_, colorChannels, colCount) = ReadArrayHeader(fs, "color");
+            channels = colorChannels;
             if (channels is not (3 or 4))
                 throw new InvalidDataException($"CC BIN unsupported color channels: {channels}.");
-
-            byte[] colCountBuf = new byte[4];
-            if (fs.Read(colCountBuf) < 4)
-                throw new InvalidDataException("CC BIN RGB color count is truncated.");
-
-            uint colCount = BinaryPrimitives.ReadUInt32LittleEndian(colCountBuf);
             if (colCount != count)
                 throw new InvalidDataException($"CC BIN color count {colCount} does not match point count {count}.");
 
-            long cOffset = fs.Position;
+            colorOffset = fs.Position;
             long cBytes = (long)colCount * channels;
-            if (cOffset + cBytes > fileLength)
+            if (cBytes > fileLength - colorOffset)
                 throw new InvalidDataException("CC BIN RGB color data is truncated.");
-
-            hasColors = true;
-            colorOffset = cOffset;
             fs.Position += cBytes;
         }
 
-        // Matrix 4x4
-        var matrix16 = new double[16];
-        bool isIdentity = true;
-        byte[] matH = new byte[8 + 64];
-        if (fs.Read(matH) == 72)
-        {
-            for (int m = 0; m < 16; m++)
-            {
-                float val = BinaryPrimitives.ReadSingleLittleEndian(matH.AsSpan(8 + m * 4, 4));
-                if (!float.IsFinite(val))
-                    throw FormatError.Corrupted("CC BIN has a non-finite coordinate matrix.");
-                matrix16[m] = val;
-                int row = m / 4;
-                int col = m % 4;
-                double expected = row == col ? 1.0 : 0.0;
-                if (Math.Abs(val - expected) > 1e-6)
-                {
-                    isIdentity = false;
-                }
-            }
-        }
+        double[]? matrix = hasColors ? ReadColorArrayFooter(fs) : null;
+        long normalOffset = ReadNormalOffset(fs, count);
 
         // Scalar fields (probe for Intensity)
         long intensityOffset = -1;
         uint intensityCount = 0;
-        if (fs.ReadByte() >= 0)
+        Span<byte> countBytes = stackalloc byte[4];
+        ReadScalarBytes(fs, countBytes);
+        uint fieldCount = BinaryPrimitives.ReadUInt32LittleEndian(countBytes);
+        if (fieldCount >= 100)
+            throw FormatError.Unsupported("CC BIN has 100 or more scalar fields.");
+
+        Span<byte> fieldHeader = stackalloc byte[261];
+        for (uint field = 0; field < fieldCount; field++)
         {
-            Span<byte> countBytes = stackalloc byte[4];
-            ReadScalarBytes(fs, countBytes);
-            uint fieldCount = BinaryPrimitives.ReadUInt32LittleEndian(countBytes);
-            if (fieldCount >= 100)
-                throw FormatError.Unsupported("CC BIN has 100 or more scalar fields.");
+            ReadScalarBytes(fs, fieldHeader);
+            uint valueCount = BinaryPrimitives.ReadUInt32LittleEndian(fieldHeader[257..]);
+            long dataOffset = fs.Position;
+            SkipScalarBytes(fs, (long)valueCount * sizeof(float));
 
-            Span<byte> fieldHeader = stackalloc byte[261];
-            for (uint field = 0; field < fieldCount; field++)
+            if (intensityOffset < 0 &&
+                Encoding.ASCII.GetString(fieldHeader[..256]).TrimEnd('\0').Equals("Intensity", StringComparison.OrdinalIgnoreCase))
             {
-                ReadScalarBytes(fs, fieldHeader);
-                uint valueCount = BinaryPrimitives.ReadUInt32LittleEndian(fieldHeader[257..]);
-                long dataOffset = fs.Position;
-                SkipScalarBytes(fs, (long)valueCount * sizeof(float));
-
-                if (intensityOffset < 0 &&
-                    Encoding.ASCII.GetString(fieldHeader[..256]).TrimEnd('\0').Equals("Intensity", StringComparison.OrdinalIgnoreCase))
-                {
-                    intensityOffset = dataOffset;
-                    intensityCount = valueCount;
-                }
-
-                if (field + 1 < fieldCount)
-                    SkipScalarMetadata(fs);
+                intensityOffset = dataOffset;
+                intensityCount = valueCount;
             }
+
+            if (field + 1 < fieldCount)
+                SkipScalarMetadata(fs);
         }
 
         string scanId = scanIndex.ToString(CultureInfo.InvariantCulture);
@@ -328,17 +286,95 @@ public sealed class CcBinDocument : PclDocument
             hasColors: hasColors,
             colorOffset: colorOffset,
             colorChannels: channels,
+            normalOffset: normalOffset,
             intensityOffset: intensityOffset,
             intensityCount: intensityCount,
             shiftX: sx,
             shiftY: sy,
             shiftZ: sz,
             scale: scale,
-            transform: CreateTransform(scale, new PclVector3(-sx, -sy, -sz), isIdentity ? null : matrix16),
+            transform: CreateTransform(scale, new PclVector3(-sx, -sy, -sz), matrix),
+            normalTransform: normalOffset >= 0 && (matrix != null || scale < 0)
+                ? new PclTransform { Matrix4x4 = matrix, UniformScaleDivisor = Math.Sign(scale) }
+                : null,
             properties: props);
 
         pointsEndOffset = Math.Max(pointsEndOffset, fs.Position);
         return true;
+    }
+
+    private bool HasShortArrayFooter => Version is 41 or 42;
+    private int ArrayFooterSize => HasShortArrayFooter ? ArrayFooterPrefixSize : ArrayFooterWithMatrixSize;
+
+    private static bool ReadArrayFlag(FileStream fs, string attribute) => fs.ReadByte() switch
+    {
+        0 => false,
+        1 => true,
+        -1 => throw FormatError.Truncated($"CC BIN {attribute} array flag"),
+        _ => throw FormatError.Corrupted($"CC BIN {attribute} array flag is invalid."),
+    };
+
+    private static (ulong Type, byte Components, uint Count) ReadArrayHeader(FileStream fs, string attribute)
+    {
+        Span<byte> header = stackalloc byte[16];
+        if (fs.ReadAtLeast(header, header.Length, throwOnEndOfStream: false) != header.Length)
+            throw FormatError.Truncated($"CC BIN {attribute} array header");
+
+        uint nameLength = BinaryPrimitives.ReadUInt32BigEndian(header[12..]);
+        if (nameLength > 500 || (nameLength & 1) != 0)
+            throw FormatError.Corrupted($"CC BIN {attribute} array name has an invalid byte length.");
+        if (nameLength > fs.Length - fs.Position)
+            throw FormatError.Truncated($"CC BIN {attribute} array name");
+        fs.Position += nameLength;
+
+        Span<byte> properties = stackalloc byte[9 + sizeof(uint)];
+        if (fs.ReadAtLeast(properties, properties.Length, throwOnEndOfStream: false) != properties.Length)
+            throw FormatError.Truncated($"CC BIN {attribute} array properties");
+        return (BinaryPrimitives.ReadUInt64LittleEndian(header), properties[8],
+            BinaryPrimitives.ReadUInt32LittleEndian(properties[9..]));
+    }
+
+    private double[]? ReadColorArrayFooter(FileStream fs)
+    {
+        Span<byte> footer = stackalloc byte[ArrayFooterWithMatrixSize];
+        var data = footer[..ArrayFooterSize];
+        if (fs.ReadAtLeast(data, data.Length, throwOnEndOfStream: false) != data.Length)
+            throw FormatError.Truncated("CC BIN color array footer");
+        if (HasShortArrayFooter) return null;
+
+        var matrix = new double[16];
+        bool isIdentity = true;
+        for (int i = 0; i < matrix.Length; i++)
+        {
+            float value = BinaryPrimitives.ReadSingleLittleEndian(data[(ArrayFooterPrefixSize + i * sizeof(float))..]);
+            if (!float.IsFinite(value))
+                throw FormatError.Corrupted("CC BIN has a non-finite coordinate matrix.");
+            matrix[i] = value;
+            double expected = i % 5 == 0 ? 1.0 : 0.0;
+            isIdentity &= Math.Abs(value - expected) <= 1e-6;
+        }
+
+        return isIdentity ? null : matrix;
+    }
+
+    private long ReadNormalOffset(FileStream fs, uint pointCount)
+    {
+        if (!ReadArrayFlag(fs, "normal")) return -1;
+        if (!HasShortArrayFooter && Version != 50)
+            throw FormatError.Unsupported($"CC BIN normals in version {Version}.");
+
+        var (type, components, count) = ReadArrayHeader(fs, "normal");
+        if (type != 0x40000012 || components != 1)
+            throw FormatError.Unsupported("CC BIN normal array encoding.");
+        if (count != pointCount)
+            throw FormatError.Corrupted($"CC BIN normal count {count} does not match point count {pointCount}.");
+
+        long offset = fs.Position;
+        long bytes = (long)count * sizeof(uint) + ArrayFooterSize;
+        if (bytes > fs.Length - offset)
+            throw FormatError.Truncated("CC BIN normal array data or footer");
+        fs.Position += bytes;
+        return offset;
     }
 
     private static void SkipScalarMetadata(FileStream fs)
