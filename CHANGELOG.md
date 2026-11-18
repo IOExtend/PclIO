@@ -40,6 +40,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refers to, as for manifests with a scan position list. Locations that share one file each report its full count.
 - The Snappy decoder now keeps a window of up to 8 MiB per stream (the declared uncompressed length, capped), instead of
   a fixed 1 MiB, so streams with copies further back decode within bounded memory.
+- Scaled-integer Cartesian coordinates of E57 scans are decoded (raw value times scale plus offset, with the binary width
+  from the range of the field).
 
 ## [0.1.0] - 2026-11-15
 

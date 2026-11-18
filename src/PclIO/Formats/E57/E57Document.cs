@@ -10,9 +10,10 @@ namespace PclIO.Formats.E57;
 /// An ASTM E57 3D Imaging Data File (.e57).
 /// Supported: the file header, the checksummed page layout, the XML section, scan names, ids, Cartesian bounds and
 /// poses (translation and rotation quaternion), and points stored as uncompressed bit-packed streams where
-/// Cartesian X/Y/Z are single or double precision floats and colour or intensity are Integer fields in the range 0..255.
-/// Not supported (reported with <see cref="NotSupportedException"/> when points are read): scaled-integer or integer
-/// coordinates, other codecs, and packets whose streams hold different record counts.
+/// Cartesian X/Y/Z are single or double precision floats or scaled integers (raw value times scale plus offset),
+/// and colour or intensity are Integer fields in the range 0..255.
+/// Not supported (reported with <see cref="NotSupportedException"/> when points are read): integer coordinates,
+/// other codecs, and packets whose streams hold different record counts.
 /// Spherical coordinates, per-point invalid-state flags, images and 2D data are not interpreted.
 /// </summary>
 public sealed class E57Document : PclDocument
@@ -277,8 +278,20 @@ internal sealed class E57PointLayout
     /// <summary>Stream index of Cartesian X, Y and Z.</summary>
     public int[] Coordinate { get; } = [-1, -1, -1];
 
-    /// <summary>Bytes per record (4 single, 8 double) of the Cartesian streams.</summary>
+    /// <summary>Bytes per record of the Cartesian streams: 4 or 8 for floats, 1, 2, 4 or 8 for scaled integers.</summary>
     public int[] CoordinateSize { get; } = new int[3];
+
+    /// <summary>True for the axes stored as scaled integers (raw value times scale plus offset).</summary>
+    public bool[] CoordinateScaled { get; } = new bool[3];
+
+    /// <summary>True for the scaled axes whose range is not negative, stored as unsigned integers.</summary>
+    public bool[] CoordinateUnsigned { get; } = new bool[3];
+
+    /// <summary>Scale of the scaled axes; 1 for float axes.</summary>
+    public double[] CoordinateScale { get; } = [1, 1, 1];
+
+    /// <summary>Offset of the scaled axes; 0 for float axes.</summary>
+    public double[] CoordinateOffset { get; } = new double[3];
 
     /// <summary>Stream index of red, green and blue, or all -1 when colour is not decoded.</summary>
     public int[] Color { get; } = [-1, -1, -1];
@@ -328,14 +341,33 @@ internal sealed class E57PointLayout
 
             if (axis >= 0)
             {
-                int size = FloatSize(field);
-                if (size == 0 || layout.Coordinate[axis] >= 0)
+                if (layout.Coordinate[axis] >= 0)
                 {
-                    unsupportedReason = "a cartesian field is duplicated or is not a single or double precision float";
+                    unsupportedReason = "a cartesian field is duplicated";
                     return null;
                 }
+
+                int size = FloatSize(field);
+                if (size != 0)
+                {
+                    layout.Coordinate[axis] = i;
+                    layout.CoordinateSize[axis] = size;
+                    continue;
+                }
+
+                int scaledSize = ScaledIntegerSize(field, out double scale, out double offset, out bool unsigned);
+                if (scaledSize == 0)
+                {
+                    unsupportedReason = "a cartesian field is neither a single or double precision float nor a scaled integer with a sized range";
+                    return null;
+                }
+
                 layout.Coordinate[axis] = i;
-                layout.CoordinateSize[axis] = size;
+                layout.CoordinateSize[axis] = scaledSize;
+                layout.CoordinateScaled[axis] = true;
+                layout.CoordinateUnsigned[axis] = unsigned;
+                layout.CoordinateScale[axis] = scale;
+                layout.CoordinateOffset[axis] = offset;
             }
             else if (IsByteRange(field))
             {
@@ -372,6 +404,46 @@ internal sealed class E57PointLayout
             null or "double" => 8,
             _ => 0,
         };
+    }
+
+    // The binary size of a ScaledInteger field follows from its range, as the standard sizes it: the smallest of
+    // 1, 2, 4 or 8 bytes that holds every value from minimum to maximum, unsigned when the minimum is not negative
+    // and signed otherwise. 0 when the field is no ScaledInteger. Scale defaults to 1 and offset to 0.
+    private static int ScaledIntegerSize(XElement field, out double scale, out double offset, out bool unsigned)
+    {
+        scale = 1;
+        offset = 0;
+        unsigned = true;
+        if ((string?)field.Attribute("type") != "ScaledInteger") return 0;
+
+        if (!long.TryParse((string?)field.Attribute("minimum"), NumberStyles.Integer, CultureInfo.InvariantCulture, out long min) ||
+            !long.TryParse((string?)field.Attribute("maximum"), NumberStyles.Integer, CultureInfo.InvariantCulture, out long max))
+            throw FormatError.Corrupted("E57 scaled integer minimum or maximum is not a valid integer.");
+        if (min > max) throw FormatError.Corrupted("E57 scaled integer minimum exceeds its maximum.");
+
+        string? scaleText = (string?)field.Attribute("scale");
+        if (!string.IsNullOrWhiteSpace(scaleText) &&
+            (!double.TryParse(scaleText, NumberStyles.Float, CultureInfo.InvariantCulture, out scale) || !double.IsFinite(scale)))
+            throw FormatError.Corrupted("E57 scaled integer scale is not a finite number.");
+
+        string? offsetText = (string?)field.Attribute("offset");
+        if (!string.IsNullOrWhiteSpace(offsetText) &&
+            (!double.TryParse(offsetText, NumberStyles.Float, CultureInfo.InvariantCulture, out offset) || !double.IsFinite(offset)))
+            throw FormatError.Corrupted("E57 scaled integer offset is not a finite number.");
+
+        if (min >= 0)
+        {
+            if ((ulong)max <= 0xFF) return 1;
+            if ((ulong)max <= 0xFFFF) return 2;
+            if ((ulong)max <= 0xFFFFFFFF) return 4;
+            return 8;
+        }
+
+        unsigned = false;
+        if (min >= -0x80 && max <= 0x7F) return 1;
+        if (min >= -0x8000 && max <= 0x7FFF) return 2;
+        if (min >= -0x80000000L && max <= 0x7FFFFFFF) return 4;
+        return 8;
     }
 
     // An Integer in 0..255 is bit-packed into exactly one byte per record.
@@ -502,10 +574,7 @@ public sealed class E57Scan : PclScan
             {
                 if ((consumed + i) % step != 0) continue;
 
-                var coords = new PclVector3(
-                    ReadCoordinate(pkt, starts[layout.Coordinate[0]], layout.CoordinateSize[0], i),
-                    ReadCoordinate(pkt, starts[layout.Coordinate[1]], layout.CoordinateSize[1], i),
-                    ReadCoordinate(pkt, starts[layout.Coordinate[2]], layout.CoordinateSize[2], i));
+                var coords = new PclVector3(ReadAxis(layout, pkt, starts, 0, i), ReadAxis(layout, pkt, starts, 1, i), ReadAxis(layout, pkt, starts, 2, i));
 
                 PclColor? color = null;
                 if (layout.HasColor)
@@ -559,8 +628,36 @@ public sealed class E57Scan : PclScan
         records = count;
     }
 
+    private static double ReadAxis(E57PointLayout layout, byte[] packet, int[] starts, int axis, int index)
+    {
+        int stream = layout.Coordinate[axis];
+        int size = layout.CoordinateSize[axis];
+        if (!layout.CoordinateScaled[axis])
+            return ReadCoordinate(packet, starts[stream], size, index);
+
+        return ReadScaledInteger(packet, starts[stream], size, index,
+            layout.CoordinateUnsigned[axis], layout.CoordinateScale[axis], layout.CoordinateOffset[axis]);
+    }
+
     private static double ReadCoordinate(byte[] packet, int start, int size, int index) =>
         size == 4
             ? Bytes.ReadSingleLE(packet.AsSpan(start + index * 4, 4))
             : Bytes.ReadDoubleLE(packet.AsSpan(start + index * 8, 8));
+
+    // A raw value of the sized width, signed or unsigned as the range requires; the value is raw times scale plus offset.
+    private static double ReadScaledInteger(byte[] packet, int start, int size, int index, bool unsigned, double scale, double offset)
+    {
+        double raw = (size, unsigned) switch
+        {
+            (1, true) => packet[start + index],
+            (1, false) => (sbyte)packet[start + index],
+            (2, true) => Bytes.ReadUInt16LE(packet.AsSpan(start + index * 2, 2)),
+            (2, false) => Bytes.ReadInt16LE(packet.AsSpan(start + index * 2, 2)),
+            (4, true) => Bytes.ReadUInt32LE(packet.AsSpan(start + index * 4, 4)),
+            (4, false) => Bytes.ReadInt32LE(packet.AsSpan(start + index * 4, 4)),
+            (8, true) => Bytes.ReadUInt64LE(packet.AsSpan(start + index * 8, 8)),
+            _ => Bytes.ReadInt64LE(packet.AsSpan(start + index * 8, 8)),
+        };
+        return raw * scale + offset;
+    }
 }
