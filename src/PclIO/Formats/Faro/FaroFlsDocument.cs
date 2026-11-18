@@ -67,7 +67,8 @@ public sealed class FaroFlsDocument : PclDocument
         string? dataStreamPath,
         bool isOle2,
         bool hasColors,
-        bool hasIntensities)
+        bool hasIntensities,
+        int recordSize = FaroScan.DefaultRecordSize)
         : base(path, fileSize)
     {
         ScannerModel = g.Model ?? Unknown;
@@ -100,7 +101,8 @@ public sealed class FaroFlsDocument : PclDocument
             isOle2: isOle2,
             ole2Path: isOle2 ? path : null,
             hasColors: hasColors,
-            hasIntensities: hasIntensities));
+            hasIntensities: hasIntensities,
+            recordSize: recordSize));
     }
 
     /// <summary>Opens a FARO scan container file or scan folder and reads its scan parameters.</summary>
@@ -128,13 +130,29 @@ public sealed class FaroFlsDocument : PclDocument
         string? streamPath = FindFile(rootDir, "ScanDataStream0");
         long size = streamPath != null ? new FileInfo(streamPath).Length : 0;
 
-        // Never claim more samples than the stream can hold.
+        // The layout of the samples is derived from the sizes of the files when they fit.
         long cells = (long)g.Rows * g.Cols;
-        long pointCount = streamPath != null ? Math.Min(cells, size / FaroScan.RecordSize) : cells;
+        int recordSize = FaroScan.DetermineRecordSize(size, cells, out bool layoutKnown);
 
-        var document = new FaroFlsDocument(path, size, g, pointCount, streamPath, isOle2: false, hasColors: false, hasIntensities: true);
+        // Never claim more samples than the stream can hold.
+        long pointCount = streamPath != null ? Math.Min(cells, size / recordSize) : cells;
+
+        var document = new FaroFlsDocument(path, size, g, pointCount, streamPath, isOle2: false, hasColors: false, hasIntensities: true,
+            recordSize: recordSize);
         if (streamPath != null)
-            document._warnings.Add("Folder scan samples are read with an assumed record layout and intensity scale.");
+        {
+            if (layoutKnown)
+            {
+                document._metadata["RecordSize"] = recordSize.ToString(CultureInfo.InvariantCulture);
+                document._warnings.Add(
+                    $"The record layout of the folder scan was derived from the size of its data stream: {recordSize} bytes per sample.");
+            }
+            else
+            {
+                document._warnings.Add("Folder scan samples are read with an assumed record layout and intensity scale.");
+            }
+        }
+
         return document;
     }
 
@@ -251,8 +269,17 @@ public sealed class FaroFlsDocument : PclDocument
 /// <summary>Scan of a FARO container file or scan folder, read as a regular spherical grid.</summary>
 public sealed class FaroScan : PclScan
 {
-    // Assumed record size of folder scan streams; the layout is not declared by the files.
-    internal const int RecordSize = 8;
+    // Record size of folder scan streams that the sizes of the files do not reveal.
+    internal const int DefaultRecordSize = 8;
+
+    // A folder scan stream holds one record per cell of the grid; a record is never longer than this.
+    private const int MaxRecordSize = 64;
+
+    // The intensity of a folder scan is stored in a 16-bit field. Values that fit in 12 bits are the 12-bit
+    // intensities of the scanner, which the format scales by 2048; wider values are 16-bit intensities.
+    private const ushort MaxTwelveBitIntensity = 4095;
+    private const double TwelveBitScale = 2048.0;
+    private const double SixteenBitScale = 65535.0;
 
     // Container streams may start with a short text header ending in an opening brace; look for it near the start only.
     private const int HeaderSearchWindow = 256;
@@ -271,8 +298,11 @@ public sealed class FaroScan : PclScan
     private readonly string? _ole2Path;
     private readonly bool _hasColors;
     private readonly bool _hasIntensities;
+    private readonly int _recordSize;
 
     private readonly Lazy<long> _validReturns;
+    private double _intensityScale = TwelveBitScale;
+    private bool _folderInspected;
 
     /// <inheritdoc />
     public override string Id { get; }
@@ -289,6 +319,12 @@ public sealed class FaroScan : PclScan
 
     /// <summary>Number of cells of the scan grid, also the number of samples the file holds.</summary>
     public long GridSize { get; }
+
+    /// <summary>
+    /// Bytes that one sample of a folder scan takes. The files do not declare the layout; it is derived from the
+    /// size of the data stream and the size of the grid.
+    /// </summary>
+    public int RecordSize => _recordSize;
 
     /// <inheritdoc />
     public override bool HasIntensities => _hasIntensities;
@@ -309,7 +345,8 @@ public sealed class FaroScan : PclScan
         bool isOle2 = false,
         string? ole2Path = null,
         bool hasColors = false,
-        bool hasIntensities = false)
+        bool hasIntensities = false,
+        int recordSize = DefaultRecordSize)
     {
         if (rows <= 0 || cols <= 0)
             throw new ArgumentOutOfRangeException(nameof(rows), "Scan grid dimensions must be positive.");
@@ -327,10 +364,35 @@ public sealed class FaroScan : PclScan
         _ole2Path = ole2Path;
         _hasColors = hasColors;
         _hasIntensities = hasIntensities;
+        _recordSize = recordSize;
 
         // The count is made once even when several threads reach it at the same time, and the value is published
         // whole, so a concurrent first access cannot observe a partial count.
         _validReturns = new Lazy<long>(CountValidReturns);
+    }
+
+    /// <summary>
+    /// The record layout of a folder scan is not declared by the files. It is derived from the size of the data
+    /// stream and the size of the grid: the stream holds one record per cell of the grid, so its size must be a
+    /// multiple of it. The assumed layout is used when the sizes do not fit.
+    /// </summary>
+    /// <param name="streamLength">Length of the data stream in bytes.</param>
+    /// <param name="cells">Number of cells of the scan grid.</param>
+    /// <param name="determined">True when the layout was derived from the sizes.</param>
+    /// <returns>Bytes that one sample takes.</returns>
+    internal static int DetermineRecordSize(long streamLength, long cells, out bool determined)
+    {
+        determined = false;
+        if (cells <= 0 || streamLength <= 0 || streamLength % cells != 0) return DefaultRecordSize;
+
+        long size = streamLength / cells;
+
+        // A record holds a 16-bit distance and a 16-bit intensity; a smaller derived size cannot hold both, and
+        // reading the intensity of its last record would run past the buffer. Use the assumed layout instead.
+        if (size < 4 || size > MaxRecordSize) return DefaultRecordSize;
+
+        determined = true;
+        return (int)size;
     }
 
     /// <summary>Streams the valid returns of the scan.</summary>
@@ -379,24 +441,31 @@ public sealed class FaroScan : PclScan
         string streamPath = _streamPath ?? throw FormatError.Corrupted("scan data stream not found");
 
         using var fs = File.OpenRead(streamPath);
-        byte[] buffer = new byte[RecordSize * 8192];
+        byte[] buffer = new byte[_recordSize * 8192];
 
         long count = 0;
         long baseIdx = 0;
+        ushort maxIntensity = 0;
         while (baseIdx < GridSize)
         {
             int read = fs.ReadAtLeast(buffer, buffer.Length, throwOnEndOfStream: false);
-            int records = read / RecordSize;
+            int records = read / _recordSize;
             if (records == 0) break;
 
             for (int i = 0; i < records && baseIdx + i < GridSize; i++)
             {
-                int off = i * RecordSize;
+                int off = i * _recordSize;
+                ushort intensity = Bytes.ReadUInt16LE(buffer.AsSpan(off + 2, 2));
+                if (intensity > maxIntensity) maxIntensity = intensity;
                 if (IsValidDistance(buffer.AsSpan(off, 2))) count++;
             }
 
             baseIdx += records;
         }
+
+        // The scale of the intensity follows from the values that are stored.
+        _intensityScale = maxIntensity > MaxTwelveBitIntensity ? SixteenBitScale : TwelveBitScale;
+        _folderInspected = true;
 
         return count;
     }
@@ -463,19 +532,22 @@ public sealed class FaroScan : PclScan
     {
         string streamPath = _streamPath ?? throw FormatError.Corrupted("scan data stream not found");
 
+        // The scale of the intensity is known after the data has been looked at once.
+        if (!_folderInspected) _ = CountFolderReturns();
+
         long target = options.MaxPoints ?? long.MaxValue;
         int step = Math.Max(1, options.SubsampleStep);
         long yielded = 0;
         long baseIdx = 0;
 
         using var fs = File.OpenRead(streamPath);
-        byte[] buffer = new byte[RecordSize * 8192];
+        byte[] buffer = new byte[_recordSize * 8192];
 
         // Every pass consumes at least one record or ends the loop, so scanning always terminates.
         while (yielded < target && baseIdx < GridSize)
         {
             int read = fs.ReadAtLeast(buffer, buffer.Length, throwOnEndOfStream: false);
-            int count = read / RecordSize;
+            int count = read / _recordSize;
             if (count == 0) break;
 
             for (int i = 0; i < count && baseIdx + i < GridSize; i++)
@@ -483,13 +555,13 @@ public sealed class FaroScan : PclScan
                 long idx = baseIdx + i;
                 if (idx % step != 0) continue;
 
-                int off = i * RecordSize;
+                int off = i * _recordSize;
                 if (!IsValidDistance(buffer.AsSpan(off, 2))) continue;
 
                 ushort intensityRaw = Bytes.ReadUInt16LE(buffer.AsSpan(off + 2, 2));
                 double range = Bytes.ReadUInt16LE(buffer.AsSpan(off, 2)) * 0.001;
 
-                var pt = new PclPoint(Project(idx, range), Intensity: intensityRaw / 2048.0f, Index: (ulong)yielded);
+                var pt = new PclPoint(Project(idx, range), Intensity: (float)(intensityRaw / _intensityScale), Index: (ulong)yielded);
                 if (options.ApplyTransform)
                     pt = pt with { Position = Transform.TransformPoint(pt.Position) };
 

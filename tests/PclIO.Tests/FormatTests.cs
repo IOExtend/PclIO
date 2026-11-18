@@ -888,8 +888,8 @@ public sealed class FormatTests
         Assert.Equal("TestModel", doc.ScannerModel);
         Assert.Equal("SN-0001", doc.ScannerSerialNumber);
 
-        // The record layout of a folder scan is assumed, and the document says so.
-        Assert.Contains("assumed", Assert.Single(doc.Warnings), StringComparison.Ordinal);
+        // The record layout of a folder scan is derived from the size of its data stream, and the document says so.
+        Assert.Contains("derived", Assert.Single(doc.Warnings), StringComparison.Ordinal);
 
         var scan = Assert.Single(doc.Scans);
         Assert.Equal(SyntheticFixtures.FaroRows * SyntheticFixtures.FaroCols, scan.PointCount);
@@ -899,6 +899,90 @@ public sealed class FormatTests
         Assert.All(points, p => Assert.Equal(0.5f, p.Intensity));
         Assert.Equal(10, scan.ReadPoints(new PclReadOptions { MaxPoints = 10 }).Count());
         Assert.Equal(16, scan.ReadPoints(new PclReadOptions { SubsampleStep = 2 }).Count());
+    }
+
+    [Fact]
+    public void A_Faro_Scan_Folder_With_A_Larger_Sample_Reads_It_With_The_Layout_Of_Its_Files()
+    {
+        using var dir = new TempDirectory();
+        using var doc = FaroFlsDocument.Open(SyntheticFixtures.WriteFaroFolder(dir, recordBytes: 16));
+
+        var scan = Assert.IsType<FaroScan>(Assert.Single(doc.Scans));
+        Assert.Equal(16, scan.RecordSize);
+        Assert.Equal("16", doc.Metadata["RecordSize"]);
+
+        var points = scan.ReadPoints().ToList();
+        Assert.Equal(32, points.Count);
+        AssertFaroPoints(points);
+    }
+
+    [Theory]
+    [InlineData(2)]
+    [InlineData(3)]
+    public void A_Faro_Scan_Folder_With_Samples_Too_Small_For_Distance_And_Intensity_Keeps_The_Assumed_Layout(int recordBytes)
+    {
+        // A derived record of two or three bytes cannot hold both the distance and the intensity; reading the
+        // intensity of the last record of a full buffer would run past it. The assumed layout is used instead.
+        using var dir = new TempDirectory();
+        using var doc = FaroFlsDocument.Open(SyntheticFixtures.WriteFaroFolder(dir, recordBytes: recordBytes));
+
+        var scan = Assert.IsType<FaroScan>(Assert.Single(doc.Scans));
+        Assert.Equal(FaroScan.DefaultRecordSize, scan.RecordSize);
+        Assert.Contains("assumed", Assert.Single(doc.Warnings), StringComparison.Ordinal);
+
+        // The count and the read stay usable; they do not crash on the small records.
+        Assert.True(scan.PointCount >= 0);
+        Assert.Equal(scan.PointCount, scan.ReadPoints().Count());
+    }
+
+    [Theory]
+    [InlineData(2, false)]
+    [InlineData(3, false)]
+    [InlineData(4, true)]
+    [InlineData(16, true)]
+    [InlineData(64, true)]
+    [InlineData(65, false)]
+    public void The_Derived_Faro_Record_Size_Needs_Room_For_Distance_And_Intensity(int size, bool determined)
+    {
+        long cells = 8192;
+        int recordSize = FaroScan.DetermineRecordSize(cells * size, cells, out bool wasDetermined);
+        Assert.Equal(determined, wasDetermined);
+        Assert.Equal(determined ? size : FaroScan.DefaultRecordSize, recordSize);
+    }
+
+    [Fact]
+    public void A_Faro_Scan_Folder_With_Sixteen_Bit_Intensity_Uses_That_Scale()
+    {
+        using var dir = new TempDirectory();
+        using var doc = FaroFlsDocument.Open(SyntheticFixtures.WriteFaroFolder(dir, intensity: 60000));
+
+        var points = doc.Scans[0].ReadPoints().ToList();
+        Assert.Equal(32, points.Count);
+        Assert.All(points, p => Assert.Equal(60000 / 65535.0f, p.Intensity!.Value, 1e-6));
+    }
+
+    [Fact]
+    public void A_Faro_Scan_Folder_Whose_Sizes_Do_Not_Fit_The_Grid_Keeps_The_Assumed_Layout()
+    {
+        // Three bytes after the samples: the size of the stream is not a multiple of the size of the grid.
+        using var dir = new TempDirectory();
+        using var doc = FaroFlsDocument.Open(SyntheticFixtures.WriteFaroFolder(dir, extraBytes: 3));
+
+        Assert.Contains("assumed", Assert.Single(doc.Warnings), StringComparison.Ordinal);
+        Assert.Equal(32, doc.Scans[0].ReadPoints().Count());
+    }
+
+    [Fact]
+    public void A_Faro_Scan_Folder_With_A_Truncated_Stream_Yields_The_Samples_It_Holds()
+    {
+        // Only ten of the 32 cells of the grid are stored.
+        using var dir = new TempDirectory();
+        using var doc = FaroFlsDocument.Open(SyntheticFixtures.WriteFaroFolder(dir, samples: 10));
+
+        var scan = Assert.IsType<FaroScan>(Assert.Single(doc.Scans));
+        Assert.Equal(10, scan.GridSize);
+        Assert.Equal(10, scan.PointCount);
+        Assert.Equal(10, scan.ReadPoints().Count());
     }
 
     [Fact]
