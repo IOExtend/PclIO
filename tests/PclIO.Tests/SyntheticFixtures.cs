@@ -2960,6 +2960,7 @@ internal static class SyntheticFixtures
         byte[]? rawMagic = null,
         bool truncatePoints = false,
         bool truncateColorBlock = false,
+        bool truncateIntensityData = false,
         int? declaredIntensityCount = null)
     {
         using var ms = new MemoryStream();
@@ -2987,7 +2988,8 @@ internal static class SyntheticFixtures
             matrix16: matrix16,
             doubleProperties: doubleProperties,
             truncatePoints: truncatePoints,
-            truncateColorBlock: truncateColorBlock);
+            truncateColorBlock: truncateColorBlock,
+            truncateIntensityData: truncateIntensityData);
 
         return ms.ToArray();
     }
@@ -3031,7 +3033,8 @@ internal static class SyntheticFixtures
         double[]? matrix16 = null,
         IReadOnlyDictionary<string, double>? doubleProperties = null,
         bool truncatePoints = false,
-        bool truncateColorBlock = false)
+        bool truncateColorBlock = false,
+        bool truncateIntensityData = false)
     {
         Span<byte> u32Buf = stackalloc byte[4];
 
@@ -3199,17 +3202,21 @@ internal static class SyntheticFixtures
             ms.Write(nameBuf256);
 
             ms.WriteByte(0x01); // flag
-            int actualIntensityCount = declaredIntensityCount ?? points.Count;
+            int actualIntensityCount = declaredIntensityCount ?? (truncateIntensityData ? 2 : points.Count);
             BinaryPrimitives.WriteUInt32LittleEndian(u32Buf, (uint)actualIntensityCount);
             ms.Write(u32Buf);
 
             Span<byte> fltBuf = stackalloc byte[4];
-            for (int i = 0; i < actualIntensityCount; i++)
+            int toWrite = truncateIntensityData ? 1 : actualIntensityCount;
+            for (int i = 0; i < toWrite; i++)
             {
                 float val = i < points.Count ? (points[i].Intensity ?? 0f) : 0f;
                 BinaryPrimitives.WriteSingleLittleEndian(fltBuf, val);
                 ms.Write(fltBuf);
             }
+
+            if (truncateIntensityData)
+                return;
 
             // Write 4 trailing bytes with float value 99f to ensure reading past actualIntensityCount would read 99
             BinaryPrimitives.WriteSingleLittleEndian(fltBuf, 99f);

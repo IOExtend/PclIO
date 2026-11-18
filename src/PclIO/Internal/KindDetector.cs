@@ -83,14 +83,6 @@ internal static class KindDetector
             : Path.GetExtension(path).ToLowerInvariant();
         if (ext == ".bin")
         {
-            using (var probeStream = File.OpenRead(path))
-            {
-                Span<byte> probeHead = stackalloc byte[24];
-                int probeRead = probeStream.ReadAtLeast(probeHead, 24, throwOnEndOfStream: false);
-                if (probeRead >= 24 && IsCcBinStructure(probeHead))
-                    return PclFileKind.CcBin;
-            }
-
             string? dir = Path.GetDirectoryName(Path.GetFullPath(path));
             for (int depth = 0; depth < 5 && dir != null; depth++)
             {
@@ -99,6 +91,14 @@ internal static class KindDetector
                 string? parent = Path.GetDirectoryName(dir);
                 if (parent == dir) break;
                 dir = parent;
+            }
+
+            using (var probeStream = File.OpenRead(path))
+            {
+                Span<byte> probeHead = stackalloc byte[24];
+                int probeRead = probeStream.ReadAtLeast(probeHead, 24, throwOnEndOfStream: false);
+                if (probeRead >= 24 && IsCcBinStructure(probeHead))
+                    return PclFileKind.CcBin;
             }
         }
 
@@ -1329,7 +1329,11 @@ internal static class KindDetector
             return false;
 
         uint entityType = BinaryPrimitives.ReadUInt32LittleEndian(head[8..12]);
-        if (entityType is < 1 or > 2000)
+        if (entityType is not (1 or 257 or 33 or 34 or 65))
+            return false;
+
+        uint f2 = BinaryPrimitives.ReadUInt32LittleEndian(head[12..16]);
+        if (f2 != 0)
             return false;
 
         uint nameLen = BinaryPrimitives.ReadUInt32BigEndian(head[20..24]);

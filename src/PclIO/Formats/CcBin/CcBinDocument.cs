@@ -301,15 +301,19 @@ public sealed class CcBinDocument : PclDocument
                     byte[] sCountBuf = new byte[4];
                     for (int s = 0; s < sfCount; s++)
                     {
-                        if (fs.Position + 256 + 5 > fileLength) break;
-                        if (fs.Read(sfNameBuf) < 256) break;
+                        if (fs.Position + 256 + 5 > fileLength)
+                            throw new InvalidDataException("CC BIN scalar field header is truncated.");
+                        if (fs.Read(sfNameBuf) < 256)
+                            throw new InvalidDataException("CC BIN scalar field header is truncated.");
                         string sfName = Encoding.ASCII.GetString(sfNameBuf).TrimEnd('\0');
                         int sFlag = fs.ReadByte();
-                        if (sFlag < 0 || fs.Read(sCountBuf) < 4) break;
+                        if (sFlag < 0 || fs.Read(sCountBuf) < 4)
+                            throw new InvalidDataException($"CC BIN scalar field '{sfName}' count is truncated.");
                         uint sCount = BinaryPrimitives.ReadUInt32LittleEndian(sCountBuf);
                         long dataOffset = fs.Position;
                         long sBytes = (long)sCount * 4;
-                        if (dataOffset + sBytes > fileLength) break;
+                        if (dataOffset + sBytes > fileLength)
+                            throw new InvalidDataException($"CC BIN scalar field '{sfName}' data is truncated.");
 
                         if (!hasIntensity && sfName.Equals("Intensity", StringComparison.OrdinalIgnoreCase))
                         {
@@ -334,13 +338,53 @@ public sealed class CcBinDocument : PclDocument
         // Therefore, to recover the original (global) coordinate from stored local coordinate:
         // P_original = P_local / Scale - Shift
         // In PclTransform: P_transformed = P_local * Transform.Scale + Transform.Translation
-        double invScale = Math.Abs(scale) > 1e-12 ? (1.0 / scale) : 1.0;
-        var transform = new PclTransform
+        double invScale = (scale != 0.0 && !double.IsNaN(scale) && !double.IsInfinity(scale))
+            ? (1.0 / scale)
+            : 1.0;
+
+        PclTransform transform;
+        if (!isIdentity)
         {
-            Scale = new PclVector3(invScale, invScale, invScale),
-            Translation = new PclVector3(-sx, -sy, -sz),
-            Matrix4x4 = isIdentity ? null : matrix16,
-        };
+            // When a 4x4 matrix M is present, it must be composed with the global shift and scale:
+            // P_world = (M * P_local) * invScale - Shift
+            // Row i: combined[i, j] = invScale * M[i, j], and combined[i, 3] = invScale * M[i, 3] - Shift[i]
+            var combined = new double[16];
+            combined[0] = invScale * matrix16[0];
+            combined[1] = invScale * matrix16[1];
+            combined[2] = invScale * matrix16[2];
+            combined[3] = invScale * matrix16[3] - sx;
+
+            combined[4] = invScale * matrix16[4];
+            combined[5] = invScale * matrix16[5];
+            combined[6] = invScale * matrix16[6];
+            combined[7] = invScale * matrix16[7] - sy;
+
+            combined[8] = invScale * matrix16[8];
+            combined[9] = invScale * matrix16[9];
+            combined[10] = invScale * matrix16[10];
+            combined[11] = invScale * matrix16[11] - sz;
+
+            combined[12] = 0.0;
+            combined[13] = 0.0;
+            combined[14] = 0.0;
+            combined[15] = 1.0;
+
+            transform = new PclTransform
+            {
+                Scale = new PclVector3(invScale, invScale, invScale),
+                Translation = new PclVector3(-sx, -sy, -sz),
+                Matrix4x4 = combined,
+            };
+        }
+        else
+        {
+            transform = new PclTransform
+            {
+                Scale = new PclVector3(invScale, invScale, invScale),
+                Translation = new PclVector3(-sx, -sy, -sz),
+                Matrix4x4 = null,
+            };
+        }
 
         string scanId = scanIndex.ToString(CultureInfo.InvariantCulture);
         scan = new CcBinScan(

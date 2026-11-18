@@ -6480,6 +6480,74 @@ public sealed class FormatTests
     }
 
     [Fact]
+    public void Cc_Bin_Rejects_Truncated_Scalar_Field_Data()
+    {
+        using var dir = new TempDirectory();
+        var samplePoints = new List<CcBinSamplePoint> { new(1.0, 2.0, 3.0), new(4.0, 5.0, 6.0) };
+
+        // 2 points declared in scalar field, but stream truncated after 1 value
+        byte[] bytes = SyntheticFixtures.CreateSyntheticCcBin(samplePoints, truncateIntensityData: true);
+        string path = dir.Write("cut_scalar.bin", bytes);
+
+        Assert.Throws<InvalidDataException>(() => CcBinDocument.Open(path));
+    }
+
+    [Fact]
+    public void Cc_Bin_Transforms_With_Tiny_Scale()
+    {
+        using var dir = new TempDirectory();
+        var samplePoints = new List<CcBinSamplePoint> { new(1.0, 0.0, 0.0) };
+
+        byte[] bytes = SyntheticFixtures.CreateSyntheticCcBin(
+            samplePoints,
+            scale: 1e-13);
+
+        string path = dir.Write("tiny_scale.bin", bytes);
+        using var doc = CcBinDocument.Open(path);
+        var scan = doc.Scans[0];
+
+        var point = scan.ReadPoints(new PclReadOptions { ApplyTransform = true }).First();
+        Assert.Equal(1e13, point.X, precision: 1);
+    }
+
+    [Fact]
+    public void Cc_Bin_Composes_Transform_Matrix_With_Shift_And_Scale()
+    {
+        using var dir = new TempDirectory();
+        var samplePoints = new List<CcBinSamplePoint> { new(0.0, 0.0, 0.0) };
+
+        // Rotation around X (4x4 matrix):
+        // 1  0  0  0
+        // 0  0 -1  0
+        // 0  1  0  0
+        // 0  0  0  1
+        double[] rotX =
+        [
+            1, 0, 0, 0,
+            0, 0, -1, 0,
+            0, 1, 0, 0,
+            0, 0, 0, 1
+        ];
+
+        byte[] bytes = SyntheticFixtures.CreateSyntheticCcBin(
+            samplePoints,
+            shiftX: 10.0,
+            shiftY: 0.0,
+            shiftZ: 0.0,
+            scale: 1.0,
+            matrix16: rotX);
+
+        string path = dir.Write("rot_shift.bin", bytes);
+        using var doc = CcBinDocument.Open(path);
+        var scan = doc.Scans[0];
+
+        var point = scan.ReadPoints(new PclReadOptions { ApplyTransform = true }).First();
+        // Point is (0, 0, 0). After rotation around X: (0, 0, 0).
+        // Then global shift and scale: P_global = P_rot / 1.0 - shiftX = 0 - 10 = -10.
+        Assert.Equal(-10.0, point.X, precision: 4);
+    }
+
+    [Fact]
     public void Cc_Bin_Supports_Subsample_And_MaxPoints()
     {
         using var dir = new TempDirectory();

@@ -574,14 +574,17 @@ public sealed class KindDetectionTests
     {
         using var tempDir = new TempDirectory();
         // Write cloud.js manifest
-        tempDir.Write("cloud.js", "{ \"version\": \"1.7\", \"octreeDir\": \"data\", \"points\": 1 }"u8.ToArray());
+        tempDir.Write("cloud.js", "{ \"version\": \"1.7\", \"octreeDir\": \"data\", \"points\": 2 }"u8.ToArray());
 
-        // Create an r.bin where the first 4 coordinate bytes happen to match CCB2 ("CCB2"),
-        // but remaining bytes are raw Potree point coordinates and not CC BIN structure.
+        // Create an r.bin of 2 points whose raw bytes happen to match CC BIN header structure
+        // (CCB2, version=1, entityType=1, f2=0, flags=0, nameLen=0).
         byte[] potreeNode = new byte[32];
-        "CCB2"u8.CopyTo(potreeNode.AsSpan(0, 4)); // X coordinate
-        BinaryPrimitives.WriteInt32LittleEndian(potreeNode.AsSpan(4, 4), 500000); // Y coordinate
-        BinaryPrimitives.WriteInt32LittleEndian(potreeNode.AsSpan(8, 4), 600000); // Z coordinate
+        "CCB2"u8.CopyTo(potreeNode.AsSpan(0, 4));
+        BinaryPrimitives.WriteUInt32LittleEndian(potreeNode.AsSpan(4, 4), 1);
+        BinaryPrimitives.WriteUInt32LittleEndian(potreeNode.AsSpan(8, 4), 1);
+        BinaryPrimitives.WriteUInt32LittleEndian(potreeNode.AsSpan(12, 4), 0);
+        BinaryPrimitives.WriteUInt32LittleEndian(potreeNode.AsSpan(16, 4), 0);
+        BinaryPrimitives.WriteUInt32LittleEndian(potreeNode.AsSpan(20, 4), 0);
         string rBinPath = tempDir.Write("data/r/r.bin", potreeNode);
 
         Assert.Equal(PclFileKind.Potree, PclFile.DetectKind(rBinPath));
