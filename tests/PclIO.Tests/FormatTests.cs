@@ -336,6 +336,89 @@ public sealed class FormatTests
     }
 
     [Fact]
+    public void A_Lgsx_Container_That_Assigns_Its_Points_To_Its_Setups_Has_One_Scan_Per_Setup()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticLgsx(setupCount: 3, assignPointsToSetups: true);
+        using var doc = LgsxDocument.Open(dir.Write("site.lgsx", bytes));
+
+        Assert.Equal(3, doc.Scans.Count);
+        Assert.Equal(["SETUP-3", "SETUP-4", "SETUP-5"], doc.Scans.Select(s => s.Name));
+        Assert.Equal(["3", "4", "5"], doc.Scans.Select(s => s.Id));
+        Assert.Equal(["3", "4", "5"], doc.Setups.Select(s => s.Id));
+
+        // The points of all setups together are the points of the container.
+        Assert.Equal(5, doc.TotalPointCount);
+        Assert.Equal(5, doc.ReadAllPoints().Count());
+        Assert.Equal([2L, 2L, 1L], doc.Scans.Select(s => s.PointCount));
+
+        // Every setup holds the points of its own block.
+        var expected = new List<PclVector3>();
+        foreach (var group in new[] { 2, 2, 1 })
+        {
+            for (int i = 0; i < group; i++)
+            {
+                var written = SyntheticFixtures.DefaultLeicaPoints[expected.Count];
+                expected.Add(new PclVector3(
+                    SyntheticFixtures.LeicaOriginX + (written.X * SyntheticFixtures.LeicaScale),
+                    SyntheticFixtures.LeicaOriginY + (written.Y * SyntheticFixtures.LeicaScale),
+                    SyntheticFixtures.LeicaOriginZ + (written.Z * SyntheticFixtures.LeicaScale)));
+            }
+        }
+
+        var all = doc.ReadAllPoints().Select(p => p.Position).ToList();
+        for (int i = 0; i < expected.Count; i++) AssertNear(expected[i], all[i]);
+    }
+
+    [Fact]
+    public void A_Lgsx_Setup_Without_Points_Gets_No_Scan()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticLgsx(
+            points: [SyntheticFixtures.DefaultLeicaPoints[0], SyntheticFixtures.DefaultLeicaPoints[1]],
+            setupCount: 4, assignPointsToSetups: true);
+        using var doc = LgsxDocument.Open(dir.Write("site.lgsx", bytes));
+
+        // Four setups are listed, but only the two with points become scans.
+        Assert.Equal(4, doc.Setups.Count);
+        Assert.Equal(2, doc.Scans.Count);
+        Assert.Equal(["SETUP-3", "SETUP-4"], doc.Scans.Select(s => s.Name));
+        Assert.Equal(2, doc.TotalPointCount);
+    }
+
+    [Fact]
+    public void A_Lgsx_Container_Whose_Setups_Claim_The_Same_Points_Stays_One_Scan()
+    {
+        // Two setups that declare the same range of the point data cannot be told apart, so the points stay together.
+        using var dir = new TempDirectory();
+        using var doc = LgsxDocument.Open(dir.Write("site.lgsx",
+            SyntheticFixtures.CreateSyntheticLgsx(setupCount: 2, assignPointsToSetups: true, overlappingSetupRanges: true)));
+
+        var scan = Assert.Single(doc.Scans);
+        Assert.Equal("unified-cloud", scan.Id);
+        Assert.Equal(5, scan.PointCount);
+        Assert.Contains(doc.Warnings, w => w.Contains("points are not assigned to them", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void A_Lgsx_Container_Whose_Setup_Names_Share_An_Id_Stays_One_Scan()
+    {
+        // Two entry names ending in the same suffix share the id after the last dash. Assigning blocks by that id
+        // would hand both setups the same blocks and return every point twice, so the points stay together.
+        using var dir = new TempDirectory();
+        using var doc = LgsxDocument.Open(dir.Write("site.lgsx",
+            SyntheticFixtures.CreateSyntheticLgsx(setupCount: 2, assignPointsToSetups: true, collidingSetupNames: true)));
+
+        Assert.Equal(["3", "3"], doc.Setups.Select(s => s.Id));
+        var scan = Assert.Single(doc.Scans);
+        Assert.Equal("unified-cloud", scan.Id);
+        Assert.Equal(5, scan.PointCount);
+        Assert.Equal(5, scan.ReadPoints().Count());
+        Assert.Equal(5, doc.TotalPointCount);
+        Assert.Contains(doc.Warnings, w => w.Contains("points are not assigned to them", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void A_Lgsx_Block_Is_Not_Cut_At_65536_Points()
     {
         // Codes are never zero, because a point at the block origin is dropped as padding.

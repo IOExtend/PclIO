@@ -10,6 +10,10 @@ public sealed class LgsxDocument : PclDocument
     // Signature constants the parser needs to recognise the container.
     private static ReadOnlySpan<byte> ContainerMagic => "wild::geosystems"u8;
 
+    // Signature of the point data payload and of a point block inside it.
+    internal static ReadOnlySpan<byte> PointDataMagic => "mMPK"u8;
+    internal static ReadOnlySpan<byte> BlockMagic => "APRN"u8;
+
     // Bounds on file-declared sizes so crafted files cannot force large reads.
     private const int MaxTocEntries = 10_000;
     private const int EntryHeaderBytes = 128;
@@ -36,11 +40,15 @@ public sealed class LgsxDocument : PclDocument
     /// <summary>Table of contents entries in file order.</summary>
     public IReadOnlyList<LgsxEntry> Entries => _entries;
 
+    /// <summary>Setups listed in the container, in file order.</summary>
+    public IReadOnlyList<LgsxSetup> Setups => _setups;
+
     /// <inheritdoc />
     public override IReadOnlyList<PclScan> Scans => _scans;
 
     private readonly List<PclScan> _scans = [];
     private readonly List<LgsxEntry> _entries = [];
+    private readonly List<LgsxSetup> _setups = [];
     private readonly bool _isLgsLegacy;
 
     private LgsxDocument(string path, long fileSize, string guid, string version, bool isLegacy)
@@ -173,22 +181,51 @@ public sealed class LgsxDocument : PclDocument
             else if (name.StartsWith("SETUP-", StringComparison.OrdinalIgnoreCase))
             {
                 int lastDash = name.LastIndexOf('-');
-                if (lastDash > 0) scanSetups.Add(name[(lastDash + 1)..]);
+                if (lastDash > 0)
+                {
+                    string setupId = name[(lastDash + 1)..];
+                    scanSetups.Add(setupId);
+                    document._setups.Add(new LgsxSetup(setupId, name, payloadOffset, payloadLength));
+                }
             }
         }
 
-        // One scan for the whole container: the file's assignment of points to setups is not read.
-        if (scanSetups.Count > 0 || pointCloudEntry != null)
-        {
-            document._scans.Add(new LgsxScan(
-                id: "unified-cloud",
-                name: Path.GetFileNameWithoutExtension(path),
-                path: path,
-                pointCloudEntry: pointCloudEntry));
-        }
+        // The points are assigned to the setups when the container says which part of the point data belongs to
+        // each of them; otherwise all points stay in one scan.
+        var assignments = pointCloudEntry != null
+            ? AssignBlocksToSetups(path, pointCloudEntry, document._setups)
+            : null;
 
-        if (scanSetups.Count > 0)
-            document._warnings.Add($"The container lists {scanSetups.Count} setup entries; points are not assigned to them and are returned as one scan.");
+        if (assignments != null)
+        {
+            foreach (var (setup, blockStarts) in assignments)
+            {
+                document._scans.Add(new LgsxScan(
+                    id: setup.Id,
+                    name: setup.Name,
+                    path: path,
+                    pointCloudEntry: pointCloudEntry!,
+                    blockStarts: blockStarts));
+            }
+
+            document._warnings.Add(
+                $"The container lists {document._setups.Count} setups; its points are assigned to {assignments.Count} of them.");
+        }
+        else
+        {
+            // One scan for the whole container: the file's assignment of points to setups is not read.
+            if (scanSetups.Count > 0 || pointCloudEntry != null)
+            {
+                document._scans.Add(new LgsxScan(
+                    id: "unified-cloud",
+                    name: Path.GetFileNameWithoutExtension(path),
+                    path: path,
+                    pointCloudEntry: pointCloudEntry));
+            }
+
+            if (scanSetups.Count > 0)
+                document._warnings.Add($"The container lists {scanSetups.Count} setup entries; points are not assigned to them and are returned as one scan.");
+        }
 
         if (document._scans.Count > 0)
         {
@@ -199,6 +236,131 @@ public sealed class LgsxDocument : PclDocument
 
         return document;
     }
+
+    /// <summary>
+    /// Assigns the point blocks of the point data to the setups that own them. A setup owns a range of the point data
+    /// when the range it declares lies inside the point data; a block belongs to the setup whose range holds it.
+    /// Returns null when the container does not assign all of its points to setups, so that the caller can fall
+    /// back to a single scan.
+    /// </summary>
+    private static List<(LgsxSetup Setup, long[] BlockStarts)>? AssignBlocksToSetups(
+        string path, LgsxEntry pointCloudEntry, List<LgsxSetup> setups)
+    {
+        if (setups.Count == 0) return null;
+
+        long payloadStart = (long)pointCloudEntry.Offset;
+        long payloadEnd = payloadStart + (long)pointCloudEntry.Size;
+
+        // Only a setup whose range lies inside the point data can own points of it.
+        var owners = new List<(LgsxSetup Setup, long Start, long End)>();
+        foreach (var setup in setups)
+        {
+            if (setup.Size == 0) continue;
+            long start = (long)setup.Offset;
+            long end = start + (long)setup.Size;
+            if (start < payloadStart || end > payloadEnd) continue;
+            owners.Add((setup, start, end));
+        }
+
+        if (owners.Count == 0) return null;
+
+        // Setups are matched by the id after the last dash of their entry name. Two entries whose names end in the
+        // same suffix share that id, and both would receive the blocks assigned to it, returning points twice.
+        // The assignment is ambiguous, so the points stay together.
+        for (int i = 0; i < setups.Count; i++)
+            for (int j = i + 1; j < setups.Count; j++)
+                if (setups[i].Id.Equals(setups[j].Id, StringComparison.Ordinal))
+                    return null;
+
+        // Two setups that claim the same part of the point data would make the assignment ambiguous.
+        for (int i = 0; i < owners.Count; i++)
+            for (int j = i + 1; j < owners.Count; j++)
+                if (owners[i].Start < owners[j].End && owners[j].Start < owners[i].End)
+                    return null;
+
+        List<(long Start, long Length)> chain;
+        try
+        {
+            chain = ReadBlockChain(path, pointCloudEntry);
+        }
+        catch (InvalidDataException)
+        {
+            // The point data is damaged; the scan reports it when its points are read.
+            return null;
+        }
+
+        var bySetup = new Dictionary<string, List<long>>(StringComparer.Ordinal);
+        foreach (var (blockStart, _) in chain)
+        {
+            var owner = owners.Find(o => blockStart >= o.Start && blockStart < o.End);
+            if (owner.Setup is null) return null; // a block that no setup owns
+            if (!bySetup.TryGetValue(owner.Setup.Id, out var starts))
+            {
+                starts = [];
+                bySetup[owner.Setup.Id] = starts;
+            }
+
+            starts.Add(blockStart);
+        }
+
+        if (bySetup.Count == 0) return null;
+
+        var result = new List<(LgsxSetup, long[])>();
+        foreach (var setup in setups)
+            if (bySetup.TryGetValue(setup.Id, out var starts))
+                result.Add((setup, [.. starts]));
+        return result;
+    }
+
+    /// <summary>Reads the chain of point blocks of a point data payload: their start offsets and their lengths.</summary>
+    /// <exception cref="InvalidDataException">The payload or a block header is malformed.</exception>
+    internal static List<(long Start, long Length)> ReadBlockChain(string path, LgsxEntry entry)
+    {
+        using var fs = File.OpenRead(path);
+        return ReadBlockChain(fs, entry);
+    }
+
+    /// <summary>Reads the chain of point blocks of a point data payload: their start offsets and their lengths.</summary>
+    /// <exception cref="InvalidDataException">The payload or a block header is malformed.</exception>
+    internal static List<(long Start, long Length)> ReadBlockChain(FileStream fs, LgsxEntry entry)
+    {
+        var chain = new List<(long Start, long Length)>();
+
+        long fileLength = fs.Length;
+        long payloadOffset = (long)entry.Offset;
+        if (payloadOffset > fileLength - 64) throw FormatError.Truncated("the point data header");
+
+        fs.Position = payloadOffset;
+        byte[] payloadHeader = new byte[64];
+        fs.ReadExactly(payloadHeader);
+        if (!payloadHeader.AsSpan(0, 4).SequenceEqual(PointDataMagic))
+            throw FormatError.Corrupted("point data signature mismatch.");
+
+        // The first block offset is relative to the payload start.
+        uint blockRelOffset = Bytes.ReadUInt32LE(payloadHeader.AsSpan(0x20, 4));
+        long curBlockOffset = payloadOffset + blockRelOffset;
+        if (curBlockOffset <= payloadOffset || curBlockOffset >= fileLength)
+            throw FormatError.Corrupted("first point block offset is outside the file.");
+
+        byte[] magicBuf = new byte[8];
+        while (curBlockOffset + 64 < fileLength)
+        {
+            fs.Position = curBlockOffset;
+            fs.ReadExactly(magicBuf);
+
+            // Anything other than a block signature ends the chain.
+            if (!magicBuf.AsSpan(0, 4).SequenceEqual(BlockMagic)) break;
+
+            uint chunkLen = Bytes.ReadUInt32LE(magicBuf.AsSpan(4, 4));
+            if (chunkLen < 8 + 128 || chunkLen > fileLength - curBlockOffset)
+                throw FormatError.Corrupted("point block length is outside the file.");
+
+            chain.Add((curBlockOffset, chunkLen));
+            curBlockOffset += chunkLen;
+        }
+
+        return chain;
+    }
 }
 
 /// <summary>Table of contents entry inside a Leica scan container.</summary>
@@ -207,15 +369,20 @@ public sealed class LgsxDocument : PclDocument
 /// <param name="Size">Payload length in bytes.</param>
 public sealed record LgsxEntry(string Name, ulong Offset, ulong Size);
 
+/// <summary>A setup listed in a Leica scan container.</summary>
+/// <param name="Id">Identifier of the setup, the part of the entry name after its last dash.</param>
+/// <param name="Name">Name of the container entry that lists the setup.</param>
+/// <param name="Offset">Offset of the range the setup declares, in bytes from the start of the file.</param>
+/// <param name="Size">Length of the range the setup declares, in bytes.</param>
+public sealed record LgsxSetup(string Id, string Name, ulong Offset, ulong Size);
+
 /// <summary>
-/// Scan representation in a Leica LGS/LGSx container: all points of the container as one scan.
-/// Setups are not separated and poses are not applied.
+/// Scan representation in a Leica LGS/LGSx container: the points of one setup, or all points of the container when
+/// the container does not assign them to its setups.
 /// </summary>
 public sealed class LgsxScan : PclScan
 {
-    // Signature constants the parser needs to recognise point data.
-    private static ReadOnlySpan<byte> PayloadMagic => "mMPK"u8;
-    private static ReadOnlySpan<byte> BlockMagic => "APRN"u8;
+    // Signature of a compressed frame inside a point block.
     private static ReadOnlySpan<byte> FrameMagic => [0x28, 0xB5, 0x2F, 0xFD];
 
     // Limits that bound memory and work for sizes declared by the file.
@@ -235,6 +402,9 @@ public sealed class LgsxScan : PclScan
 
     private readonly string _filePath;
     private readonly LgsxEntry? _entry;
+
+    // Start offsets of the blocks that belong to this scan; null when the scan holds all blocks of the container.
+    private readonly long[]? _blockStarts;
 
     private long _pointCount = -1;
     private (bool Colors, bool Intensities, bool Normals)? _channels;
@@ -263,12 +433,13 @@ public sealed class LgsxScan : PclScan
 
     private (bool Colors, bool Intensities, bool Normals) Channels => _channels ??= DetectChannels();
 
-    internal LgsxScan(string id, string name, string path, LgsxEntry? pointCloudEntry)
+    internal LgsxScan(string id, string name, string path, LgsxEntry? pointCloudEntry, long[]? blockStarts = null)
     {
         Id = id;
         Name = name;
         _filePath = path;
         _entry = pointCloudEntry;
+        _blockStarts = blockStarts;
     }
 
     /// <summary>Decoded planes of one point block together with its coordinate frame.</summary>
@@ -397,43 +568,20 @@ public sealed class LgsxScan : PclScan
         }
     }
 
-    /// <summary>Walks the chain of point blocks and yields those that carry point planes.</summary>
+    /// <summary>Walks the chain of point blocks and yields those that carry point planes and belong to this scan.</summary>
     private IEnumerable<Block> ReadBlocks(FileStream fs)
     {
-        long payloadOffset = (long)_entry!.Offset;
         long fileLength = fs.Length;
-        if (payloadOffset > fileLength - 64) throw FormatError.Truncated("the point data header");
-
-        fs.Position = payloadOffset;
-        byte[] payloadHeader = new byte[64];
-        fs.ReadExactly(payloadHeader);
-        if (!payloadHeader.AsSpan(0, 4).SequenceEqual(PayloadMagic))
-            throw FormatError.Corrupted("point data signature mismatch.");
-
-        // The first block offset is relative to the payload start.
-        uint blockRelOffset = Bytes.ReadUInt32LE(payloadHeader.AsSpan(0x20, 4));
-        long curBlockOffset = payloadOffset + blockRelOffset;
-        if (curBlockOffset <= payloadOffset || curBlockOffset >= fileLength)
-            throw FormatError.Corrupted("first point block offset is outside the file.");
-
         long decodedLimit = DecodedAllowanceBytes + (fileLength * DecodedBytesPerFileByte);
         long decodedBytes = 0;
-        byte[] magicBuf = new byte[8];
         byte[] blockHeader = new byte[128];
 
-        // chunkLen is at least the header size, so every iteration advances.
-        while (curBlockOffset + 64 < fileLength)
+        foreach (var (blockStart, blockLength) in LgsxDocument.ReadBlockChain(fs, _entry!))
         {
-            fs.Position = curBlockOffset;
-            fs.ReadExactly(magicBuf);
+            if (!BelongsToScan(blockStart)) continue;
 
-            // Anything other than a block signature ends the chain.
-            if (!magicBuf.AsSpan(0, 4).SequenceEqual(BlockMagic)) yield break;
-
-            uint chunkLen = Bytes.ReadUInt32LE(magicBuf.AsSpan(4, 4));
-            if (chunkLen < 8 + blockHeader.Length || chunkLen > fileLength - curBlockOffset)
-                throw FormatError.Corrupted("point block length is outside the file.");
-
+            // The block header follows the 8-byte block signature and length.
+            fs.Position = blockStart + 8;
             fs.ReadExactly(blockHeader);
 
             double scaleX = Bytes.ReadDoubleLE(blockHeader.AsSpan(0x34, 8));
@@ -443,11 +591,11 @@ public sealed class LgsxScan : PclScan
             double minY = Bytes.ReadDoubleLE(blockHeader.AsSpan(0x54, 8));
             double minZ = Bytes.ReadDoubleLE(blockHeader.AsSpan(0x5C, 8));
 
-            long blockEnd = curBlockOffset + chunkLen;
+            long blockEnd = blockStart + blockLength;
 
             // Find the first compressed frame; its 8-byte length prefix precedes it.
-            byte[] searchBuf = new byte[(int)Math.Min(1024L, chunkLen)];
-            fs.Position = curBlockOffset + 8;
+            byte[] searchBuf = new byte[(int)Math.Min(1024L, blockLength)];
+            fs.Position = blockStart + 8;
             int bytesRead = fs.Read(searchBuf, 0, searchBuf.Length);
             int firstFrame = -1;
             for (int s = 0; s < bytesRead - 4; s++)
@@ -461,7 +609,7 @@ public sealed class LgsxScan : PclScan
 
             if (firstFrame >= 8)
             {
-                long firstFrameOffset = curBlockOffset + firstFrame;
+                long firstFrameOffset = blockStart + firstFrame;
                 var frames = ReadAllFrames(fs, firstFrameOffset, blockEnd);
 
                 // Many small blocks that each expand a lot would otherwise make the file cost unbounded time.
@@ -480,10 +628,12 @@ public sealed class LgsxScan : PclScan
                     yield return new Block(scaleX, scaleY, scaleZ, minX, minY, minZ, frames);
                 }
             }
-
-            curBlockOffset = blockEnd;
         }
     }
+
+    // A scan without its own blocks holds all of them; otherwise only the blocks the container assigned to it.
+    private bool BelongsToScan(long blockStart) =>
+        _blockStarts == null || Array.BinarySearch(_blockStarts, blockStart) >= 0;
 
     private static List<byte[]> ReadAllFrames(FileStream fs, long offset, long maxOffset)
     {
