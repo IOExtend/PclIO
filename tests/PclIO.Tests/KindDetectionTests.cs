@@ -80,7 +80,33 @@ public sealed class KindDetectionTests
 
     [Fact]
     public void Pcd_Needs_The_Header_Structure_Not_Just_The_Extension() =>
-        Assert.Equal(PclFileKind.Unknown, Detect("just some text"u8.ToArray(), "sample.pcd"));    [Fact]
+        Assert.Equal(PclFileKind.Unknown, Detect("just some text"u8.ToArray(), "sample.pcd"));
+
+    [Theory]
+    [InlineData("sample.pts")]
+    [InlineData("SAMPLE.PTS")]
+    [InlineData("sample.dat")]
+    public void Detects_Pts_By_Count_Header(string name) =>
+        Assert.Equal(PclFileKind.Pts, Detect(SyntheticFixtures.CreateSyntheticPts(), name));
+
+    [Theory]
+    [InlineData("sample.pts")]
+    [InlineData("SAMPLE.PTS")]
+    public void Detects_Pts_Headerless_By_Extension(string name) =>
+        Assert.Equal(PclFileKind.Pts, Detect(SyntheticFixtures.CreateSyntheticPts(withCountHeader: false), name));
+
+    [Fact]
+    public void Pts_Headerless_Needs_The_Pts_Extension() =>
+        Assert.Equal(PclFileKind.Unknown, Detect(SyntheticFixtures.CreateSyntheticPts(withCountHeader: false), "sample.dat"));
+
+    [Fact]
+    public void Pts_Needs_The_Structure_Not_Just_The_Extension()
+    {
+        Assert.Equal(PclFileKind.Unknown, Detect("just some text"u8.ToArray(), "sample.pts"));
+        Assert.Equal(PclFileKind.Unknown, Detect(new byte[100], "sample.pts"));
+    }
+
+    [Fact]
     public void Faro_Needs_The_Container_Signature_Not_Just_The_Extension() =>
         Assert.Equal(PclFileKind.Unknown, Detect(new byte[100], "scanner.fls"));
 

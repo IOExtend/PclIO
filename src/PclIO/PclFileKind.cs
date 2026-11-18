@@ -38,4 +38,7 @@ public enum PclFileKind
 
     /// <summary>Stanford polygon file with point cloud data (.ply).</summary>
     Ply = 11,
+
+    /// <summary>Leica Cyclone point cloud exchange format (.pts).</summary>
+    Pts = 12,
 }

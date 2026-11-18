@@ -21,11 +21,13 @@ public sealed class RealFileTests
         Assert.True(doc.Scans.Count > 0, "the document lists at least one scan");
         Assert.True(doc.FileSize > 0);
 
+        long totalPoints = doc.Scans.Sum(s => s.PointCount);
+        int expected = (int)Math.Min(SampleSize, totalPoints > 0 ? totalPoints : SampleSize);
         var options = new PclReadOptions { MaxPoints = SampleSize };
         var points = doc.ReadAllPoints(options).ToList();
 
         // The requested number of points comes back, and every coordinate is a real number.
-        Assert.Equal(SampleSize, points.Count);
+        Assert.Equal(expected, points.Count);
         Assert.All(points, p =>
         {
             Assert.True(double.IsFinite(p.X) && double.IsFinite(p.Y) && double.IsFinite(p.Z));
@@ -80,6 +82,9 @@ public sealed class RealFileTests
 
     [SkippableFact]
     public void Read_Real_Ply_Points() => AssertReadsPoints(".ply", PclFileKind.Ply);
+
+    [SkippableFact]
+    public void Read_Real_Pts_Points() => AssertReadsPoints(".pts", PclFileKind.Pts);
 
     [SkippableFact]
     public void Export_Real_File_To_Las_Matches_The_Requested_Count()

@@ -1,3 +1,5 @@
+using System.Globalization;
+
 namespace PclIO.Internal;
 
 /// <summary>
@@ -104,6 +106,10 @@ internal static class KindDetector
         // PLY files start with the magic word; the header structure decides, like PCD.
         if (IsPlyHeader(stream, origin))
             return PclFileKind.Ply;
+
+        // PTS files start with an integer point count, or coordinate lines in a .pts file.
+        if (IsPtsHeader(stream, origin, extension))
+            return PclFileKind.Pts;
 
         return PclFileKind.Unknown;
     }
@@ -261,4 +267,109 @@ internal static class KindDetector
     private static bool IsPlyHeaderLine(string line) =>
         line.StartsWith("element ", StringComparison.Ordinal) ||
         line.StartsWith("property ", StringComparison.Ordinal);
+
+    // True when the stream starts with a PTS layout: an integer count line followed by coordinate lines,
+    // or coordinate lines when the extension is .pts.
+    // At most the first 64 KiB are inspected; the position is restored.
+    private static bool IsPtsHeader(Stream stream, long origin, string? extension)
+    {
+        const int maxProbeBytes = 64 * 1024;
+        long length = stream.CanSeek ? stream.Length : long.MaxValue;
+        int toRead = (int)Math.Min(maxProbeBytes, Math.Max(0, length - origin));
+        if (toRead < 5) return false;
+
+        byte[] buffer = new byte[toRead];
+        stream.Position = origin;
+        try
+        {
+            int got = 0;
+            while (got < toRead)
+            {
+                int n = stream.Read(buffer, got, toRead - got);
+                if (n == 0) break;
+                got += n;
+            }
+
+            if (got < 5) return false;
+
+            // Reject files containing NUL bytes in the probe region (binary files)
+            ReadOnlySpan<byte> headSpan = buffer.AsSpan(0, got);
+            if (headSpan.Contains((byte)0)) return false;
+
+            int pos = 0;
+            string? firstLine = null;
+            string? secondLine = null;
+            string? thirdLine = null;
+
+            while (pos < got)
+            {
+                int end = Array.IndexOf(buffer, (byte)'\n', pos, got - pos);
+                if (end < 0)
+                {
+                    if (firstLine == null) return false;
+                    break;
+                }
+
+                int lineLen = end - pos;
+                if (lineLen > 0 && buffer[end - 1] == (byte)'\r') lineLen--;
+
+                if (lineLen > 4096) return false;
+
+                if (lineLen > 0)
+                {
+                    string line = System.Text.Encoding.ASCII.GetString(buffer, pos, lineLen).Trim();
+                    if (line.Length > 0)
+                    {
+                        if (firstLine == null) firstLine = line;
+                        else if (secondLine == null) secondLine = line;
+                        else { thirdLine = line; break; }
+                    }
+                }
+
+                pos = end + 1;
+            }
+
+            if (firstLine == null) return false;
+
+            // Check if firstLine is a single integer count
+            if (long.TryParse(firstLine, NumberStyles.None, CultureInfo.InvariantCulture, out long count) && count >= 0)
+            {
+                // Count header found. If count is 0 and no more lines, it is a valid empty PTS
+                if (secondLine == null) return count == 0;
+
+                // secondLine must have numeric tokens (3, 4, 6, 7, 8, 9, 10)
+                if (!IsNumericPtsLine(secondLine, out int cols)) return false;
+                if (thirdLine != null && (!IsNumericPtsLine(thirdLine, out int cols3) || cols3 != cols)) return false;
+                return true;
+            }
+
+            // No count header: can only be detected as PTS if extension is .pts
+            if (extension == ".pts")
+            {
+                if (!IsNumericPtsLine(firstLine, out int cols1)) return false;
+                if (secondLine != null && (!IsNumericPtsLine(secondLine, out int cols2) || cols2 != cols1)) return false;
+                return true;
+            }
+
+            return false;
+        }
+        finally
+        {
+            stream.Position = origin;
+        }
+    }
+
+    private static bool IsNumericPtsLine(string line, out int tokenCount)
+    {
+        tokenCount = 0;
+        string[] parts = line.Split([' ', '\t'], StringSplitOptions.RemoveEmptyEntries);
+        tokenCount = parts.Length;
+        if (tokenCount is not (3 or 4 or 6 or 7 or 8 or 9 or 10)) return false;
+        foreach (var p in parts)
+        {
+            if (!double.TryParse(p, NumberStyles.Float, CultureInfo.InvariantCulture, out _))
+                return false;
+        }
+        return true;
+    }
 }

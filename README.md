@@ -45,6 +45,7 @@ The library targets .NET 8 and .NET 10. It is managed code with no dependencies 
 | LAS | `.las` | Points decoded from versions 1.0 to 1.4 with point formats 0 to 10: XYZ with scale and offset, intensity, classification and RGB for the colour formats (2, 3, 5, 7, 8, 10). GPS time, return numbers, scan angles, point source ids, near infrared and waveform packet descriptors are not interpreted; extra bytes past a format's base size are skipped. The extended point counts of 1.4 are used when stated. Coordinate system records name an `EPSG:` code from a GeoTIFF key directory when it holds one, else the OGC WKT when one is stored. |
 | PCD | `.pcd` | Points decoded from the 0.7 header in ASCII, binary and binary compressed (LZF) form: XYZ from x, y and z, colour from packed rgb or rgba, intensity, and normals from normal_x, normal_y and normal_z. Points with non-finite coordinates are not returned. The viewpoint is kept as metadata and not applied. |
 | PLY | `.ply` | Vertices decoded from ASCII and binary little and big endian files: XYZ from x, y and z, 8-bit colour from red, green and blue (with alpha when present), intensity, and normals from nx, ny and nz. Faces and other elements are ignored. Points with non-finite coordinates are not returned. |
+| PTS | `.pts` | Leica Cyclone ASCII exchange point clouds: XYZ coordinates with or without point count header, intensity, 8-bit RGB colour, or unit normals across 3, 4, 6, 7, 8, 9 and 10 column layouts. Points with non-finite coordinates are not returned. |
 
 ### Format detection
 
@@ -54,7 +55,7 @@ regard to case.
 
 - E57, ReCap scan and Leica files are recognised by their content and accepted with any extension; for Leica, `.lgs` selects the
   older container and any other extension `.lgsx`. EdgeWise files are also recognised by content when the extension is none of its own.
-  A LAS file is recognised by the `LASF` signature with any extension except `.laz`, which shares the signature and stays unknown. A PCD file is recognised by its header structure with any extension. A PLY file is recognised by its magic word and header structure with any extension.
+  A LAS file is recognised by the `LASF` signature with any extension except `.laz`, which shares the signature and stays unknown. A PCD file is recognised by its header structure with any extension. A PLY file is recognised by its magic word and header structure with any extension. A PTS file is recognised by an integer point count header line followed by coordinate lines with any extension, or coordinate lines with the `.pts` extension.
 - A FARO file must be an OLE2 compound file with the extension `.fls`. A ReCap project must be a ZIP archive with the extension
   `.rcp`. A PinPoint file must be a JSON text file with the extension `.smf` or `.srf`.
 - The extensions `.c3db` and `.c3ptx` select EdgeWise without a content check. A `.c3ptx` file is read as one cluster file and any
@@ -104,6 +105,7 @@ These readers drop data without an error or a warning, so a scan can yield fewer
 - EdgeWise: a database node whose point count is 0 is skipped.
 - PCD: a point with a NaN or infinite coordinate is not returned; a colour, intensity or normal field whose shape the reader does not convert stays unread, so the points come without that channel.
 - PLY: a vertex with a NaN or infinite coordinate is not returned; colour that is not stored as 8-bit integers is left unread, with a warning.
+- PTS: a point with a NaN or infinite coordinate is not returned.
 ### Limits
 
 A file that exceeds one of these limits, or whose declared sizes and counts do not fit the file, is rejected with
@@ -128,6 +130,7 @@ outside the file is fetched.
 | LAS | Header of at least 227 bytes (375 for 1.4); at most 4096 variable length records of at most 1 MiB each; point records at most 1 MiB. |
 | PCD | 4096 header lines of at most 1 MiB each; at most 1024 fields with an element count of at most 65536; decompressed binary data at most 1 GiB. |
 | PLY | 4096 header lines of at most 1 MiB each; at most 1024 elements with at most 1024 properties each; vertex records at most 1 MiB. |
+| PTS | Lines of at most 1 MiB each; declared point count cannot exceed the physical capacity of the file. |
 
 ## Exporters
 
