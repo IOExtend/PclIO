@@ -81,6 +81,9 @@ public sealed class RealFileTests
     public void Read_Real_Laz_Points() => AssertReadsPoints(".laz", PclFileKind.Laz);
 
     [SkippableFact]
+    public void Read_Real_Copc_Points() => AssertReadsPoints(".copc.laz", PclFileKind.Copc);
+
+    [SkippableFact]
     public void Read_Real_Pcd_Points() => AssertReadsPoints(".pcd", PclFileKind.Pcd);
 
     [SkippableFact]

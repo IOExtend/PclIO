@@ -102,6 +102,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Spatial coordinates, intensity, classification, and 8-bit RGB colour; coordinate scale and offset applied;
   CRS read from GeoTIFF key directory or OGC WKT VLRs;
   Chunk table offsets and per-chunk point counts validated against file boundaries.
+- Cloud Optimized Point Clouds are read (`*.copc.laz`, `PclFileKind.Copc`):
+  Reads octree hierarchy pages (root and child pages) with cycle detection and boundary checks;
+  Octree voxel bounding boxes calculated from center and halfsize metadata;
+  Spatial querying by bounding box (`FindNodes`, `ReadPoints(bounds)`) and by specific node (`ReadPoints(node)`);
+  LAS point formats 0 to 3 decompressed via LASzip arithmetic decoding;
+  LAS 1.4 point formats 6 to 8 read anchor points with coordinates, intensity, classification, and 8-bit RGB colour.
 - Leica scans read a block range with opt-in parallel decoding: the new `PclReadOptions.Blocks` selects the blocks of the
   scan in file order (per scan) and the new `PclReadOptions.MaxDegreeOfParallelism` (default 1, sequential streaming)
   decodes the selected blocks in parallel, keeping file order, consecutive `Index` values and `MaxPoints`/`SubsampleStep`

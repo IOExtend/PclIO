@@ -59,4 +59,7 @@ public enum PclFileKind
 
     /// <summary>LASzip compressed ASPRS LAS point cloud (.laz).</summary>
     Laz = 18,
+
+    /// <summary>Cloud Optimized Point Cloud (clustered octree in LAZ, .copc.laz).</summary>
+    Copc = 19,
 }

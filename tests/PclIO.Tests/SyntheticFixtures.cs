@@ -918,6 +918,123 @@ internal static class SyntheticFixtures
         return full;
     }
 
+    // ---- COPC (.copc.laz) ---------------------------------------------------------------------------------------------
+
+    /// <summary>Creates a minimal valid Cloud Optimized Point Cloud (COPC) file with octree hierarchy and points.</summary>
+    public static byte[] CreateSyntheticCopc(
+        double x = 10.0, double y = 20.0, double z = 30.0,
+        float intensity = 0.5f, PclColor? color = null, byte classification = 1,
+        int pointFormat = 2,
+        bool corruptHierarchyOffset = false,
+        bool cyclicHierarchy = false,
+        bool corruptVlrSize = false,
+        bool truncateData = false,
+        bool nonFiniteCoordinates = false)
+    {
+        byte[] hdr = new byte[375];
+        "LASF"u8.CopyTo(hdr);
+        hdr[24] = 1;
+        hdr[25] = 4;
+        BinaryPrimitives.WriteUInt16LittleEndian(hdr.AsSpan(94, 2), 375);
+
+        ushort vlrDataLen = (ushort)(corruptVlrSize ? 100 : 160);
+        uint offsetToPoints = (uint)(375 + 54 + vlrDataLen);
+        BinaryPrimitives.WriteUInt32LittleEndian(hdr.AsSpan(96, 4), offsetToPoints);
+        BinaryPrimitives.WriteUInt32LittleEndian(hdr.AsSpan(100, 4), 1);
+        hdr[104] = (byte)(pointFormat | 0x80);
+        ushort recordLen = (ushort)(pointFormat == 7 ? 36 : 26);
+        BinaryPrimitives.WriteUInt16LittleEndian(hdr.AsSpan(105, 2), recordLen);
+        BinaryPrimitives.WriteUInt32LittleEndian(hdr.AsSpan(107, 4), 1);
+        BinaryPrimitives.WriteUInt64LittleEndian(hdr.AsSpan(247, 8), 1);
+
+        BinaryPrimitives.WriteDoubleLittleEndian(hdr.AsSpan(131, 8), 0.01);
+        BinaryPrimitives.WriteDoubleLittleEndian(hdr.AsSpan(139, 8), 0.01);
+        BinaryPrimitives.WriteDoubleLittleEndian(hdr.AsSpan(147, 8), 0.01);
+        BinaryPrimitives.WriteDoubleLittleEndian(hdr.AsSpan(155, 8), 0.0);
+        BinaryPrimitives.WriteDoubleLittleEndian(hdr.AsSpan(163, 8), 0.0);
+        BinaryPrimitives.WriteDoubleLittleEndian(hdr.AsSpan(171, 8), 0.0);
+        BinaryPrimitives.WriteDoubleLittleEndian(hdr.AsSpan(179, 8), nonFiniteCoordinates ? double.NaN : x);
+        BinaryPrimitives.WriteDoubleLittleEndian(hdr.AsSpan(187, 8), nonFiniteCoordinates ? double.NaN : x);
+        BinaryPrimitives.WriteDoubleLittleEndian(hdr.AsSpan(195, 8), nonFiniteCoordinates ? double.NaN : y);
+        BinaryPrimitives.WriteDoubleLittleEndian(hdr.AsSpan(203, 8), nonFiniteCoordinates ? double.NaN : y);
+        BinaryPrimitives.WriteDoubleLittleEndian(hdr.AsSpan(211, 8), nonFiniteCoordinates ? double.NaN : z);
+        BinaryPrimitives.WriteDoubleLittleEndian(hdr.AsSpan(219, 8), nonFiniteCoordinates ? double.NaN : z);
+
+        // VLR header (54 bytes)
+        byte[] vlrHdr = new byte[54];
+        Encoding.ASCII.GetBytes("copc").CopyTo(vlrHdr, 2);
+        BinaryPrimitives.WriteUInt16LittleEndian(vlrHdr.AsSpan(18, 2), 1);
+        BinaryPrimitives.WriteUInt16LittleEndian(vlrHdr.AsSpan(20, 2), vlrDataLen);
+        Encoding.ASCII.GetBytes("COPC info VLR").CopyTo(vlrHdr, 22);
+
+        // COPC info payload (160 bytes)
+        byte[] vlrPayload = new byte[vlrDataLen];
+        if (!corruptVlrSize)
+        {
+            BinaryPrimitives.WriteDoubleLittleEndian(vlrPayload.AsSpan(0, 8), x);
+            BinaryPrimitives.WriteDoubleLittleEndian(vlrPayload.AsSpan(8, 8), y);
+            BinaryPrimitives.WriteDoubleLittleEndian(vlrPayload.AsSpan(16, 8), z);
+            BinaryPrimitives.WriteDoubleLittleEndian(vlrPayload.AsSpan(24, 8), 50.0);
+            BinaryPrimitives.WriteDoubleLittleEndian(vlrPayload.AsSpan(32, 8), 1.0);
+            ulong hierOffset = corruptHierarchyOffset ? 999999UL : offsetToPoints;
+            BinaryPrimitives.WriteUInt64LittleEndian(vlrPayload.AsSpan(40, 8), hierOffset);
+            BinaryPrimitives.WriteUInt64LittleEndian(vlrPayload.AsSpan(48, 8), 32);
+        }
+
+        // Hierarchy page (32 bytes per entry)
+        byte[] hierPage = new byte[32];
+        if (cyclicHierarchy)
+        {
+            BinaryPrimitives.WriteInt32LittleEndian(hierPage.AsSpan(0, 4), 0);
+            BinaryPrimitives.WriteUInt64LittleEndian(hierPage.AsSpan(16, 8), offsetToPoints);
+            BinaryPrimitives.WriteInt32LittleEndian(hierPage.AsSpan(24, 4), 32);
+            BinaryPrimitives.WriteInt32LittleEndian(hierPage.AsSpan(28, 4), -1);
+        }
+        else
+        {
+            ulong chunkOffset = offsetToPoints + 32;
+            BinaryPrimitives.WriteInt32LittleEndian(hierPage.AsSpan(0, 4), 0);
+            BinaryPrimitives.WriteInt32LittleEndian(hierPage.AsSpan(4, 4), 0);
+            BinaryPrimitives.WriteInt32LittleEndian(hierPage.AsSpan(8, 4), 0);
+            BinaryPrimitives.WriteInt32LittleEndian(hierPage.AsSpan(12, 4), 0);
+            BinaryPrimitives.WriteUInt64LittleEndian(hierPage.AsSpan(16, 8), chunkOffset);
+            BinaryPrimitives.WriteInt32LittleEndian(hierPage.AsSpan(24, 4), recordLen);
+            BinaryPrimitives.WriteInt32LittleEndian(hierPage.AsSpan(28, 4), 1);
+        }
+
+        // Point chunk (recordLen bytes)
+        byte[] pt0 = new byte[recordLen];
+        int rawX = (int)Math.Round(x / 0.01);
+        int rawY = (int)Math.Round(y / 0.01);
+        int rawZ = (int)Math.Round(z / 0.01);
+        BinaryPrimitives.WriteInt32LittleEndian(pt0.AsSpan(0, 4), rawX);
+        BinaryPrimitives.WriteInt32LittleEndian(pt0.AsSpan(4, 4), rawY);
+        BinaryPrimitives.WriteInt32LittleEndian(pt0.AsSpan(8, 4), rawZ);
+        BinaryPrimitives.WriteUInt16LittleEndian(pt0.AsSpan(12, 2), (ushort)(intensity * 65535));
+
+        color ??= new PclColor(200, 100, 50);
+        if (pointFormat == 7)
+        {
+            pt0[16] = classification;
+            BinaryPrimitives.WriteUInt16LittleEndian(pt0.AsSpan(30, 2), (ushort)(color.Value.R * 257));
+            BinaryPrimitives.WriteUInt16LittleEndian(pt0.AsSpan(32, 2), (ushort)(color.Value.G * 257));
+            BinaryPrimitives.WriteUInt16LittleEndian(pt0.AsSpan(34, 2), (ushort)(color.Value.B * 257));
+        }
+        else
+        {
+            pt0[14] = 1;
+            pt0[15] = classification;
+            BinaryPrimitives.WriteUInt16LittleEndian(pt0.AsSpan(20, 2), (ushort)(color.Value.R * 257));
+            BinaryPrimitives.WriteUInt16LittleEndian(pt0.AsSpan(22, 2), (ushort)(color.Value.G * 257));
+            BinaryPrimitives.WriteUInt16LittleEndian(pt0.AsSpan(24, 2), (ushort)(color.Value.B * 257));
+        }
+
+        byte[] full = [.. hdr, .. vlrHdr, .. vlrPayload, .. hierPage, .. pt0];
+        if (truncateData)
+            return full[..(full.Length - 10)];
+        return full;
+    }
+
     // ---- PCD (.pcd) ---------------------------------------------------------------------------------------------------
 
     /// <summary>Default PCD fields: positions, packed colour, intensity and normals, all 4-byte floats.</summary>

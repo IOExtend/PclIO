@@ -26,6 +26,13 @@ public readonly record struct PclBounds(PclVector3 Min, PclVector3 Max)
         pt.Y >= Min.Y && pt.Y <= Max.Y &&
         pt.Z >= Min.Z && pt.Z <= Max.Z;
 
+    /// <summary>True when this bounding box overlaps with another bounding box (edges included).</summary>
+    public bool Intersects(PclBounds other) =>
+        !IsEmpty && !other.IsEmpty &&
+        Min.X <= other.Max.X && Max.X >= other.Min.X &&
+        Min.Y <= other.Max.Y && Max.Y >= other.Min.Y &&
+        Min.Z <= other.Max.Z && Max.Z >= other.Min.Z;
+
     /// <summary>Returns the smallest box that contains this box and the point.</summary>
     public PclBounds Encapsulate(PclVector3 pt)
     {

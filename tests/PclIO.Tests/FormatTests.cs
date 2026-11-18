@@ -1,4 +1,5 @@
 using PclIO.Export;
+using PclIO.Formats.Copc;
 using PclIO.Formats.E57;
 using PclIO.Formats.EdgeWise;
 using PclIO.Formats.Faro;
@@ -5599,5 +5600,162 @@ public sealed class FormatTests
         string path = dir.Write("bad_version.laz", bytes);
 
         Assert.Throws<NotSupportedException>(() => LazDocument.Open(path));
+    }
+
+    [Fact]
+    public void Copc_Opens_Lists_Scans_And_Streams_Points()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticCopc(
+            x: 10.0, y: 20.0, z: 30.0,
+            intensity: 0.5f,
+            color: new PclColor(200, 100, 50),
+            classification: 2,
+            pointFormat: 2);
+
+        string path = dir.Write("test.copc.laz", bytes);
+        using var doc = PclFile.Open(path) as CopcDocument;
+        Assert.NotNull(doc);
+
+        Assert.Equal(PclFileKind.Copc, doc.Kind);
+        Assert.Equal(10.0, doc.Center.X);
+        Assert.Equal(20.0, doc.Center.Y);
+        Assert.Equal(30.0, doc.Center.Z);
+        Assert.Equal(50.0, doc.HalfSize);
+        Assert.Equal(1.0, doc.Spacing);
+        Assert.Single(doc.Nodes);
+        Assert.Equal(new CopcVoxelKey(0, 0, 0, 0), doc.Nodes[0].Key);
+
+        var scan = Assert.Single(doc.Scans);
+        Assert.Equal(1, scan.PointCount);
+        Assert.True(scan.HasColors);
+        Assert.True(scan.HasIntensities);
+        Assert.False(scan.HasNormals);
+
+        var pt = Assert.Single(scan.ReadPoints());
+        AssertNear(new PclVector3(10, 20, 30), pt.Position);
+        Assert.NotNull(pt.Intensity);
+        Assert.InRange(pt.Intensity.Value, 0.49f, 0.51f);
+        Assert.Equal((byte)2, pt.Classification);
+        Assert.NotNull(pt.Color);
+        Assert.Equal((byte)200, pt.Color.Value.R);
+        Assert.Equal((byte)100, pt.Color.Value.G);
+        Assert.Equal((byte)50, pt.Color.Value.B);
+    }
+
+    [Fact]
+    public void Copc_Point_Format_7_Decodes_RGB_And_Coordinates()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticCopc(
+            x: 15.0, y: 25.0, z: 35.0,
+            intensity: 0.75f,
+            color: new PclColor(120, 180, 240),
+            classification: 3,
+            pointFormat: 7);
+
+        string path = dir.Write("format7.copc.laz", bytes);
+        using var doc = CopcDocument.Open(path);
+
+        Assert.Equal(7, doc.PointFormat);
+        var pt = Assert.Single(doc.ReadAllPoints());
+        AssertNear(new PclVector3(15, 25, 35), pt.Position);
+        Assert.NotNull(pt.Color);
+        Assert.Equal((byte)120, pt.Color.Value.R);
+        Assert.Equal((byte)180, pt.Color.Value.G);
+        Assert.Equal((byte)240, pt.Color.Value.B);
+        Assert.Equal((byte)3, pt.Classification);
+    }
+
+    [Fact]
+    public void Copc_FindNodes_And_ReadPoints_By_Bounds()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticCopc(
+            x: 10.0, y: 20.0, z: 30.0,
+            pointFormat: 2);
+
+        string path = dir.Write("test.copc.laz", bytes);
+        using var doc = CopcDocument.Open(path);
+
+        // Bounding box encompassing the root voxel
+        var queryBox = new PclBounds(new PclVector3(0, 0, 0), new PclVector3(50, 50, 50));
+        var matchingNodes = doc.FindNodes(queryBox);
+        Assert.Single(matchingNodes);
+
+        var pointsInBox = doc.ReadPoints(queryBox).ToList();
+        Assert.Single(pointsInBox);
+        AssertNear(new PclVector3(10, 20, 30), pointsInBox[0].Position);
+
+        // Bounding box outside the root voxel
+        var outsideBox = new PclBounds(new PclVector3(500, 500, 500), new PclVector3(600, 600, 600));
+        Assert.Empty(doc.FindNodes(outsideBox));
+        Assert.Empty(doc.ReadPoints(outsideBox));
+
+        // Read points directly from node
+        var nodePoints = doc.ReadPoints(doc.Nodes[0]).ToList();
+        Assert.Single(nodePoints);
+        AssertNear(new PclVector3(10, 20, 30), nodePoints[0].Position);
+    }
+
+    [Fact]
+    public void Copc_Subsample_And_MaxPoints_Honored()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticCopc(x: 10, y: 20, z: 30);
+        string path = dir.Write("test.copc.laz", bytes);
+        using var doc = CopcDocument.Open(path);
+
+        Assert.Empty(doc.ReadAllPoints(new PclReadOptions { MaxPoints = 0 }));
+        Assert.Single(doc.ReadAllPoints(new PclReadOptions { MaxPoints = 1 }));
+    }
+
+    [Fact]
+    public void Copc_Wrong_Content_Throws_InvalidDataException()
+    {
+        using var dir = new TempDirectory();
+        string path = dir.Write("corrupt.copc.laz", new byte[100]);
+        Assert.Throws<NotSupportedException>(() => PclFile.Open(path));
+        Assert.Throws<InvalidDataException>(() => CopcDocument.Open(path));
+    }
+
+    [Fact]
+    public void Copc_Rejects_Corrupt_Hierarchy_Offset_With_InvalidDataException()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticCopc(corruptHierarchyOffset: true);
+        string path = dir.Write("bad_offset.copc.laz", bytes);
+
+        Assert.Throws<InvalidDataException>(() => CopcDocument.Open(path));
+    }
+
+    [Fact]
+    public void Copc_Rejects_Cyclic_Hierarchy_With_InvalidDataException()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticCopc(cyclicHierarchy: true);
+        string path = dir.Write("cyclic.copc.laz", bytes);
+
+        Assert.Throws<InvalidDataException>(() => CopcDocument.Open(path));
+    }
+
+    [Fact]
+    public void Copc_Rejects_Corrupt_Vlr_Size_With_InvalidDataException()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticCopc(corruptVlrSize: true);
+        string path = dir.Write("bad_vlr.copc.laz", bytes);
+
+        Assert.Throws<InvalidDataException>(() => CopcDocument.Open(path));
+    }
+
+    [Fact]
+    public void Copc_Rejects_Truncated_Data_With_InvalidDataException()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticCopc(truncateData: true);
+        string path = dir.Write("truncated.copc.laz", bytes);
+
+        Assert.Throws<InvalidDataException>(() => CopcDocument.Open(path));
     }
 }

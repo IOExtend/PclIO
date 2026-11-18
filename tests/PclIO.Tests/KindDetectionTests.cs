@@ -72,6 +72,22 @@ public sealed class KindDetectionTests
         Assert.Equal(PclFileKind.Unknown, Detect(new byte[100], "sample.laz"));
 
     [Theory]
+    [InlineData("sample.copc.laz")]
+    [InlineData("SAMPLE.COPC.LAZ")]
+    [InlineData("sample.laz")]
+    [InlineData("sample.dat")]
+    public void Detects_Copc_By_Signature_And_Vlr(string name) =>
+        Assert.Equal(PclFileKind.Copc, Detect(SyntheticFixtures.CreateSyntheticCopc(), name));
+
+    [Fact]
+    public void Copc_Needs_The_Signature_And_Vlr_Not_Just_The_Extension() =>
+        Assert.Equal(PclFileKind.Unknown, Detect(new byte[100], "sample.copc.laz"));
+
+    [Fact]
+    public void Copc_With_Las_Content_And_Wrong_Extension_Returns_Unknown() =>
+        Assert.Equal(PclFileKind.Unknown, Detect(SyntheticFixtures.CreateSyntheticLas(), "sample.copc.laz"));
+
+    [Theory]
     [InlineData("sample.ply")]
     [InlineData("SAMPLE.PLY")]
     [InlineData("sample.dat")]

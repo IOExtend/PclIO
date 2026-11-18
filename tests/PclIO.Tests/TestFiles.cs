@@ -43,7 +43,9 @@ internal static class TestFiles
         foreach (string root in roots)
         {
             string? found = Directory.EnumerateFiles(root, "*" + extension, options)
-                .Where(f => string.Equals(Path.GetExtension(f), extension, StringComparison.OrdinalIgnoreCase))
+                .Where(f => string.Equals(extension, ".copc.laz", StringComparison.OrdinalIgnoreCase)
+                    ? f.EndsWith(".copc.laz", StringComparison.OrdinalIgnoreCase)
+                    : string.Equals(Path.GetExtension(f), extension, StringComparison.OrdinalIgnoreCase))
                 .Where(f => !string.Equals(extension, ".laz", StringComparison.OrdinalIgnoreCase) || !f.EndsWith(".copc.laz", StringComparison.OrdinalIgnoreCase))
                 .Order(StringComparer.Ordinal)
                 .FirstOrDefault();
