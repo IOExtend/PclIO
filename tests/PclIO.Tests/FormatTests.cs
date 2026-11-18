@@ -10,6 +10,7 @@ using PclIO.Formats.Ply;
 using PclIO.Formats.Pts;
 using PclIO.Formats.Ptx;
 using PclIO.Formats.Recap;
+using PclIO.Formats.Sbf;
 using PclIO.Formats.Xyz;
 using Xunit;
 
@@ -4209,6 +4210,386 @@ public sealed class FormatTests
         using var doc = PclFile.Open(path);
         Assert.Equal(PclFileKind.Xyz, doc.Kind);
         Assert.IsType<XyzDocument>(doc);
+        Assert.Equal(3, doc.ReadAllPoints().Count());
+    }
+
+    // ---- Simple Binary Format (SBF) --------------------------------------------------------------------------
+
+    [Fact]
+    public void Sbf_Document_Properties_And_Metadata()
+    {
+        using var dir = new TempDirectory();
+        var (hdr, data) = SyntheticFixtures.CreateSyntheticSbf();
+        string sbfPath = dir.Write("sample.sbf", hdr);
+        dir.Write("sample.sbf.data", data);
+
+        using var doc = SbfDocument.Open(sbfPath);
+        Assert.Equal(PclFileKind.Sbf, doc.Kind);
+        Assert.Equal(3, doc.TotalPoints);
+        Assert.Equal(1, doc.ScalarFieldCount);
+        Assert.Equal(["Intensity"], doc.ScalarFields);
+        Assert.True(doc.IsBigEndian);
+        Assert.Equal(PclVector3.Zero, doc.GlobalShift);
+        Assert.Equal(1.0, doc.GlobalScale);
+        Assert.Equal("Simple Binary (SBF)", doc.Metadata["Format"]);
+        Assert.Equal("BigEndian", doc.Metadata["Endianness"]);
+        Assert.Equal("sample.sbf", doc.Metadata["CompanionFile"]);
+
+        var scan = Assert.Single(doc.Scans);
+        Assert.Equal("0", scan.Id);
+        Assert.Equal("sample", scan.Name);
+        Assert.Equal(3, scan.PointCount);
+        Assert.True(scan.HasIntensities);
+        Assert.False(scan.HasColors);
+        Assert.False(scan.HasNormals);
+
+        var points = scan.ReadPoints().ToList();
+        Assert.Equal(3, points.Count);
+        Assert.Equal(1.0, points[0].X, 4);
+        Assert.Equal(2.0, points[0].Y, 4);
+        Assert.Equal(3.0, points[0].Z, 4);
+        Assert.Equal(100.0f, points[0].Intensity);
+    }
+
+    [Fact]
+    public void Sbf_Opens_From_Data_Path_Directly()
+    {
+        using var dir = new TempDirectory();
+        var (hdr, data) = SyntheticFixtures.CreateSyntheticSbf();
+        dir.Write("sample.sbf", hdr);
+        string dataPath = dir.Write("sample.sbf.data", data);
+
+        using var doc = SbfDocument.Open(dataPath);
+        Assert.Equal(PclFileKind.Sbf, doc.Kind);
+        Assert.Equal(3, doc.TotalPoints);
+        Assert.Equal(1, doc.ScalarFieldCount);
+
+        var points = doc.ReadAllPoints().ToList();
+        Assert.Equal(3, points.Count);
+        Assert.Equal(100.0f, points[0].Intensity);
+    }
+
+    [Fact]
+    public void Sbf_Opens_Standalone_Data_Without_Companion()
+    {
+        using var dir = new TempDirectory();
+        var (_, data) = SyntheticFixtures.CreateSyntheticSbf();
+        string dataPath = dir.Write("standalone.sbf.data", data);
+
+        using var doc = SbfDocument.Open(dataPath);
+        Assert.Equal(PclFileKind.Sbf, doc.Kind);
+        Assert.Equal(3, doc.TotalPoints);
+        Assert.Equal(1, doc.ScalarFieldCount);
+        Assert.Null(doc.CompanionPath);
+
+        var points = doc.ReadAllPoints().ToList();
+        Assert.Equal(3, points.Count);
+        Assert.Equal(1.0, points[0].X, 4);
+    }
+
+    [Fact]
+    public void Sbf_ScalarFields_Mapped_To_Color()
+    {
+        using var dir = new TempDirectory();
+        var pts = new[]
+        {
+            new SyntheticFixtures.SbfSamplePoint(1, 2, 3, [255f, 128f, 64f]),
+            new SyntheticFixtures.SbfSamplePoint(4, 5, 6, [0f, 255f, 0f]),
+        };
+        var (hdr, data) = SyntheticFixtures.CreateSyntheticSbf(pts, sfNames: ["Red", "Green", "Blue"]);
+        string sbfPath = dir.Write("color.sbf", hdr);
+        dir.Write("color.sbf.data", data);
+
+        using var doc = SbfDocument.Open(sbfPath);
+        var scan = Assert.Single(doc.Scans);
+        Assert.True(scan.HasColors);
+        Assert.False(scan.HasIntensities);
+        Assert.False(scan.HasNormals);
+
+        var points = scan.ReadPoints().ToList();
+        Assert.Equal(2, points.Count);
+        Assert.Equal(new PclColor(255, 128, 64), points[0].Color);
+        Assert.Equal(new PclColor(0, 255, 0), points[1].Color);
+    }
+
+    [Fact]
+    public void Sbf_ScalarFields_Mapped_To_Normals()
+    {
+        using var dir = new TempDirectory();
+        var pts = new[]
+        {
+            new SyntheticFixtures.SbfSamplePoint(1, 2, 3, [0f, 0f, 1f]),
+            new SyntheticFixtures.SbfSamplePoint(4, 5, 6, [1f, 0f, 0f]),
+        };
+        var (hdr, data) = SyntheticFixtures.CreateSyntheticSbf(pts, sfNames: ["Nx", "Ny", "Nz"]);
+        string sbfPath = dir.Write("normals.sbf", hdr);
+        dir.Write("normals.sbf.data", data);
+
+        using var doc = SbfDocument.Open(sbfPath);
+        var scan = Assert.Single(doc.Scans);
+        Assert.False(scan.HasColors);
+        Assert.False(scan.HasIntensities);
+        Assert.True(scan.HasNormals);
+
+        var points = scan.ReadPoints().ToList();
+        Assert.Equal(2, points.Count);
+        AssertNear(new PclVector3(0, 0, 1), points[0].Normal!.Value);
+        AssertNear(new PclVector3(1, 0, 0), points[1].Normal!.Value);
+    }
+
+    [Fact]
+    public void Sbf_ScalarFields_Mapped_To_Intensity_Color_And_Normals()
+    {
+        using var dir = new TempDirectory();
+        var pts = new[]
+        {
+            new SyntheticFixtures.SbfSamplePoint(1, 2, 3, [42.5f, 255f, 0f, 128f, 0f, 1f, 0f]),
+        };
+        var sfNames = new[] { "Intensity", "Red", "Green", "Blue", "Nx", "Ny", "Nz" };
+        var (hdr, data) = SyntheticFixtures.CreateSyntheticSbf(pts, sfNames);
+        string sbfPath = dir.Write("all.sbf", hdr);
+        dir.Write("all.sbf.data", data);
+
+        using var doc = SbfDocument.Open(sbfPath);
+        var scan = Assert.Single(doc.Scans);
+        Assert.True(scan.HasIntensities);
+        Assert.True(scan.HasColors);
+        Assert.True(scan.HasNormals);
+
+        var points = scan.ReadPoints().ToList();
+        var pt = Assert.Single(points);
+        Assert.Equal(42.5f, pt.Intensity);
+        Assert.Equal(new PclColor(255, 0, 128), pt.Color);
+        AssertNear(new PclVector3(0, 1, 0), pt.Normal!.Value);
+    }
+
+    [Fact]
+    public void Sbf_GlobalShift_And_GlobalScale_Transform()
+    {
+        using var dir = new TempDirectory();
+        var pts = new[]
+        {
+            new SyntheticFixtures.SbfSamplePoint(2, 4, 6, [10f]),
+        };
+        var shift = new PclVector3(100.0, 200.0, 300.0);
+        var (hdr, data) = SyntheticFixtures.CreateSyntheticSbf(pts, globalShift: shift, globalScale: 2.0);
+        string sbfPath = dir.Write("shift.sbf", hdr);
+        dir.Write("shift.sbf.data", data);
+
+        using var doc = SbfDocument.Open(sbfPath);
+        var scan = Assert.Single(doc.Scans);
+
+        // With ApplyTransform: local point is scaled by 1/2.0 then shifted by -100, -200, -300
+        var transformed = scan.ReadPoints(new PclReadOptions { ApplyTransform = true }).ToList();
+        var ptT = Assert.Single(transformed);
+        Assert.Equal(2.0 / 2.0 - 100.0, ptT.X, 4);
+        Assert.Equal(4.0 / 2.0 - 200.0, ptT.Y, 4);
+        Assert.Equal(6.0 / 2.0 - 300.0, ptT.Z, 4);
+
+        // Without ApplyTransform: coordinates as stored
+        var raw = scan.ReadPoints(new PclReadOptions { ApplyTransform = false }).ToList();
+        var ptR = Assert.Single(raw);
+        Assert.Equal(2.0, ptR.X, 4);
+        Assert.Equal(4.0, ptR.Y, 4);
+        Assert.Equal(6.0, ptR.Z, 4);
+    }
+
+    [Fact]
+    public void Sbf_LittleEndian_Support()
+    {
+        using var dir = new TempDirectory();
+        var (hdr, data) = SyntheticFixtures.CreateSyntheticSbf(isBigEndian: false);
+        string sbfPath = dir.Write("le.sbf", hdr);
+        dir.Write("le.sbf.data", data);
+
+        using var doc = SbfDocument.Open(sbfPath);
+        Assert.False(doc.IsBigEndian);
+        Assert.Equal("LittleEndian", doc.Metadata["Endianness"]);
+
+        var points = doc.ReadAllPoints().ToList();
+        Assert.Equal(3, points.Count);
+        Assert.Equal(1.0, points[0].X, 4);
+        Assert.Equal(2.0, points[0].Y, 4);
+        Assert.Equal(3.0, points[0].Z, 4);
+        Assert.Equal(100.0f, points[0].Intensity);
+    }
+
+    [Fact]
+    public void Sbf_Options_MaxPoints_And_SubsampleStep()
+    {
+        using var dir = new TempDirectory();
+        var pts = new[]
+        {
+            new SyntheticFixtures.SbfSamplePoint(1, 1, 1),
+            new SyntheticFixtures.SbfSamplePoint(2, 2, 2),
+            new SyntheticFixtures.SbfSamplePoint(3, 3, 3),
+            new SyntheticFixtures.SbfSamplePoint(4, 4, 4),
+            new SyntheticFixtures.SbfSamplePoint(5, 5, 5),
+        };
+        var (hdr, data) = SyntheticFixtures.CreateSyntheticSbf(pts);
+        string sbfPath = dir.Write("sub.sbf", hdr);
+        dir.Write("sub.sbf.data", data);
+
+        using var doc = SbfDocument.Open(sbfPath);
+
+        // MaxPoints
+        var limited = doc.ReadAllPoints(new PclReadOptions { MaxPoints = 2 }).ToList();
+        Assert.Equal(2, limited.Count);
+        Assert.Equal(1.0, limited[0].X, 4);
+        Assert.Equal(2.0, limited[1].X, 4);
+
+        // SubsampleStep
+        var stepped = doc.ReadAllPoints(new PclReadOptions { SubsampleStep = 2 }).ToList();
+        Assert.Equal(3, stepped.Count);
+        Assert.Equal(1.0, stepped[0].X, 4);
+        Assert.Equal(3.0, stepped[1].X, 4);
+        Assert.Equal(5.0, stepped[2].X, 4);
+    }
+
+    [Fact]
+    public void Sbf_Skips_NonFinite_Coordinates()
+    {
+        using var dir = new TempDirectory();
+        var pts = new[]
+        {
+            new SyntheticFixtures.SbfSamplePoint(1, 2, 3),
+            new SyntheticFixtures.SbfSamplePoint(double.NaN, 5, 6),
+            new SyntheticFixtures.SbfSamplePoint(7, double.PositiveInfinity, 9),
+            new SyntheticFixtures.SbfSamplePoint(10, 11, 12),
+        };
+        var (hdr, data) = SyntheticFixtures.CreateSyntheticSbf(pts);
+        string sbfPath = dir.Write("nan.sbf", hdr);
+        dir.Write("nan.sbf.data", data);
+
+        using var doc = SbfDocument.Open(sbfPath);
+        var points = doc.ReadAllPoints().ToList();
+        Assert.Equal(2, points.Count);
+        Assert.Equal(1.0, points[0].X, 4);
+        Assert.Equal(10.0, points[1].X, 4);
+    }
+
+    [Fact]
+    public void Sbf_Rejects_Missing_Companion_Data()
+    {
+        using var dir = new TempDirectory();
+        var (hdr, _) = SyntheticFixtures.CreateSyntheticSbf();
+        string sbfPath = dir.Write("nodata.sbf", hdr);
+
+        Assert.Throws<FileNotFoundException>(() => SbfDocument.Open(sbfPath));
+    }
+
+    [Fact]
+    public void Sbf_Rejects_Bad_Magic()
+    {
+        using var dir = new TempDirectory();
+        var (hdr, data) = SyntheticFixtures.CreateSyntheticSbf();
+        data[0] = 0x00;
+        data[1] = 0x00;
+        string sbfPath = dir.Write("badmagic.sbf", hdr);
+        dir.Write("badmagic.sbf.data", data);
+
+        Assert.Throws<InvalidDataException>(() => SbfDocument.Open(sbfPath));
+    }
+
+    [Fact]
+    public void Sbf_Rejects_Truncated_Binary_Header()
+    {
+        using var dir = new TempDirectory();
+        var (hdr, _) = SyntheticFixtures.CreateSyntheticSbf();
+        string sbfPath = dir.Write("trunc_hdr.sbf", hdr);
+        dir.Write("trunc_hdr.sbf.data", new byte[32]);
+
+        Assert.Throws<InvalidDataException>(() => SbfDocument.Open(sbfPath));
+    }
+
+    [Fact]
+    public void Sbf_Rejects_Truncated_Data_Points()
+    {
+        using var dir = new TempDirectory();
+        var (hdr, data) = SyntheticFixtures.CreateSyntheticSbf();
+        // Truncate last few bytes
+        byte[] trunc = data[..^8];
+        string sbfPath = dir.Write("trunc_pts.sbf", hdr);
+        dir.Write("trunc_pts.sbf.data", trunc);
+
+        Assert.Throws<InvalidDataException>(() => SbfDocument.Open(sbfPath));
+    }
+
+    [Fact]
+    public void Sbf_Rejects_Oversized_File_Length()
+    {
+        using var dir = new TempDirectory();
+        var (hdr, data) = SyntheticFixtures.CreateSyntheticSbf();
+        // Append extra garbage bytes
+        byte[] oversized = new byte[data.Length + 10];
+        Array.Copy(data, oversized, data.Length);
+        string sbfPath = dir.Write("oversized.sbf", hdr);
+        dir.Write("oversized.sbf.data", oversized);
+
+        Assert.Throws<InvalidDataException>(() => SbfDocument.Open(sbfPath));
+    }
+
+    [Fact]
+    public void Sbf_Rejects_Mismatched_Companion_Points()
+    {
+        using var dir = new TempDirectory();
+        var (_, data) = SyntheticFixtures.CreateSyntheticSbf();
+        string badHdr = "[SBF]\nPoints=999\nSFCount=1\nSF1=Intensity\n";
+        string sbfPath = dir.WriteText("mismatch_pts.sbf", badHdr);
+        dir.Write("mismatch_pts.sbf.data", data);
+
+        Assert.Throws<InvalidDataException>(() => SbfDocument.Open(sbfPath));
+    }
+
+    [Fact]
+    public void Sbf_Rejects_Mismatched_Companion_SFCount()
+    {
+        using var dir = new TempDirectory();
+        var (_, data) = SyntheticFixtures.CreateSyntheticSbf();
+        string badHdr = "[SBF]\nPoints=3\nSFCount=5\nSF1=Intensity\n";
+        string sbfPath = dir.WriteText("mismatch_sf.sbf", badHdr);
+        dir.Write("mismatch_sf.sbf.data", data);
+
+        Assert.Throws<InvalidDataException>(() => SbfDocument.Open(sbfPath));
+    }
+
+    [Fact]
+    public void Sbf_Rejects_Invalid_Companion_Header()
+    {
+        using var dir = new TempDirectory();
+        var (_, data) = SyntheticFixtures.CreateSyntheticSbf();
+        string badHdr = "NOT SBF SECTION\nPoints=3\n";
+        string sbfPath = dir.WriteText("bad_header.sbf", badHdr);
+        dir.Write("bad_header.sbf.data", data);
+
+        Assert.Throws<InvalidDataException>(() => SbfDocument.Open(sbfPath));
+    }
+
+    [Fact]
+    public void Sbf_Rejects_Excessive_Scalar_Fields()
+    {
+        using var dir = new TempDirectory();
+        byte[] data = new byte[64];
+        data[0] = 0x2A;
+        data[1] = 0x2A;
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt64BigEndian(data.AsSpan(2, 8), 0);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt16BigEndian(data.AsSpan(10, 2), 2000);
+        string dataPath = dir.Write("excessive.sbf.data", data);
+
+        Assert.Throws<NotSupportedException>(() => SbfDocument.Open(dataPath));
+    }
+
+    [Fact]
+    public void Sbf_Opens_Via_PclFile_Open()
+    {
+        using var dir = new TempDirectory();
+        var (hdr, data) = SyntheticFixtures.CreateSyntheticSbf();
+        string sbfPath = dir.Write("sample.sbf", hdr);
+        dir.Write("sample.sbf.data", data);
+
+        using var doc = PclFile.Open(sbfPath);
+        Assert.Equal(PclFileKind.Sbf, doc.Kind);
+        Assert.IsType<SbfDocument>(doc);
         Assert.Equal(3, doc.ReadAllPoints().Count());
     }
 }

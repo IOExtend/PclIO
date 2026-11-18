@@ -1412,4 +1412,92 @@ internal static class SyntheticFixtures
 
         return System.Text.Encoding.UTF8.GetBytes(sb.ToString());
     }
+
+    public readonly record struct SbfSamplePoint(
+        double X,
+        double Y,
+        double Z,
+        float[]? ScalarFields = null);
+
+    public static IReadOnlyList<SbfSamplePoint> DefaultSbfPoints =>
+    [
+        new(1.0, 2.0, 3.0, [100.0f]),
+        new(-4.5, 5.25, 6.125, [250.0f]),
+        new(7.0, 8.0, 9.0, [50.0f]),
+    ];
+
+    /// <summary>Creates a synthetic SBF file pair: a companion header text file (.sbf) and binary data (.sbf.data).</summary>
+    public static (byte[] HeaderBytes, byte[] DataBytes) CreateSyntheticSbf(
+        IReadOnlyList<SbfSamplePoint>? points = null,
+        IReadOnlyList<string>? sfNames = null,
+        PclVector3? globalShift = null,
+        double globalScale = 1.0,
+        bool isBigEndian = true,
+        string? customHeaderText = null)
+    {
+        points ??= DefaultSbfPoints;
+        sfNames ??= ["Intensity"];
+        var shift = globalShift ?? PclVector3.Zero;
+
+        // Build header text
+        string headerStr = customHeaderText ?? string.Create(CultureInfo.InvariantCulture, $"""
+            [SBF]
+            Points={points.Count}
+            GlobalShift={shift.X:F6}, {shift.Y:F6}, {shift.Z:F6}
+            GlobalScale={globalScale:F6}
+            SFCount={sfNames.Count}
+            {string.Join("\n", sfNames.Select((name, idx) => $"SF{idx + 1}={name}"))}
+            """);
+        byte[] headerBytes = System.Text.Encoding.UTF8.GetBytes(headerStr);
+
+        // Build binary data (64-byte header + point records)
+        int sfCount = sfNames.Count;
+        int recSize = 12 + 4 * sfCount;
+        byte[] dataBytes = new byte[64 + points.Count * recSize];
+
+        dataBytes[0] = 0x2A;
+        dataBytes[1] = 0x2A;
+
+        if (isBigEndian)
+        {
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt64BigEndian(dataBytes.AsSpan(2, 8), (ulong)points.Count);
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt16BigEndian(dataBytes.AsSpan(10, 2), (ushort)sfCount);
+        }
+        else
+        {
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(dataBytes.AsSpan(2, 8), (ulong)points.Count);
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(dataBytes.AsSpan(10, 2), (ushort)sfCount);
+        }
+
+        for (int i = 0; i < points.Count; i++)
+        {
+            int offset = 64 + i * recSize;
+            var pt = points[i];
+
+            if (isBigEndian)
+            {
+                System.Buffers.Binary.BinaryPrimitives.WriteSingleBigEndian(dataBytes.AsSpan(offset, 4), (float)pt.X);
+                System.Buffers.Binary.BinaryPrimitives.WriteSingleBigEndian(dataBytes.AsSpan(offset + 4, 4), (float)pt.Y);
+                System.Buffers.Binary.BinaryPrimitives.WriteSingleBigEndian(dataBytes.AsSpan(offset + 8, 4), (float)pt.Z);
+            }
+            else
+            {
+                System.Buffers.Binary.BinaryPrimitives.WriteSingleLittleEndian(dataBytes.AsSpan(offset, 4), (float)pt.X);
+                System.Buffers.Binary.BinaryPrimitives.WriteSingleLittleEndian(dataBytes.AsSpan(offset + 4, 4), (float)pt.Y);
+                System.Buffers.Binary.BinaryPrimitives.WriteSingleLittleEndian(dataBytes.AsSpan(offset + 8, 4), (float)pt.Z);
+            }
+
+            for (int s = 0; s < sfCount; s++)
+            {
+                float sfVal = (pt.ScalarFields != null && s < pt.ScalarFields.Length) ? pt.ScalarFields[s] : 0f;
+                int sfOffset = offset + 12 + s * 4;
+                if (isBigEndian)
+                    System.Buffers.Binary.BinaryPrimitives.WriteSingleBigEndian(dataBytes.AsSpan(sfOffset, 4), sfVal);
+                else
+                    System.Buffers.Binary.BinaryPrimitives.WriteSingleLittleEndian(dataBytes.AsSpan(sfOffset, 4), sfVal);
+            }
+        }
+
+        return (headerBytes, dataBytes);
+    }
 }
