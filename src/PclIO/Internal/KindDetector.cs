@@ -57,7 +57,9 @@ internal static class KindDetector
         if (!File.Exists(path))
             throw new FileNotFoundException($"Point cloud file not found: {path}", path);
 
-        string ext = Path.GetExtension(path).ToLowerInvariant();
+        string ext = path.EndsWith(".copc.laz", StringComparison.OrdinalIgnoreCase)
+            ? ".copc.laz"
+            : Path.GetExtension(path).ToLowerInvariant();
         if (ext == ".bin")
         {
             string? dir = Path.GetDirectoryName(Path.GetFullPath(path));
@@ -79,9 +81,14 @@ internal static class KindDetector
     {
         if (!string.IsNullOrEmpty(extension))
         {
-            if (extension.Contains('/') || extension.Contains('\\') || (extension.Contains('.') && !extension.StartsWith('.')))
-                extension = Path.GetExtension(extension);
-            extension = extension.ToLowerInvariant();
+            if (extension.EndsWith(".copc.laz", StringComparison.OrdinalIgnoreCase))
+                extension = ".copc.laz";
+            else
+            {
+                if (extension.Contains('/') || extension.Contains('\\') || (extension.Contains('.') && !extension.StartsWith('.')))
+                    extension = Path.GetExtension(extension);
+                extension = extension.ToLowerInvariant();
+            }
         }
 
         if (!stream.CanSeek)
@@ -123,9 +130,15 @@ internal static class KindDetector
         if (head.StartsWith(EdgeWiseTextMagic) || head.StartsWith(EdgeWiseTreeMagic))
             return PclFileKind.EdgeWise;
 
-        // LAS and LAZ files share the LASF signature; .laz files with valid LAZ headers are Laz, others Las.
+        // LAS, LAZ and COPC files share the LASF signature; COPC files declare a copc VLR; .laz with valid LAZ headers are Laz, others Las.
         if (head.StartsWith(LasMagic))
         {
+            if (IsCopcHeader(stream, origin))
+                return PclFileKind.Copc;
+
+            if (extension == ".copc.laz")
+                return PclFileKind.Unknown;
+
             if (extension == ".laz")
                 return IsLazHeader(stream, origin) ? PclFileKind.Laz : PclFileKind.Unknown;
             return PclFileKind.Las;
@@ -176,6 +189,58 @@ internal static class KindDetector
             return PclFileKind.Potree;
 
         return PclFileKind.Unknown;
+    }
+
+    // True when a LAS 1.4 stream contains a COPC info VLR (user "copc", record 1, length 160).
+    private static bool IsCopcHeader(Stream stream, long origin)
+    {
+        try
+        {
+            if (stream.Length - origin < 375) return false;
+            stream.Position = origin;
+            Span<byte> header = stackalloc byte[375];
+            stream.ReadExactly(header);
+
+            if (!header[..4].SequenceEqual(LasMagic)) return false;
+            int major = header[24];
+            int minor = header[25];
+            if (major != 1 || minor < 4) return false;
+
+            ushort headerSize = Bytes.ReadUInt16LE(header.Slice(94, 2));
+            uint pointDataOffset = Bytes.ReadUInt32LE(header.Slice(96, 4));
+            uint vlrCount = Bytes.ReadUInt32LE(header.Slice(100, 4));
+
+            if (headerSize < 375 || headerSize > pointDataOffset || pointDataOffset > stream.Length) return false;
+            if (vlrCount is 0 or > 4096) return false;
+
+            stream.Position = origin + headerSize;
+            long pos = origin + headerSize;
+            byte[] vlrHeader = new byte[54];
+            for (uint i = 0; i < vlrCount && i < 64; i++)
+            {
+                if (pos + 54 > origin + pointDataOffset) break;
+                stream.ReadExactly(vlrHeader);
+                pos += 54;
+                string userId = System.Text.Encoding.ASCII.GetString(vlrHeader.AsSpan(2, 16)).TrimEnd('\0');
+                ushort recordId = Bytes.ReadUInt16LE(vlrHeader.AsSpan(18, 2));
+                ushort dataLen = Bytes.ReadUInt16LE(vlrHeader.AsSpan(20, 2));
+                if (userId.Equals("copc", StringComparison.Ordinal) && recordId == 1 && dataLen == 160)
+                    return true;
+                pos += dataLen;
+                if (pos > origin + pointDataOffset) break;
+                stream.Position = pos;
+            }
+
+            return false;
+        }
+        catch
+        {
+            return false;
+        }
+        finally
+        {
+            stream.Position = origin;
+        }
     }
 
     // True when a LAS stream contains compressed point records (LAZ): point format flag or LASzip VLR (22204).

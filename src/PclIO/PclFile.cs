@@ -1,3 +1,4 @@
+using PclIO.Formats.Copc;
 using PclIO.Formats.E57;
 using PclIO.Formats.EdgeWise;
 using PclIO.Formats.Faro;
@@ -68,6 +69,7 @@ public static class PclFile
             PclFileKind.Tiles3d => Tiles3dDocument.Open(path, options),
             PclFileKind.Potree => PotreeDocument.Open(path, options),
             PclFileKind.Laz => LazDocument.Open(path, options),
+            PclFileKind.Copc => CopcDocument.Open(path, options),
             _ => throw new NotSupportedException($"Unsupported or unrecognized point cloud file: '{path}'"),
         };
     }
