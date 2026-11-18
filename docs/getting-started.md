@@ -99,9 +99,10 @@ file that exceeds a limit is rejected with `InvalidDataException`, with the exce
 ## Limitations
 
 - The API can change before 1.0.
-- Some readers drop points that fail a plausibility rule without a warning: FARO cells outside 0.1 m to 350 m, PinPoint points with a
-  non-finite coordinate or a coordinate beyond 5000 in the file's own unit, and Leica padding entries. A scan can therefore yield fewer
-  points than `PointCount`. The rules and the limits on file sizes and counts are listed in the repository README.
+- Some readers drop points that fail a plausibility rule: FARO cells outside 0.1 m to 350 m, PinPoint points with a
+  non-finite coordinate or a coordinate beyond `PclReadOptions.MaxCoordinateMagnitude` in the file's own unit (5000 by default),
+  and Leica padding entries. A scan can therefore yield fewer points than `PointCount`. The rules and the limits on file sizes
+  and counts are listed in the repository README.
 - `SubsampleStep` is applied inside each format's internal blocks, so the spacing is approximate; `MaxPoints` limits one read call.
 - LAS and PTS export read the source twice; memory does not depend on the number of points. A point without intensity is written with full
   intensity and a point without colour as white. LAS uses a 1 mm scale, so the extent of each axis must not exceed about 2147 km.

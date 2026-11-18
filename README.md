@@ -87,8 +87,10 @@ These readers drop data without an error or a warning, so a scan can yield fewer
   scan is the number of the cells that are read, so it matches what a full read returns. A scan folder whose data stream does
   not hold a whole number of samples for the grid is read with the assumed layout of eight bytes per sample, and a warning
   says so.
-- PinPoint: a point with a NaN or infinite coordinate, or a coordinate whose magnitude exceeds 5000 in the file's own unit, is not
-  returned. This is a plausibility rule of the reader, so coordinates in a projected system with large offsets are dropped. A
+- PinPoint: a point with a NaN or infinite coordinate is never returned, and neither is a point with a coordinate whose
+  magnitude exceeds `PclReadOptions.MaxCoordinateMagnitude` in the file's own unit (5000 by default, null for no limit).
+  This is a plausibility rule of the reader, so coordinates in a projected system with large offsets are dropped by default.
+  A full read reports how many points it dropped in the warnings of the document, and fails instead with `PclReadOptions.Strict`. A
   data file in neither layout, or in the sectioned layout with an element type or header value the reader does not support, cannot
   be read: the project lists it with a warning and reading its points throws `NotSupportedException`. A compressed stream whose
   copies reach back more than 1 MiB is not decoded either: reading its points throws `NotSupportedException`, without an earlier warning.

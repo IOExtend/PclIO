@@ -13,8 +13,11 @@ public sealed class OptionsAndPathTests
         var options = new PclReadOptions();
 
         Assert.Null(options.MaxPoints);
+        Assert.Equal(5000.0, options.MaxCoordinateMagnitude);
         Assert.Equal(1, options.SubsampleStep);
         Assert.True(options.ApplyTransform);
+        Assert.False(options.Strict);
+        Assert.False(options.ExcludeFilteredPoints);
         Assert.Equal(options, PclReadOptions.Default);
     }
 
@@ -43,6 +46,23 @@ public sealed class OptionsAndPathTests
     {
         Assert.Equal(1, new PclReadOptions { SubsampleStep = 1 }.SubsampleStep);
         Assert.Equal(int.MaxValue, new PclReadOptions { SubsampleStep = int.MaxValue }.SubsampleStep);
+    }
+
+    [Theory]
+    [InlineData(-1.0)]
+    [InlineData(double.MinValue)]
+    [InlineData(double.NaN)]
+    [InlineData(double.PositiveInfinity)]
+    [InlineData(double.NegativeInfinity)]
+    public void A_Negative_Or_Non_Finite_Magnitude_Limit_Is_Rejected(double value) =>
+        Assert.Throws<ArgumentOutOfRangeException>(() => new PclReadOptions { MaxCoordinateMagnitude = value });
+
+    [Fact]
+    public void A_Magnitude_Limit_Of_Zero_Or_More_Is_Accepted()
+    {
+        Assert.Equal(0, new PclReadOptions { MaxCoordinateMagnitude = 0 }.MaxCoordinateMagnitude);
+        Assert.Null(new PclReadOptions { MaxCoordinateMagnitude = null }.MaxCoordinateMagnitude);
+        Assert.Equal(1e9, new PclReadOptions { MaxCoordinateMagnitude = 1e9 }.MaxCoordinateMagnitude);
     }
 
     [Fact]

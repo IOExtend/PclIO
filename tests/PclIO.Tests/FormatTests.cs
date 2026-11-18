@@ -1028,6 +1028,65 @@ public sealed class FormatTests
         Assert.Equal(new PclVector3(1, 2, 3), point.Position);
     }
 
+    [Fact]
+    public void PinPoint_Magnitude_Limit_Can_Be_Raised_Or_Switched_Off()
+    {
+        using var dir = new TempDirectory();
+        byte[] bin = SyntheticFixtures.CreateSyntheticPinPointBin([(1, 2, 3), (1e9f, 0, 0), (float.NaN, 0, 0)]);
+        using var doc = PinPointDocument.Open(SyntheticFixtures.WritePinPointProject(dir, bin));
+
+        // A raised limit keeps the large coordinate; a missing limit keeps it too, but never the NaN.
+        var raised = doc.Scans[0].ReadPoints(new PclReadOptions { ApplyTransform = false, MaxCoordinateMagnitude = 2e9 }).ToList();
+        Assert.Equal(2, raised.Count);
+        Assert.Equal(new PclVector3(1e9f, 0, 0), raised[1].Position);
+
+        var unlimited = doc.Scans[0].ReadPoints(new PclReadOptions { ApplyTransform = false, MaxCoordinateMagnitude = null }).ToList();
+        Assert.Equal(2, unlimited.Count);
+    }
+
+    [Fact]
+    public void PinPoint_Dropped_Points_Are_Reported_With_A_Count()
+    {
+        using var dir = new TempDirectory();
+        byte[] bin = SyntheticFixtures.CreateSyntheticPinPointBin([(1, 2, 3), (1e9f, 0, 0), (float.NaN, 0, 0)]);
+        using var doc = PinPointDocument.Open(SyntheticFixtures.WritePinPointProject(dir, bin));
+
+        Assert.Single(doc.Scans[0].ReadPoints(NoTransform));
+        Assert.Contains(doc.Warnings, w => w.Contains("dropped 2 points", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void PinPoint_Dropped_Points_Fail_In_Strict_Mode()
+    {
+        using var dir = new TempDirectory();
+        byte[] bin = SyntheticFixtures.CreateSyntheticPinPointBin([(1, 2, 3), (1e9f, 0, 0)]);
+        using var doc = PinPointDocument.Open(SyntheticFixtures.WritePinPointProject(dir, bin));
+
+        Assert.Throws<InvalidDataException>(() => doc.Scans[0].ReadPoints(new PclReadOptions { Strict = true }).ToList());
+    }
+
+    [Fact]
+    public void PinPoint_A_Read_Stopped_By_MaxPoints_Reports_Nothing()
+    {
+        // The cap stops the read after a part of the point data; the counts of that part say nothing about the
+        // rest, so neither the warning nor the strict failure fires.
+        using var dir = new TempDirectory();
+        byte[] bin = SyntheticFixtures.CreateSyntheticPinPointBin([(float.NaN, 0, 0), (1, 2, 3), (1e9f, 0, 0)]);
+        using var doc = PinPointDocument.Open(SyntheticFixtures.WritePinPointProject(dir, bin));
+
+        var scan = doc.Scans[0];
+        var capped = new PclReadOptions { ApplyTransform = false, MaxPoints = 1 };
+        var point = Assert.Single(scan.ReadPoints(capped));
+        Assert.Equal(new PclVector3(1, 2, 3), point.Position);
+        Assert.DoesNotContain(doc.Warnings, w => w.Contains("dropped", StringComparison.Ordinal));
+
+        Assert.Single(scan.ReadPoints(capped with { Strict = true }));
+        Assert.DoesNotContain(doc.Warnings, w => w.Contains("dropped", StringComparison.Ordinal));
+
+        // A full read of the same data still reports the drops.
+        Assert.Throws<InvalidDataException>(() => scan.ReadPoints(new PclReadOptions { ApplyTransform = false, Strict = true }).ToList());
+    }
+
     // ---- EdgeWise --------------------------------------------------------------------------------------------
 
     private static readonly C3Cluster[] Clusters =
