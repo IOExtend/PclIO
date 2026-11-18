@@ -90,7 +90,7 @@ public sealed class FaroFlsDocument : PclDocument
         _scans.Add(new FaroScan(
             id: ScannerSerialNumber,
             name: Path.GetFileNameWithoutExtension(path),
-            pointCount: pointCount,
+            gridSize: pointCount,
             rows: g.Rows,
             cols: g.Cols,
             rowStart: g.RowStart,
@@ -272,14 +272,23 @@ public sealed class FaroScan : PclScan
     private readonly bool _hasColors;
     private readonly bool _hasIntensities;
 
+    private readonly Lazy<long> _validReturns;
+
     /// <inheritdoc />
     public override string Id { get; }
 
     /// <inheritdoc />
     public override string Name { get; }
 
-    /// <summary>Declared grid size (limited by the available data for folder scans), not the count of valid returns.</summary>
-    public override long PointCount { get; }
+    /// <summary>
+    /// Number of points that a full read returns: the cells of the grid with a valid return. The count is made on
+    /// the first access, which reads the distance data of the scan.
+    /// </summary>
+    /// <exception cref="InvalidDataException">The data of the scan is missing or damaged.</exception>
+    public override long PointCount => _validReturns.Value;
+
+    /// <summary>Number of cells of the scan grid, also the number of samples the file holds.</summary>
+    public long GridSize { get; }
 
     /// <inheritdoc />
     public override bool HasIntensities => _hasIntensities;
@@ -290,7 +299,7 @@ public sealed class FaroScan : PclScan
     internal FaroScan(
         string id,
         string name,
-        long pointCount,
+        long gridSize,
         int rows,
         int cols,
         double rowStart,
@@ -307,7 +316,7 @@ public sealed class FaroScan : PclScan
 
         Id = id;
         Name = name;
-        PointCount = pointCount;
+        GridSize = gridSize;
         _rows = rows;
         _cols = cols;
         _rowStart = rowStart;
@@ -318,6 +327,10 @@ public sealed class FaroScan : PclScan
         _ole2Path = ole2Path;
         _hasColors = hasColors;
         _hasIntensities = hasIntensities;
+
+        // The count is made once even when several threads reach it at the same time, and the value is published
+        // whole, so a concurrent first access cannot observe a partial count.
+        _validReturns = new Lazy<long>(CountValidReturns);
     }
 
     /// <summary>Streams the valid returns of the scan.</summary>
@@ -331,6 +344,71 @@ public sealed class FaroScan : PclScan
     {
         options ??= PclReadOptions.Default;
         return _isOle2 ? ReadContainerPoints(options) : ReadFolderPoints(options);
+    }
+
+    // Counts the cells of the grid with a valid return; these are the points that a full read returns.
+    private long CountValidReturns()
+    {
+        long count = _isOle2 ? CountContainerReturns() : CountFolderReturns();
+        return count;
+    }
+
+    private long CountContainerReturns()
+    {
+        string path = _ole2Path ?? throw new InvalidOperationException("Container path is not set.");
+        long fileLength = new FileInfo(path).Length;
+
+        using var storage = Ole2Storage.Open(path);
+        using var dist = Plane.Open(storage, "Dist0", 2, GridSize, fileLength)
+            ?? throw FormatError.Corrupted("distance stream not found");
+
+        long count = 0;
+        byte[] cell = new byte[2];
+        for (long idx = 0; idx < GridSize; idx++)
+        {
+            // A distance plane shorter than the grid ends the scan early.
+            if (!dist.TryRead(idx, cell)) break;
+            if (IsValidDistance(cell)) count++;
+        }
+
+        return count;
+    }
+
+    private long CountFolderReturns()
+    {
+        string streamPath = _streamPath ?? throw FormatError.Corrupted("scan data stream not found");
+
+        using var fs = File.OpenRead(streamPath);
+        byte[] buffer = new byte[RecordSize * 8192];
+
+        long count = 0;
+        long baseIdx = 0;
+        while (baseIdx < GridSize)
+        {
+            int read = fs.ReadAtLeast(buffer, buffer.Length, throwOnEndOfStream: false);
+            int records = read / RecordSize;
+            if (records == 0) break;
+
+            for (int i = 0; i < records && baseIdx + i < GridSize; i++)
+            {
+                int off = i * RecordSize;
+                if (IsValidDistance(buffer.AsSpan(off, 2))) count++;
+            }
+
+            baseIdx += records;
+        }
+
+        return count;
+    }
+
+    // A distance is usable when the cell holds a return and the range is inside the accepted one.
+    private static bool IsValidDistance(ReadOnlySpan<byte> cell)
+    {
+        ushort distMm = Bytes.ReadUInt16LE(cell);
+        if (distMm == 0 || distMm == 0xFFFF) return false;
+
+        double range = distMm * 0.001;
+        return range >= MinRange && range <= MaxRange;
     }
 
     private IEnumerable<PclPoint> ReadContainerPoints(PclReadOptions options)
@@ -347,7 +425,7 @@ public sealed class FaroScan : PclScan
         using var color = Plane.Open(storage, "Color0", 3, cells, fileLength);
         using var grey = Plane.Open(storage, "Grey0", 1, cells, fileLength);
 
-        long target = options.MaxPoints ?? PointCount;
+        long target = options.MaxPoints ?? long.MaxValue;
         int step = Math.Max(1, options.SubsampleStep);
         long yielded = 0;
 
@@ -356,16 +434,14 @@ public sealed class FaroScan : PclScan
         byte[] greyCell = new byte[1];
 
         // Samples beyond the declared grid cannot be placed, so they are not read.
-        for (long idx = 0; idx < PointCount && yielded < target; idx += step)
+        for (long idx = 0; idx < GridSize && yielded < target; idx += step)
         {
             // A distance plane shorter than the grid ends the scan early.
             if (!dist.TryRead(idx, distCell)) yield break;
 
-            ushort distMm = Bytes.ReadUInt16LE(distCell);
-            if (distMm == 0 || distMm == 0xFFFF) continue;
+            if (!IsValidDistance(distCell)) continue;
 
-            double range = distMm * 0.001;
-            if (range < MinRange || range > MaxRange) continue;
+            double range = Bytes.ReadUInt16LE(distCell) * 0.001;
 
             // A colour or grey plane shorter than the grid leaves the remaining points without that channel.
             PclColor? c = color != null && color.TryRead(idx, colorCell)
@@ -387,7 +463,7 @@ public sealed class FaroScan : PclScan
     {
         string streamPath = _streamPath ?? throw FormatError.Corrupted("scan data stream not found");
 
-        long target = options.MaxPoints ?? PointCount;
+        long target = options.MaxPoints ?? long.MaxValue;
         int step = Math.Max(1, options.SubsampleStep);
         long yielded = 0;
         long baseIdx = 0;
@@ -396,24 +472,22 @@ public sealed class FaroScan : PclScan
         byte[] buffer = new byte[RecordSize * 8192];
 
         // Every pass consumes at least one record or ends the loop, so scanning always terminates.
-        while (yielded < target && baseIdx < PointCount)
+        while (yielded < target && baseIdx < GridSize)
         {
             int read = fs.ReadAtLeast(buffer, buffer.Length, throwOnEndOfStream: false);
             int count = read / RecordSize;
             if (count == 0) break;
 
-            for (int i = 0; i < count && baseIdx + i < PointCount; i++)
+            for (int i = 0; i < count && baseIdx + i < GridSize; i++)
             {
                 long idx = baseIdx + i;
                 if (idx % step != 0) continue;
 
                 int off = i * RecordSize;
-                ushort distRaw = Bytes.ReadUInt16LE(buffer.AsSpan(off, 2));
-                ushort intensityRaw = Bytes.ReadUInt16LE(buffer.AsSpan(off + 2, 2));
-                if (distRaw == 0 || distRaw == 0xFFFF) continue;
+                if (!IsValidDistance(buffer.AsSpan(off, 2))) continue;
 
-                double range = distRaw * 0.001;
-                if (range < MinRange || range > MaxRange) continue;
+                ushort intensityRaw = Bytes.ReadUInt16LE(buffer.AsSpan(off + 2, 2));
+                double range = Bytes.ReadUInt16LE(buffer.AsSpan(off, 2)) * 0.001;
 
                 var pt = new PclPoint(Project(idx, range), Intensity: intensityRaw / 2048.0f, Index: (ulong)yielded);
                 if (options.ApplyTransform)
