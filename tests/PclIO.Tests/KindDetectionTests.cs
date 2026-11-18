@@ -62,6 +62,16 @@ public sealed class KindDetectionTests
         Assert.Equal(PclFileKind.Unknown, Detect(SyntheticFixtures.CreateSyntheticLas(), "sample.laz"));
 
     [Theory]
+    [InlineData("sample.laz")]
+    [InlineData("SAMPLE.LAZ")]
+    public void Detects_Laz_By_Signature_And_Header(string name) =>
+        Assert.Equal(PclFileKind.Laz, Detect(SyntheticFixtures.CreateSyntheticLaz(), name));
+
+    [Fact]
+    public void Laz_Needs_The_Signature_Not_Just_The_Extension() =>
+        Assert.Equal(PclFileKind.Unknown, Detect(new byte[100], "sample.laz"));
+
+    [Theory]
     [InlineData("sample.ply")]
     [InlineData("SAMPLE.PLY")]
     [InlineData("sample.dat")]

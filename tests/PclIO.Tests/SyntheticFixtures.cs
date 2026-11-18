@@ -826,6 +826,98 @@ internal static class SyntheticFixtures
         return ms.ToArray();
     }
 
+    // ---- LASzip compressed LAS (.laz) ---------------------------------------------------------------------------------
+
+    /// <summary>Creates a minimal valid LASzip compressed LAZ file with 1 point.</summary>
+    public static byte[] CreateSyntheticLaz(
+        double x = 10.0, double y = 20.0, double z = 30.0,
+        float intensity = 0.5f, PclColor? color = null, byte classification = 1,
+        ushort compressor = 2, uint chunkSize = 50000,
+        bool corruptChunkTable = false, bool truncateData = false,
+        uint chunkTableVersion = 0)
+    {
+        byte[] hdr = new byte[227];
+        "LASF"u8.CopyTo(hdr);
+        hdr[24] = 1;
+        hdr[25] = 2;
+        BinaryPrimitives.WriteUInt16LittleEndian(hdr.AsSpan(94, 2), 227);
+
+        byte[] vlrPayload =
+        [
+            (byte)(compressor & 0xFF), (byte)(compressor >> 8), 0, 0, 2, 1, 0, 0, 0, 0, 0, 0,
+            (byte)(chunkSize & 0xFF), (byte)((chunkSize >> 8) & 0xFF), (byte)((chunkSize >> 16) & 0xFF), (byte)(chunkSize >> 24),
+            255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+            2, 0, 6, 0, 20, 0, 2, 0, 8, 0, 6, 0, 2, 0
+        ];
+
+        uint offsetToPoints = (uint)(227 + 54 + vlrPayload.Length);
+        BinaryPrimitives.WriteUInt32LittleEndian(hdr.AsSpan(96, 4), offsetToPoints);
+        BinaryPrimitives.WriteUInt32LittleEndian(hdr.AsSpan(100, 4), 1);
+        hdr[104] = 130;
+        BinaryPrimitives.WriteUInt16LittleEndian(hdr.AsSpan(105, 2), 26);
+        BinaryPrimitives.WriteUInt32LittleEndian(hdr.AsSpan(107, 4), 1);
+
+        BinaryPrimitives.WriteDoubleLittleEndian(hdr.AsSpan(131, 8), 0.01);
+        BinaryPrimitives.WriteDoubleLittleEndian(hdr.AsSpan(139, 8), 0.01);
+        BinaryPrimitives.WriteDoubleLittleEndian(hdr.AsSpan(147, 8), 0.01);
+        BinaryPrimitives.WriteDoubleLittleEndian(hdr.AsSpan(155, 8), 0.0);
+        BinaryPrimitives.WriteDoubleLittleEndian(hdr.AsSpan(163, 8), 0.0);
+        BinaryPrimitives.WriteDoubleLittleEndian(hdr.AsSpan(171, 8), 0.0);
+        BinaryPrimitives.WriteDoubleLittleEndian(hdr.AsSpan(179, 8), x);
+        BinaryPrimitives.WriteDoubleLittleEndian(hdr.AsSpan(187, 8), x);
+        BinaryPrimitives.WriteDoubleLittleEndian(hdr.AsSpan(195, 8), y);
+        BinaryPrimitives.WriteDoubleLittleEndian(hdr.AsSpan(203, 8), y);
+        BinaryPrimitives.WriteDoubleLittleEndian(hdr.AsSpan(211, 8), z);
+        BinaryPrimitives.WriteDoubleLittleEndian(hdr.AsSpan(219, 8), z);
+
+        byte[] vlrHdr = new byte[54];
+        Encoding.ASCII.GetBytes("laszip encoded").CopyTo(vlrHdr, 2);
+        BinaryPrimitives.WriteUInt16LittleEndian(vlrHdr.AsSpan(18, 2), 22204);
+        BinaryPrimitives.WriteUInt16LittleEndian(vlrHdr.AsSpan(20, 2), (ushort)vlrPayload.Length);
+        Encoding.ASCII.GetBytes("http://laszip.org").CopyTo(vlrHdr, 22);
+
+        long chunkTableOffset = offsetToPoints + 8 + 26;
+        byte[] ptPrefix = new byte[8];
+        BinaryPrimitives.WriteInt64LittleEndian(ptPrefix, chunkTableOffset);
+
+        byte[] pt0 = new byte[26];
+        int rawX = (int)Math.Round(x / 0.01);
+        int rawY = (int)Math.Round(y / 0.01);
+        int rawZ = (int)Math.Round(z / 0.01);
+        BinaryPrimitives.WriteInt32LittleEndian(pt0.AsSpan(0, 4), rawX);
+        BinaryPrimitives.WriteInt32LittleEndian(pt0.AsSpan(4, 4), rawY);
+        BinaryPrimitives.WriteInt32LittleEndian(pt0.AsSpan(8, 4), rawZ);
+        BinaryPrimitives.WriteUInt16LittleEndian(pt0.AsSpan(12, 2), (ushort)(intensity * 65535));
+        pt0[14] = 1;
+        pt0[15] = classification;
+        color ??= new PclColor(254, 0, 0);
+        BinaryPrimitives.WriteUInt16LittleEndian(pt0.AsSpan(20, 2), (ushort)(color.Value.R * 257));
+        BinaryPrimitives.WriteUInt16LittleEndian(pt0.AsSpan(22, 2), (ushort)(color.Value.G * 257));
+        BinaryPrimitives.WriteUInt16LittleEndian(pt0.AsSpan(24, 2), (ushort)(color.Value.B * 257));
+
+        byte[] chunkTable;
+        if (corruptChunkTable)
+        {
+            byte[] ctHeader = new byte[8];
+            BinaryPrimitives.WriteUInt32LittleEndian(ctHeader.AsSpan(0, 4), 0);
+            BinaryPrimitives.WriteUInt32LittleEndian(ctHeader.AsSpan(4, 4), 10);
+            chunkTable = ctHeader;
+        }
+        else
+        {
+            byte[] ctHeader = new byte[8];
+            BinaryPrimitives.WriteUInt32LittleEndian(ctHeader.AsSpan(0, 4), chunkTableVersion);
+            BinaryPrimitives.WriteUInt32LittleEndian(ctHeader.AsSpan(4, 4), 1);
+            byte[] ctStream = [44, 215, 24, 156, 0, 0, 0, 0];
+            chunkTable = [.. ctHeader, .. ctStream];
+        }
+
+        byte[] full = [.. hdr, .. vlrHdr, .. vlrPayload, .. ptPrefix, .. pt0, .. chunkTable];
+        if (truncateData)
+            return full[..(full.Length - 10)];
+        return full;
+    }
+
     // ---- PCD (.pcd) ---------------------------------------------------------------------------------------------------
 
     /// <summary>Default PCD fields: positions, packed colour, intensity and normals, all 4-byte floats.</summary>
