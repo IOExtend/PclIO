@@ -19,6 +19,10 @@ public sealed class LgsxDocument : PclDocument
     private const int EntryHeaderBytes = 128;
     private const int TailBytes = 4096;
 
+    // Size of the record of a setup: the translation and the bounds of the setup as six doubles, then the offset
+    // and the length of the range of the point data that belongs to it.
+    private const int SetupRecordSize = 88;
+
     private static readonly TimeSpan RegexTimeout = TimeSpan.FromSeconds(1);
 
     private static readonly Regex GuidPattern = new(
@@ -185,7 +189,23 @@ public sealed class LgsxDocument : PclDocument
                 {
                     string setupId = name[(lastDash + 1)..];
                     scanSetups.Add(setupId);
-                    document._setups.Add(new LgsxSetup(setupId, name, payloadOffset, payloadLength));
+
+                    var setup = new LgsxSetup(setupId, name, payloadOffset, payloadLength);
+
+                    // The payload of a setup entry holds its record: the pose, the bounds and the range of its points.
+                    var record = ReadSetupRecord(fs, setup);
+                    if (record != null)
+                    {
+                        setup = setup with
+                        {
+                            Translation = record.Translation,
+                            Bounds = record.Bounds,
+                            PointOffset = record.PointOffset,
+                            PointLength = record.PointLength,
+                        };
+                    }
+
+                    document._setups.Add(setup);
                 }
             }
         }
@@ -205,7 +225,9 @@ public sealed class LgsxDocument : PclDocument
                     name: setup.Name,
                     path: path,
                     pointCloudEntry: pointCloudEntry!,
-                    blockStarts: blockStarts));
+                    blockStarts: blockStarts,
+                    transform: setup.Translation is { } translation ? new PclTransform { Translation = translation } : null,
+                    bounds: setup.Bounds));
             }
 
             document._warnings.Add(
@@ -231,17 +253,65 @@ public sealed class LgsxDocument : PclDocument
         {
             if (pointCloudEntry == null)
                 document._warnings.Add("No point data entry was found; scans have no readable points.");
-            document._warnings.Add("Scan poses and bounds are not read; points are reported in container coordinates.");
+
+            if (assignments != null)
+                document._warnings.Add($"The poses and the bounds of {assignments.Count} setups are read and applied.");
+            else
+                document._warnings.Add("Scan poses and bounds are not read; points are reported in container coordinates.");
         }
 
         return document;
     }
 
     /// <summary>
-    /// Assigns the point blocks of the point data to the setups that own them. A setup owns a range of the point data
-    /// when the range it declares lies inside the point data; a block belongs to the setup whose range holds it.
-    /// Returns null when the container does not assign all of its points to setups, so that the caller can fall
-    /// back to a single scan.
+    /// The record of a setup: the translation of the setup, the bounds of its points and the range of the point
+    /// blocks it owns inside the point data.
+    /// </summary>
+    private sealed record SetupRecord(PclVector3 Translation, PclBounds Bounds, ulong PointOffset, ulong PointLength);
+
+    /// <summary>
+    /// Reads the record of a setup from the payload of its container entry. The record holds the translation of the
+    /// setup and the bounds of its points as six doubles, then the offset and the length of the range of the point
+    /// blocks it owns. A record that is too short or holds values that are not usable is left unread, so that the
+    /// setup keeps an unknown pose instead of a wrong one.
+    /// </summary>
+    private static SetupRecord? ReadSetupRecord(FileStream fs, LgsxSetup setup)
+    {
+        if (setup.Size < SetupRecordSize) return null;
+        if (setup.Offset >= (ulong)fs.Length || setup.Size > (ulong)fs.Length - setup.Offset) return null;
+
+        fs.Position = (long)setup.Offset;
+        byte[] data = new byte[SetupRecordSize];
+        fs.ReadExactly(data);
+
+        double tx = Bytes.ReadDoubleLE(data.AsSpan(0, 8));
+        double ty = Bytes.ReadDoubleLE(data.AsSpan(8, 8));
+        double tz = Bytes.ReadDoubleLE(data.AsSpan(16, 8));
+        double minX = Bytes.ReadDoubleLE(data.AsSpan(24, 8));
+        double minY = Bytes.ReadDoubleLE(data.AsSpan(32, 8));
+        double minZ = Bytes.ReadDoubleLE(data.AsSpan(40, 8));
+        double maxX = Bytes.ReadDoubleLE(data.AsSpan(48, 8));
+        double maxY = Bytes.ReadDoubleLE(data.AsSpan(56, 8));
+        double maxZ = Bytes.ReadDoubleLE(data.AsSpan(64, 8));
+
+        if (!double.IsFinite(tx) || !double.IsFinite(ty) || !double.IsFinite(tz) ||
+            !double.IsFinite(minX) || !double.IsFinite(minY) || !double.IsFinite(minZ) ||
+            !double.IsFinite(maxX) || !double.IsFinite(maxY) || !double.IsFinite(maxZ))
+            return null;
+
+        var bounds = new PclBounds(new PclVector3(minX, minY, minZ), new PclVector3(maxX, maxY, maxZ));
+        if (bounds.IsEmpty) return null;
+
+        ulong pointOffset = Bytes.ReadUInt64LE(data.AsSpan(72, 8));
+        ulong pointLength = Bytes.ReadUInt64LE(data.AsSpan(80, 8));
+
+        return new SetupRecord(new PclVector3(tx, ty, tz), bounds, pointOffset, pointLength);
+    }
+
+    /// <summary>
+    /// Assigns the point blocks of the point data to the setups that own them. A setup owns the range of the point
+    /// data that its record declares; a block belongs to the setup whose range holds it. Returns null when the
+    /// container does not assign all of its points to setups, so that the caller can fall back to a single scan.
     /// </summary>
     private static List<(LgsxSetup Setup, long[] BlockStarts)>? AssignBlocksToSetups(
         string path, LgsxEntry pointCloudEntry, List<LgsxSetup> setups)
@@ -251,13 +321,13 @@ public sealed class LgsxDocument : PclDocument
         long payloadStart = (long)pointCloudEntry.Offset;
         long payloadEnd = payloadStart + (long)pointCloudEntry.Size;
 
-        // Only a setup whose range lies inside the point data can own points of it.
+        // Only a setup whose record declares a range inside the point data can own points of it.
         var owners = new List<(LgsxSetup Setup, long Start, long End)>();
         foreach (var setup in setups)
         {
-            if (setup.Size == 0) continue;
-            long start = (long)setup.Offset;
-            long end = start + (long)setup.Size;
+            if (setup.PointLength == 0) continue;
+            long start = (long)setup.PointOffset;
+            long end = start + (long)setup.PointLength;
             if (start < payloadStart || end > payloadEnd) continue;
             owners.Add((setup, start, end));
         }
@@ -372,9 +442,22 @@ public sealed record LgsxEntry(string Name, ulong Offset, ulong Size);
 /// <summary>A setup listed in a Leica scan container.</summary>
 /// <param name="Id">Identifier of the setup, the part of the entry name after its last dash.</param>
 /// <param name="Name">Name of the container entry that lists the setup.</param>
-/// <param name="Offset">Offset of the range the setup declares, in bytes from the start of the file.</param>
-/// <param name="Size">Length of the range the setup declares, in bytes.</param>
-public sealed record LgsxSetup(string Id, string Name, ulong Offset, ulong Size);
+/// <param name="Offset">Offset of the record of the setup, in bytes from the start of the file.</param>
+/// <param name="Size">Length of the record of the setup, in bytes.</param>
+public sealed record LgsxSetup(string Id, string Name, ulong Offset, ulong Size)
+{
+    /// <summary>Translation of the setup, or null when its record does not hold one.</summary>
+    public PclVector3? Translation { get; init; }
+
+    /// <summary>Bounds of the points of the setup, or null when its record does not hold them.</summary>
+    public PclBounds? Bounds { get; init; }
+
+    /// <summary>Offset of the range of the point data that belongs to the setup, in bytes from the start of the file.</summary>
+    public ulong PointOffset { get; init; }
+
+    /// <summary>Length of the range of the point data that belongs to the setup, in bytes.</summary>
+    public ulong PointLength { get; init; }
+}
 
 /// <summary>
 /// Scan representation in a Leica LGS/LGSx container: the points of one setup, or all points of the container when
@@ -433,13 +516,16 @@ public sealed class LgsxScan : PclScan
 
     private (bool Colors, bool Intensities, bool Normals) Channels => _channels ??= DetectChannels();
 
-    internal LgsxScan(string id, string name, string path, LgsxEntry? pointCloudEntry, long[]? blockStarts = null)
+    internal LgsxScan(string id, string name, string path, LgsxEntry? pointCloudEntry, long[]? blockStarts = null,
+        PclTransform? transform = null, PclBounds? bounds = null)
     {
         Id = id;
         Name = name;
         _filePath = path;
         _entry = pointCloudEntry;
         _blockStarts = blockStarts;
+        if (transform != null) Transform = transform;
+        if (bounds != null) Bounds = bounds.Value;
     }
 
     /// <summary>Decoded planes of one point block together with its coordinate frame.</summary>

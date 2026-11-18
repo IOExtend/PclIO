@@ -152,9 +152,10 @@ internal static class SyntheticFixtures
     /// </param>
     /// <param name="overlappingSetupRanges">True lets every setup declare the range of the first block.</param>
     /// <param name="collidingSetupNames">True names the second setup so its id after the last dash equals the first's.</param>
+    /// <param name="damagedSetupRecord">True writes a setup record whose translation is not a number.</param>
     public static byte[] CreateSyntheticLgsx(IReadOnlyList<LeicaSamplePoint>? points = null, bool withColorAndIntensity = false, bool withPointData = true,
         IReadOnlyList<byte[]>? extraPlanes = null, int setupCount = 1, bool assignPointsToSetups = false, bool overlappingSetupRanges = false,
-        bool collidingSetupNames = false)
+        bool collidingSetupNames = false, bool damagedSetupRecord = false)
     {
         points ??= DefaultLeicaPoints;
         using var ms = new MemoryStream();
@@ -170,24 +171,39 @@ internal static class SyntheticFixtures
         (byte[] payload, List<(long Start, long Length)> blocks) =
             BuildLeicaPayload(groups, withColorAndIntensity, extraPlanes ?? []);
 
-        // The point data follows the container entries, so its start is known before they are written.
+        // The point data follows the container entries and their records, so its start is known before they are written.
         var setupNames = Enumerable.Range(0, setupCount).Select(i => "SETUP-" + (3 + i)).ToList();
         if (collidingSetupNames && setupCount >= 2)
             setupNames[1] = "SETUP-A-" + setupNames[0]["SETUP-".Length..];
-        long payloadStart = ms.Position + setupNames.Sum(EntrySize) + EntrySize("PointCloud");
+
+        var entryOffsets = new long[setupCount];
+        var recordOffsets = new long[setupCount];
+        long position = ms.Position;
+        for (int i = 0; i < setupCount; i++)
+        {
+            entryOffsets[i] = position;
+            position += EntrySize(setupNames[i]);
+            recordOffsets[i] = position;
+            position += assignPointsToSetups ? SetupRecordSize : 0;
+        }
+
+        long payloadStart = position + EntrySize("PointCloud");
 
         // Container entries as the reader expects them.
         var setupEntries = new List<long>();
         for (int i = 0; i < setupCount; i++)
         {
-            setupEntries.Add(ms.Position);
+            setupEntries.Add(entryOffsets[i]);
 
-            // A setup owns the block it declares; without a range the setup has no points of its own.
-            bool hasBlock = assignPointsToSetups && i < blocks.Count;
+            // A setup owns the block it declares; without a record the setup has no points of its own.
+            bool hasRecord = assignPointsToSetups;
+            WriteEntry(bw, setupNames[i], hasRecord ? (ulong)recordOffsets[i] : 0, hasRecord ? (ulong)SetupRecordSize : 0);
+            if (!hasRecord) continue;
+
+            bool hasBlock = i < blocks.Count;
             int blockIndex = overlappingSetupRanges ? 0 : i;
-            WriteEntry(bw, setupNames[i],
-                hasBlock ? (ulong)(payloadStart + blocks[blockIndex].Start) : 0,
-                hasBlock ? (ulong)blocks[blockIndex].Length : 0);
+            WriteSetupRecord(bw, i, hasBlock ? payloadStart + blocks[blockIndex].Start : 0,
+                hasBlock ? (ulong)blocks[blockIndex].Length : 0, damaged: damagedSetupRecord);
         }
 
         long pointEntry = ms.Position;
@@ -202,6 +218,29 @@ internal static class SyntheticFixtures
         bw.Write(Encoding.ASCII.GetBytes("build 2024.1.0 {12345678-1234-1234-1234-123456789abc}"));
         bw.Write((ulong)tocOffset);
         return ms.ToArray();
+    }
+
+    // The size of the record of a setup.
+    public const int SetupRecordSize = 88;
+
+    // Writes the record of a setup: the translation and the bounds of the setup, then the range of its points.
+    private static void WriteSetupRecord(BinaryWriter bw, int setupIndex, long pointOffset, ulong pointLength, bool damaged)
+    {
+        double[] translation = damaged
+            ? [double.NaN, 2 + setupIndex, 3 + setupIndex]
+            : [1 + setupIndex, 2 + setupIndex, 3 + setupIndex];
+
+        double[] bounds =
+        [
+            LeicaOriginX, LeicaOriginY, LeicaOriginZ,
+            LeicaOriginX + (1023 * LeicaScale), LeicaOriginY + (1023 * LeicaScale), LeicaOriginZ + (1023 * LeicaScale),
+        ];
+
+        foreach (double value in translation.Concat(bounds))
+            bw.Write(value);
+
+        bw.Write((ulong)pointOffset);
+        bw.Write(pointLength);
     }
 
     // Distributes the points over the setups; a setup without points gets no block.
