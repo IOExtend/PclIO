@@ -15,7 +15,8 @@ namespace PclIO.Formats.E57;
 /// with a range from zero (8, 16 or 32 bits), Float fields, or scaled-integer intensity; per-point validity flags
 /// skip invalid points and clear invalid channels. Images are not read.
 /// Not supported (reported with <see cref="NotSupportedException"/> when points are read): integer coordinates,
-/// other codecs, and packets whose streams hold different record counts.
+/// other codecs (the scan must use plain bit-packing: an empty codecs vector), and packets whose streams hold
+/// different record counts.
 /// Per-point validity flags of another shape, images and 2D data are not interpreted.
 /// </summary>
 public sealed class E57Document : PclDocument
@@ -272,8 +273,8 @@ public sealed class E57Document : PclDocument
 /// </summary>
 internal sealed class E57PointLayout
 {
-    // Reader limit on the number of fields in a prototype; packet headers would allow 65535 streams.
-    private const int MaxFields = 1024;
+    // Reader limit on the number of fields in a prototype: a data packet header holds at most 65535 streams.
+    private const int MaxFields = 65535;
 
     public int StreamCount { get; }
 
@@ -354,9 +355,9 @@ internal sealed class E57PointLayout
     public static E57PointLayout? Create(XElement points, XNamespace ns, out string? unsupportedReason)
     {
         unsupportedReason = null;
-        if (points.Element(ns + "codecs")?.HasElements == true)
+        if (points.Element(ns + "codecs") is { HasElements: true } codecs)
         {
-            unsupportedReason = "the scan uses a compressed vector codec other than plain bit-packing";
+            unsupportedReason = $"the scan uses compressed vector codecs other than plain bit-packing ({DescribeCodecs(codecs)})";
             return null;
         }
 
@@ -370,7 +371,7 @@ internal sealed class E57PointLayout
         var fields = prototype.Elements().ToList();
         if (fields.Count == 0 || fields.Count > MaxFields)
         {
-            unsupportedReason = "the point prototype has no fields or too many fields";
+            unsupportedReason = "the point prototype has no fields or more than 65535 fields";
             return null;
         }
 
@@ -659,6 +660,11 @@ internal sealed class E57PointLayout
     // unknown field, so files the reader cannot interpret keep today's behaviour instead of failing.
     private static bool TryValidityField(XElement field) =>
         IntegerSize(field, out _, out _, out _) == 1;
+
+    // Names the codecs of a scan for the rejection message without assuming their shape: the distinct element
+    // names inside the codecs vector, at most eight of them.
+    private static string DescribeCodecs(XElement codecs) =>
+        string.Join(", ", codecs.DescendantNodes().OfType<XElement>().Select(e => e.Name.LocalName).Distinct().Take(8));
 }
 
 /// <summary>An individual scan inside an ASTM E57 file.</summary>

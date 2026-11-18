@@ -1071,12 +1071,12 @@ public sealed class InputHardeningTests
         static string Prototype(int fields) =>
             "<prototype type=\"Structure\">" + string.Concat(Enumerable.Range(0, fields).Select(i => $"<f{i} type=\"Integer\" minimum=\"0\" maximum=\"1\"/>")) + "</prototype>";
 
-        using var atLimit = E57Document.Open(dir.Write("limit.e57", new E57Spec { PrototypeXml = Prototype(1024) }.Build()));
-        using var beyond = E57Document.Open(dir.Write("beyond.e57", new E57Spec { PrototypeXml = Prototype(1025) }.Build()));
+        using var atLimit = E57Document.Open(dir.Write("limit.e57", new E57Spec { PrototypeXml = Prototype(65535) }.Build()));
+        using var beyond = E57Document.Open(dir.Write("beyond.e57", new E57Spec { PrototypeXml = Prototype(65536) }.Build()));
 
         // Both open; reading says why the points cannot be decoded. The first lacks the coordinate fields, the second has too many fields.
         Assert.Contains("lacks cartesianX", Assert.Throws<NotSupportedException>(() => atLimit.Scans[0].ReadPoints().ToList()).Message);
-        Assert.Contains("too many fields", Assert.Throws<NotSupportedException>(() => beyond.Scans[0].ReadPoints().ToList()).Message);
+        Assert.Contains("65535", Assert.Throws<NotSupportedException>(() => beyond.Scans[0].ReadPoints().ToList()).Message);
     }
 
     // ---- PinPoint limits ------------------------------------------------------------------------------------------

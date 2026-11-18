@@ -968,6 +968,56 @@ public sealed class FormatTests
         Assert.Throws<InvalidDataException>(() => doc.Scans[0].ReadPoints().ToList());
     }
 
+    [Fact]
+    public void E57_With_A_Named_Codec_Lists_But_Is_Not_Decoded()
+    {
+        var spec = new E57Spec { CodecsXml = "<codec><mysteryCodec/></codec>" };
+        using var dir = new TempDirectory();
+        using var doc = E57Document.Open(dir.Write("codec.e57", spec.Build()));
+
+        Assert.Single(doc.Scans);
+        var error = Assert.Throws<NotSupportedException>(() => doc.Scans[0].ReadPoints().ToList());
+        Assert.Contains("mysteryCodec", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void E57_With_More_Prototype_Fields_Than_Packets_Can_Hold_Is_Not_Decoded()
+    {
+        var many = string.Concat(Enumerable.Repeat("<padding type=\"Integer\" minimum=\"0\" maximum=\"0\"/>", 70000));
+        string prototype = $"<prototype type=\"Structure\"><cartesianX type=\"Float\" precision=\"single\"/><cartesianY type=\"Float\" precision=\"single\"/><cartesianZ type=\"Float\" precision=\"single\"/>{many}</prototype>";
+        using var dir = new TempDirectory();
+        using var doc = E57Document.Open(dir.Write("wide.e57", new E57Spec { PrototypeXml = prototype }.Build()));
+
+        Assert.Single(doc.Scans);
+        var error = Assert.Throws<NotSupportedException>(() => doc.Scans[0].ReadPoints().ToList());
+        Assert.Contains("65535", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void E57_With_A_Prototype_Of_More_Than_A_Thousand_Fields_Is_Decoded()
+    {
+        // 1500 unknown fields ride along with the coordinates; the packets hold one stream per field.
+        var many = string.Concat(Enumerable.Range(0, 1500).Select(i => $"<padding{i} type=\"Integer\" minimum=\"0\" maximum=\"0\"/>"));
+        string prototype = $"<prototype type=\"Structure\"><cartesianX type=\"Float\" precision=\"single\"/><cartesianY type=\"Float\" precision=\"single\"/><cartesianZ type=\"Float\" precision=\"single\"/>{many}</prototype>";
+        var streams = new List<byte[]>
+        {
+            BitConverter.GetBytes(1.0f), BitConverter.GetBytes(2.0f), BitConverter.GetBytes(3.0f),
+        };
+        streams.AddRange(Enumerable.Repeat(new byte[1], 1500));
+        var spec = new E57Spec
+        {
+            PrototypeXml = prototype,
+            Points = [],
+            RecordCount = 1,
+            RawPackets = E57Spec.DataPacket(streams),
+        };
+        using var dir = new TempDirectory();
+        using var doc = E57Document.Open(dir.Write("wide.e57", spec.Build()));
+
+        var point = Assert.Single(doc.Scans[0].ReadPoints(NoTransform));
+        AssertNear(new PclVector3(1, 2, 3), point.Position);
+    }
+
     // ---- Leica -----------------------------------------------------------------------------------------------
 
     [Fact]

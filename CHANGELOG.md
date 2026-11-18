@@ -47,6 +47,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Points that the E57 validity flags mark as invalid are skipped, and flagged colour or intensity channels are left empty.
   Colour with a wider Integer range from zero (16 or 32 bits) and intensity as a wider Integer, a Float or a scaled
   integer are decoded; other shapes stay unread.
+- The E57 reader decodes plain bit-packing only and names any other codec of the scan in the rejection message. The point
+  prototype limit is the packet header bound of 65535 fields.
 
 ## [0.1.0] - 2026-11-15
 
