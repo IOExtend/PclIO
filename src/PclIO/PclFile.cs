@@ -1,6 +1,7 @@
 using PclIO.Formats.E57;
 using PclIO.Formats.EdgeWise;
 using PclIO.Formats.Faro;
+using PclIO.Formats.Las;
 using PclIO.Formats.Leica;
 using PclIO.Formats.PinPoint;
 using PclIO.Formats.Recap;
@@ -48,6 +49,7 @@ public static class PclFile
             PclFileKind.FaroFls => FaroFlsDocument.Open(path, options),
             PclFileKind.PinPoint => PinPointDocument.Open(path, options),
             PclFileKind.EdgeWise => EdgeWiseDocument.Open(path, options),
+            PclFileKind.Las => LasDocument.Open(path, options),
             _ => throw new NotSupportedException($"Unsupported or unrecognized point cloud file: '{path}'"),
         };
     }

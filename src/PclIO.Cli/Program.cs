@@ -81,6 +81,7 @@ public static class Program
           PinPoint      a JSON text file with the extension .smf or .srf, or a folder that holds
                         ScanProject.json, a .smf file or a .srf file
           EdgeWise      the extension .c3db or .c3ptx, or a text or tree signature in another file
+          LAS           by signature (.las)
 
         Output formats (--format, or the output extension; any other extension needs --format):
           las    ASPRS LAS 1.2, point data record format 2 (XYZ, intensity, RGB)

@@ -14,6 +14,9 @@ public readonly record struct LeicaSamplePoint(int X, int Y, int Z, ushort Color
 /// <summary>One cluster of a synthetic EdgeWise cluster file: a centre and 16-bit offsets from it.</summary>
 public readonly record struct C3Cluster(float Cx, float Cy, float Cz, (short Dx, short Dy, short Dz)[] Points);
 
+/// <summary>One point of a synthetic LAS file: position, normalised intensity, colour and class code.</summary>
+public readonly record struct LasSamplePoint(double X, double Y, double Z, float Intensity = 1.0f, PclColor? Color = null, byte Classification = 0);
+
 /// <summary>Generates small synthetic scan files for the tests. Every layout is written from what the readers implement;
 /// no byte of any of them comes from a real scan.</summary>
 internal static class SyntheticFixtures
@@ -605,5 +608,177 @@ internal static class SyntheticFixtures
         builder.AddStream(one, "Dist0", FaroDistances(millimetres, invalidCells));
         if (withGrey) builder.AddStream(one, "Grey0", Enumerable.Range(0, FaroRows * FaroCols).Select(i => (byte)(i * 8)).ToArray());
         return builder.Build();
+    }
+
+    // ---- LAS (.las) ---------------------------------------------------------------------------------------------------
+
+    /// <summary>Base record size of a LAS point format; waveform tails are not interpreted.</summary>
+    public static int LasBaseRecordSize(int pointFormat) => pointFormat switch
+    {
+        0 => 20,
+        1 => 28,
+        2 => 26,
+        3 => 34,
+        4 => 57,
+        5 => 63,
+        6 => 30,
+        7 => 36,
+        8 => 38,
+        9 => 59,
+        _ => 67,
+    };
+
+    /// <summary>A GeoTIFF variable length record naming an EPSG code, as the LAS exporter writes it.</summary>
+    public static (string UserId, ushort RecordId, byte[] Data) LasEpsgVlr(ushort code)
+    {
+        byte[] data = new byte[24];
+        BinaryPrimitives.WriteUInt16LittleEndian(data.AsSpan(0, 2), 1);
+        BinaryPrimitives.WriteUInt16LittleEndian(data.AsSpan(2, 2), 1);
+        BinaryPrimitives.WriteUInt16LittleEndian(data.AsSpan(4, 2), 0);
+        BinaryPrimitives.WriteUInt16LittleEndian(data.AsSpan(6, 2), 2);
+        BinaryPrimitives.WriteUInt16LittleEndian(data.AsSpan(8, 2), 1024);
+        BinaryPrimitives.WriteUInt16LittleEndian(data.AsSpan(10, 2), 0);
+        BinaryPrimitives.WriteUInt16LittleEndian(data.AsSpan(12, 2), 1);
+        BinaryPrimitives.WriteUInt16LittleEndian(data.AsSpan(14, 2), 1);
+        BinaryPrimitives.WriteUInt16LittleEndian(data.AsSpan(16, 2), 3072);
+        BinaryPrimitives.WriteUInt16LittleEndian(data.AsSpan(18, 2), 0);
+        BinaryPrimitives.WriteUInt16LittleEndian(data.AsSpan(20, 2), 1);
+        BinaryPrimitives.WriteUInt16LittleEndian(data.AsSpan(22, 2), code);
+        return ("LASF_Projection", 34735, data);
+    }
+
+    /// <summary>An OGC WKT coordinate system record (LASF_Projection, record 2112, null-terminated UTF-8).</summary>
+    public static (string UserId, ushort RecordId, byte[] Data) LasWktVlr(string wkt) =>
+        ("LASF_Projection", 2112, Encoding.UTF8.GetBytes(wkt + "\0"));
+
+    /// <summary>A synthetic LAS file with one scan.</summary>
+    /// <param name="points">Points to store; empty writes a header with no records.</param>
+    /// <param name="versionMinor">Minor version: 0 to 4 for 1.0 to 1.4.</param>
+    /// <param name="pointFormat">Point data format; 0 to 10 carry points, anything else needs empty points.</param>
+    /// <param name="scale">Metres per stored unit, on every axis.</param>
+    /// <param name="offset">Coordinate offset, or null for the minimum of the points.</param>
+    /// <param name="vlrs">Variable length records to store.</param>
+    /// <param name="extraBytesPerRecord">Zero bytes appended to every record past the format's base size.</param>
+    /// <param name="recordLengthOverride">Record length to declare instead of the written one.</param>
+    /// <param name="legacyCountOverride">Legacy point count to declare instead of the written one.</param>
+    /// <param name="extendedCountOverride">Extended 1.4 point count to declare instead of the written one.</param>
+    public static byte[] CreateSyntheticLas(IReadOnlyList<LasSamplePoint>? points = null, int versionMinor = 2,
+        int pointFormat = 2, double scale = 0.001, (double X, double Y, double Z)? offset = null,
+        IReadOnlyList<(string UserId, ushort RecordId, byte[] Data)>? vlrs = null, int extraBytesPerRecord = 0,
+        int? recordLengthOverride = null, uint? legacyCountOverride = null, ulong? extendedCountOverride = null)
+    {
+        points ??= [new(1, 2, 3, 0.25f, new PclColor(10, 20, 30), 5), new(-4.5, 5.25, 6.125, 0.5f, null, 2)];
+        if ((pointFormat < 0 || pointFormat > 10) && points.Count > 0)
+            throw new ArgumentException("Only point formats 0 to 10 can hold points.", nameof(pointFormat));
+
+        bool is14 = versionMinor == 4;
+        int headerSize = is14 ? 375 : 227;
+        int baseSize = pointFormat is >= 0 and <= 10 ? LasBaseRecordSize(pointFormat) : 0;
+        int recordLength = recordLengthOverride ?? (baseSize + extraBytesPerRecord);
+
+        var vlrBytes = new List<byte[]>();
+        foreach (var (userId, recordId, data) in vlrs ?? [])
+        {
+            byte[] header = new byte[54];
+            byte[] userBytes = Encoding.ASCII.GetBytes(userId);
+            Array.Copy(userBytes, 0, header, 2, Math.Min(userBytes.Length, 16));
+            BinaryPrimitives.WriteUInt16LittleEndian(header.AsSpan(18, 2), recordId);
+            BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(20, 4), (uint)data.Length);
+            Encoding.ASCII.GetBytes("PclIO test").CopyTo(header, 24);
+            vlrBytes.Add([.. header, .. data]);
+        }
+
+        uint pointDataOffset = (uint)(headerSize + vlrBytes.Sum(b => b.Length));
+        double offsetX = offset?.X ?? (points.Count > 0 ? points.Min(p => p.X) : 0);
+        double offsetY = offset?.Y ?? (points.Count > 0 ? points.Min(p => p.Y) : 0);
+        double offsetZ = offset?.Z ?? (points.Count > 0 ? points.Min(p => p.Z) : 0);
+
+        byte[] headerBuf = new byte[headerSize];
+        "LASF"u8.CopyTo(headerBuf);
+        headerBuf[24] = 1;
+        headerBuf[25] = (byte)versionMinor;
+        Encoding.ASCII.GetBytes("PclIO synthetic").CopyTo(headerBuf, 26);
+        Encoding.ASCII.GetBytes("PclIO tests").CopyTo(headerBuf, 58);
+        BinaryPrimitives.WriteUInt16LittleEndian(headerBuf.AsSpan(94, 2), (ushort)headerSize);
+        BinaryPrimitives.WriteUInt32LittleEndian(headerBuf.AsSpan(96, 4), pointDataOffset);
+        BinaryPrimitives.WriteUInt32LittleEndian(headerBuf.AsSpan(100, 4), (uint)(vlrs?.Count ?? 0));
+        headerBuf[104] = (byte)pointFormat;
+        BinaryPrimitives.WriteUInt16LittleEndian(headerBuf.AsSpan(105, 2), (ushort)recordLength);
+
+        uint legacyCount = legacyCountOverride ?? (uint)points.Count;
+        BinaryPrimitives.WriteUInt32LittleEndian(headerBuf.AsSpan(107, 4), legacyCount);
+        BinaryPrimitives.WriteUInt32LittleEndian(headerBuf.AsSpan(111, 4), legacyCount);
+        BinaryPrimitives.WriteDoubleLittleEndian(headerBuf.AsSpan(131, 8), scale);
+        BinaryPrimitives.WriteDoubleLittleEndian(headerBuf.AsSpan(139, 8), scale);
+        BinaryPrimitives.WriteDoubleLittleEndian(headerBuf.AsSpan(147, 8), scale);
+        BinaryPrimitives.WriteDoubleLittleEndian(headerBuf.AsSpan(155, 8), offsetX);
+        BinaryPrimitives.WriteDoubleLittleEndian(headerBuf.AsSpan(163, 8), offsetY);
+        BinaryPrimitives.WriteDoubleLittleEndian(headerBuf.AsSpan(171, 8), offsetZ);
+
+        double minX = points.Count > 0 ? points.Min(p => p.X) : 0;
+        double minY = points.Count > 0 ? points.Min(p => p.Y) : 0;
+        double minZ = points.Count > 0 ? points.Min(p => p.Z) : 0;
+        double maxX = points.Count > 0 ? points.Max(p => p.X) : 0;
+        double maxY = points.Count > 0 ? points.Max(p => p.Y) : 0;
+        double maxZ = points.Count > 0 ? points.Max(p => p.Z) : 0;
+        BinaryPrimitives.WriteDoubleLittleEndian(headerBuf.AsSpan(179, 8), maxX);
+        BinaryPrimitives.WriteDoubleLittleEndian(headerBuf.AsSpan(187, 8), minX);
+        BinaryPrimitives.WriteDoubleLittleEndian(headerBuf.AsSpan(195, 8), maxY);
+        BinaryPrimitives.WriteDoubleLittleEndian(headerBuf.AsSpan(203, 8), minY);
+        BinaryPrimitives.WriteDoubleLittleEndian(headerBuf.AsSpan(211, 8), maxZ);
+        BinaryPrimitives.WriteDoubleLittleEndian(headerBuf.AsSpan(219, 8), minZ);
+
+        if (is14)
+        {
+            ulong extended = extendedCountOverride ?? (ulong)points.Count;
+            BinaryPrimitives.WriteUInt64LittleEndian(headerBuf.AsSpan(247, 8), extended);
+            BinaryPrimitives.WriteUInt64LittleEndian(headerBuf.AsSpan(255, 8), extended);
+        }
+
+        using var ms = new MemoryStream();
+        ms.Write(headerBuf);
+        foreach (byte[] vlr in vlrBytes) ms.Write(vlr);
+
+        bool legacy = pointFormat is >= 0 and <= 5;
+        // A declared length below the base size cannot hold the format; records are still written whole so that
+        // the file is otherwise valid and the open path rejects the declared length.
+        int writtenLength = Math.Max(recordLength, baseSize);
+        foreach (var p in points)
+        {
+            byte[] record = new byte[writtenLength];
+            BinaryPrimitives.WriteInt32LittleEndian(record.AsSpan(0, 4), (int)Math.Round((p.X - offsetX) / scale));
+            BinaryPrimitives.WriteInt32LittleEndian(record.AsSpan(4, 4), (int)Math.Round((p.Y - offsetY) / scale));
+            BinaryPrimitives.WriteInt32LittleEndian(record.AsSpan(8, 4), (int)Math.Round((p.Z - offsetZ) / scale));
+            BinaryPrimitives.WriteUInt16LittleEndian(record.AsSpan(12, 2),
+                (ushort)Math.Clamp(MathF.Round(p.Intensity * 65535f), 0f, 65535f));
+
+            if (legacy)
+            {
+                record[14] = 0x09;
+                record[15] = (byte)(p.Classification & 0x1F);
+            }
+            else if (pointFormat is >= 6 and <= 10)
+            {
+                record[14] = 0x11;
+                record[16] = p.Classification;
+            }
+
+            if (pointFormat is 2 or 3 or 5)
+            {
+                BinaryPrimitives.WriteUInt16LittleEndian(record.AsSpan(20, 2), (ushort)((p.Color?.R ?? 255) * 257));
+                BinaryPrimitives.WriteUInt16LittleEndian(record.AsSpan(22, 2), (ushort)((p.Color?.G ?? 255) * 257));
+                BinaryPrimitives.WriteUInt16LittleEndian(record.AsSpan(24, 2), (ushort)((p.Color?.B ?? 255) * 257));
+            }
+            else if (pointFormat is 7 or 8 or 10)
+            {
+                BinaryPrimitives.WriteUInt16LittleEndian(record.AsSpan(30, 2), (ushort)((p.Color?.R ?? 255) * 257));
+                BinaryPrimitives.WriteUInt16LittleEndian(record.AsSpan(32, 2), (ushort)((p.Color?.G ?? 255) * 257));
+                BinaryPrimitives.WriteUInt16LittleEndian(record.AsSpan(34, 2), (ushort)((p.Color?.B ?? 255) * 257));
+            }
+
+            ms.Write(record);
+        }
+
+        return ms.ToArray();
     }
 }

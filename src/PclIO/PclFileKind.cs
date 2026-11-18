@@ -29,4 +29,7 @@ public enum PclFileKind
 
     /// <summary>ClearEdge3D EdgeWise point database and scan clusters (.c3db, .c3ptx).</summary>
     EdgeWise = 8,
+
+    /// <summary>ASPRS LAS point cloud file (.las).</summary>
+    Las = 9,
 }
