@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Globalization;
 using System.IO.Compression;
 using System.Security;
 using System.Text;
@@ -22,6 +23,9 @@ public readonly record struct PcdSamplePoint(double X, double Y, double Z, float
 
 /// <summary>One vertex of a synthetic PLY file: position, colour, intensity and normal.</summary>
 public readonly record struct PlySamplePoint(double X, double Y, double Z, PclColor? Color = null, float? Intensity = null, PclVector3? Normal = null, byte Alpha = 255);
+
+/// <summary>One point of a synthetic PTS file: position, intensity, colour and normal.</summary>
+public readonly record struct PtsSamplePoint(double X, double Y, double Z, float? Intensity = null, PclColor? Color = null, PclVector3? Normal = null, byte Alpha = 255);
 
 /// <summary>Generates small synthetic scan files for the tests. Every layout is written from what the readers implement;
 /// no byte of any of them comes from a real scan.</summary>
@@ -1202,5 +1206,57 @@ internal static class SyntheticFixtures
         }
 
         return bytes;
+    }
+
+    public static IReadOnlyList<PtsSamplePoint> DefaultPtsPoints =>
+    [
+        new(1, 2, 3, 511f, new PclColor(10, 20, 30), new PclVector3(0, 0, 1)),
+        new(-4.5, 5.25, 6.125, 1023f, new PclColor(255, 255, 255), new PclVector3(0, 0, 0)),
+        new(7, 8, 9, 0f, new PclColor(255, 255, 255), new PclVector3(0, 0, 0)),
+    ];
+
+    /// <summary>A synthetic PTS ASCII file.</summary>
+    public static byte[] CreateSyntheticPts(
+        IReadOnlyList<PtsSamplePoint>? points = null,
+        bool withCountHeader = true,
+        long? declaredCount = null,
+        int columns = 7,
+        string? customHeader = null)
+    {
+        points ??= DefaultPtsPoints;
+        long count = declaredCount ?? points.Count;
+        var sb = new StringBuilder();
+        if (customHeader != null)
+        {
+            sb.Append(customHeader);
+        }
+        else if (withCountHeader)
+        {
+            sb.Append(count.ToString(CultureInfo.InvariantCulture));
+            sb.Append('\n');
+        }
+
+        foreach (var pt in points)
+        {
+            string line = columns switch
+            {
+                3 => string.Create(CultureInfo.InvariantCulture, $"{pt.X:F4} {pt.Y:F4} {pt.Z:F4}"),
+                4 => string.Create(CultureInfo.InvariantCulture, $"{pt.X:F4} {pt.Y:F4} {pt.Z:F4} {pt.Intensity ?? 0f:F1}"),
+                6 when pt.Normal is { } n && (n.X < 0 || n.Y < 0 || n.Z < 0) =>
+                    string.Create(CultureInfo.InvariantCulture, $"{pt.X:F4} {pt.Y:F4} {pt.Z:F4} {n.X:F4} {n.Y:F4} {n.Z:F4}"),
+                6 => string.Create(CultureInfo.InvariantCulture, $"{pt.X:F4} {pt.Y:F4} {pt.Z:F4} {pt.Color?.R ?? 255} {pt.Color?.G ?? 255} {pt.Color?.B ?? 255}"),
+                7 when pt.Normal is { } n && (n.X < 0 || n.Y < 0 || n.Z < 0) =>
+                    string.Create(CultureInfo.InvariantCulture, $"{pt.X:F4} {pt.Y:F4} {pt.Z:F4} {pt.Intensity ?? 0f:F1} {n.X:F4} {n.Y:F4} {n.Z:F4}"),
+                7 => string.Create(CultureInfo.InvariantCulture, $"{pt.X:F4} {pt.Y:F4} {pt.Z:F4} {pt.Intensity ?? 0f:F1} {pt.Color?.R ?? 255} {pt.Color?.G ?? 255} {pt.Color?.B ?? 255}"),
+                8 => string.Create(CultureInfo.InvariantCulture, $"{pt.X:F4} {pt.Y:F4} {pt.Z:F4} {pt.Intensity ?? 0f:F1} {pt.Color?.R ?? 255} {pt.Color?.G ?? 255} {pt.Color?.B ?? 255} {pt.Alpha}"),
+                9 => string.Create(CultureInfo.InvariantCulture, $"{pt.X:F4} {pt.Y:F4} {pt.Z:F4} {pt.Color?.R ?? 255} {pt.Color?.G ?? 255} {pt.Color?.B ?? 255} {pt.Normal?.X ?? 0:F4} {pt.Normal?.Y ?? 0:F4} {pt.Normal?.Z ?? 1:F4}"),
+                10 => string.Create(CultureInfo.InvariantCulture, $"{pt.X:F4} {pt.Y:F4} {pt.Z:F4} {pt.Intensity ?? 0f:F1} {pt.Color?.R ?? 255} {pt.Color?.G ?? 255} {pt.Color?.B ?? 255} {pt.Normal?.X ?? 0:F4} {pt.Normal?.Y ?? 0:F4} {pt.Normal?.Z ?? 1:F4}"),
+                _ => throw new ArgumentException($"Unsupported column count {columns}", nameof(columns)),
+            };
+            sb.Append(line);
+            sb.Append('\n');
+        }
+
+        return System.Text.Encoding.UTF8.GetBytes(sb.ToString());
     }
 }

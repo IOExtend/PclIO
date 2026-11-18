@@ -68,6 +68,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - PLY files are read (`PclFileKind.Ply`): ASCII and binary little and big endian vertices with positions, 8-bit
   colour, intensity and normals by conventional names; faces and other elements are ignored. Vertices with
   non-finite coordinates are not returned.
+- PTS files are read (`PclFileKind.Pts`): Leica Cyclone ASCII exchange point clouds with or without an initial
+  point count line; positions, intensity, 8-bit colour and normals across 3, 4, 6, 7, 8, 9 and 10 column layouts.
+  Points with non-finite coordinates are not returned.
 - Leica scans read a block range with opt-in parallel decoding: the new `PclReadOptions.Blocks` selects the blocks of the
   scan in file order (per scan) and the new `PclReadOptions.MaxDegreeOfParallelism` (default 1, sequential streaming)
   decodes the selected blocks in parallel, keeping file order, consecutive `Index` values and `MaxPoints`/`SubsampleStep`

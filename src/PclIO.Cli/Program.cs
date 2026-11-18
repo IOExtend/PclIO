@@ -84,6 +84,7 @@ public static class Program
           LAS           by signature (.las)
           PCD           by header structure (.pcd)
           PLY           by header structure (.ply)
+          PTS           a line with the point count followed by point lines, or point lines with the extension .pts
 
         Output formats (--format, or the output extension; any other extension needs --format):
           las    ASPRS LAS 1.2, point data record format 2 (XYZ, intensity, RGB)

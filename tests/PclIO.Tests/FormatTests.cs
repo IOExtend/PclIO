@@ -7,6 +7,7 @@ using PclIO.Formats.Leica;
 using PclIO.Formats.Pcd;
 using PclIO.Formats.PinPoint;
 using PclIO.Formats.Ply;
+using PclIO.Formats.Pts;
 using PclIO.Formats.Recap;
 using Xunit;
 
@@ -3231,5 +3232,278 @@ public sealed class FormatTests
         Assert.Equal(3, scan.ReadPoints(NoTransform).Count());
         Assert.All(scan.ReadPoints(NoTransform), p => Assert.Null(p.Color));
         Assert.Contains(doc.Warnings, w => w.Contains("colour is not stored as 8-bit integers", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Pts_Open_Inspects_Document_Properties_And_Scan()
+    {
+        using var dir = new TempDirectory();
+        using var doc = PtsDocument.Open(dir.Write("sample.pts", SyntheticFixtures.CreateSyntheticPts()));
+
+        Assert.Equal(PclFileKind.Pts, doc.Kind);
+        Assert.Equal("Leica PTS", doc.Metadata["Format"]);
+        Assert.Equal("7", doc.Metadata["Columns"]);
+        Assert.Equal("3", doc.Metadata["DeclaredPoints"]);
+        Assert.True(doc.HasCountHeader);
+        Assert.Equal(3, doc.DeclaredPointCount);
+        Assert.Equal(7, doc.Columns);
+
+        var scan = Assert.Single(doc.Scans);
+        Assert.Equal("0", scan.Id);
+        Assert.Equal("sample", scan.Name);
+        Assert.Equal(3, scan.PointCount);
+        Assert.True(scan.HasColors);
+        Assert.True(scan.HasIntensities);
+        Assert.False(scan.HasNormals);
+        Assert.Equal(PclBounds.Empty, scan.Bounds);
+        Assert.Equal(PclTransform.Identity, scan.Transform);
+        Assert.Equal("7", scan.Properties["Columns"]);
+        Assert.Equal("True", scan.Properties["HasCountHeader"]);
+    }
+
+    [Fact]
+    public void Pts_Round_Trip_Positions_Intensity_And_Colour()
+    {
+        using var dir = new TempDirectory();
+        using var doc = PtsDocument.Open(dir.Write("sample.pts", SyntheticFixtures.CreateSyntheticPts()));
+
+        var points = doc.Scans[0].ReadPoints(NoTransform).ToList();
+
+        Assert.Equal(3, points.Count);
+        Assert.Equal([0UL, 1UL, 2UL], points.Select(p => p.Index));
+        AssertNear(new PclVector3(1, 2, 3), points[0].Position);
+        AssertNear(new PclVector3(-4.5, 5.25, 6.125), points[1].Position);
+        AssertNear(new PclVector3(7, 8, 9), points[2].Position);
+        Assert.Equal(511f, points[0].Intensity);
+        Assert.Equal(1023f, points[1].Intensity);
+        Assert.Equal(0f, points[2].Intensity);
+        Assert.Equal(new PclColor(10, 20, 30), points[0].Color);
+        Assert.Equal(new PclColor(255, 255, 255), points[1].Color);
+        Assert.Equal(new PclColor(255, 255, 255), points[2].Color);
+        Assert.All(points, p => Assert.Null(p.Normal));
+        Assert.All(points, p => Assert.Null(p.Classification));
+    }
+
+    [Fact]
+    public void Pts_Round_Trip_With_PclPtsExporter()
+    {
+        using var dir = new TempDirectory();
+        // Create an existing doc from synthetic PCD/PLY points and export to PTS
+        using var sourceDoc = PcdDocument.Open(dir.Write("source.pcd", SyntheticFixtures.CreateSyntheticPcd()));
+        string ptsPath = dir.PathOf("exported.pts");
+        using (var writer = File.CreateText(ptsPath))
+        {
+            long written = PclPtsExporter.Export(sourceDoc, writer);
+            Assert.Equal(3, written);
+        }
+
+        using var doc = PclFile.Open(ptsPath);
+        Assert.Equal(PclFileKind.Pts, doc.Kind);
+        Assert.Equal(3, doc.TotalPointCount);
+
+        var points = doc.ReadAllPoints(NoTransform).ToList();
+        Assert.Equal(3, points.Count);
+        AssertNear(new PclVector3(1, 2, 3), points[0].Position);
+        AssertNear(new PclVector3(-4.5, 5.25, 6.125), points[1].Position);
+        AssertNear(new PclVector3(7, 8, 9), points[2].Position);
+        // Intensity in PclPtsExporter is clamped to 0..1 and multiplied by 2047:
+        // 0.25 * 2047 = 511; 0.5 * 2047 = 1023; 0 * 2047 = 0
+        Assert.Equal(511f, points[0].Intensity);
+        Assert.Equal(1023f, points[1].Intensity);
+        Assert.Equal(0f, points[2].Intensity);
+        Assert.Equal(new PclColor(10, 20, 30), points[0].Color);
+        Assert.Equal(new PclColor(255, 255, 255), points[1].Color);
+        Assert.Equal(new PclColor(255, 255, 255), points[2].Color);
+    }
+
+    [Fact]
+    public void Pts_Reads_Headerless_File()
+    {
+        using var dir = new TempDirectory();
+        using var doc = PtsDocument.Open(dir.Write("sample.pts",
+            SyntheticFixtures.CreateSyntheticPts(withCountHeader: false)));
+
+        Assert.False(doc.HasCountHeader);
+        Assert.Equal(-1, doc.DeclaredPointCount);
+        Assert.Equal(3, doc.Scans[0].PointCount);
+
+        var points = doc.Scans[0].ReadPoints(NoTransform).ToList();
+        Assert.Equal(3, points.Count);
+        AssertNear(new PclVector3(1, 2, 3), points[0].Position);
+    }
+
+    [Theory]
+    [InlineData(3)]
+    [InlineData(4)]
+    public void Pts_Reads_Without_Colour(int columns)
+    {
+        using var dir = new TempDirectory();
+        using var doc = PtsDocument.Open(dir.Write("sample.pts",
+            SyntheticFixtures.CreateSyntheticPts(columns: columns)));
+
+        var scan = Assert.Single(doc.Scans);
+        Assert.False(scan.HasColors);
+        Assert.Equal(columns == 4, scan.HasIntensities);
+
+        var points = scan.ReadPoints(NoTransform).ToList();
+        Assert.Equal(3, points.Count);
+        Assert.All(points, p => Assert.Null(p.Color));
+        if (columns == 4)
+            Assert.Equal(511f, points[0].Intensity);
+        else
+            Assert.All(points, p => Assert.Null(p.Intensity));
+    }
+
+    [Fact]
+    public void Pts_Reads_6_Columns_With_Rgb_Or_Normals()
+    {
+        using var dir = new TempDirectory();
+
+        // 6 columns with RGB
+        using var docRgb = PtsDocument.Open(dir.Write("rgb.pts",
+            SyntheticFixtures.CreateSyntheticPts(columns: 6)));
+        var scanRgb = Assert.Single(docRgb.Scans);
+        Assert.True(scanRgb.HasColors);
+        Assert.False(scanRgb.HasNormals);
+        Assert.Equal(new PclColor(10, 20, 30), scanRgb.ReadPoints(NoTransform).First().Color);
+
+        // 6 columns with negative normal coordinates (like bunny-1000.pts)
+        var normalPoints = new[]
+        {
+            new PtsSamplePoint(1, 2, 3, Normal: new PclVector3(-0.3, -0.8, -0.5)),
+            new PtsSamplePoint(4, 5, 6, Normal: new PclVector3(-0.1, -0.9, 0.1)),
+        };
+        using var docNorm = PtsDocument.Open(dir.Write("normals.pts",
+            SyntheticFixtures.CreateSyntheticPts(normalPoints, columns: 6)));
+        var scanNorm = Assert.Single(docNorm.Scans);
+        Assert.False(scanNorm.HasColors);
+        Assert.True(scanNorm.HasNormals);
+        AssertNear(new PclVector3(-0.3, -0.8, -0.5), scanNorm.ReadPoints(NoTransform).First().Normal!.Value);
+    }
+
+    [Theory]
+    [InlineData(8)]
+    [InlineData(9)]
+    [InlineData(10)]
+    public void Pts_Reads_Extended_Columns(int columns)
+    {
+        using var dir = new TempDirectory();
+        using var doc = PtsDocument.Open(dir.Write("extended.pts",
+            SyntheticFixtures.CreateSyntheticPts(columns: columns)));
+
+        var scan = Assert.Single(doc.Scans);
+        Assert.True(scan.HasColors);
+        Assert.Equal(columns != 9, scan.HasIntensities);
+        Assert.Equal(columns >= 9, scan.HasNormals);
+
+        var pt = scan.ReadPoints(NoTransform).First();
+        Assert.Equal(new PclColor(10, 20, 30), pt.Color);
+        if (columns >= 9)
+            AssertNear(new PclVector3(0, 0, 1), pt.Normal!.Value);
+    }
+
+    [Fact]
+    public void Pts_Skips_NonFinite_Coordinates()
+    {
+        var points = new[]
+        {
+            new PtsSamplePoint(1, 2, 3),
+            new PtsSamplePoint(double.NaN, 5, 6),
+            new PtsSamplePoint(7, double.PositiveInfinity, 9),
+            new PtsSamplePoint(10, 11, 12),
+        };
+        using var dir = new TempDirectory();
+        using var doc = PtsDocument.Open(dir.Write("nan.pts",
+            SyntheticFixtures.CreateSyntheticPts(points, columns: 3)));
+
+        var yielded = doc.Scans[0].ReadPoints(NoTransform).ToList();
+        Assert.Equal(2, yielded.Count);
+        Assert.Equal([0UL, 1UL], yielded.Select(p => p.Index));
+        AssertNear(new PclVector3(1, 2, 3), yielded[0].Position);
+        AssertNear(new PclVector3(10, 11, 12), yielded[1].Position);
+    }
+
+    [Fact]
+    public void Pts_Honours_MaxPoints_And_SubsampleStep()
+    {
+        using var dir = new TempDirectory();
+        using var doc = PtsDocument.Open(dir.Write("sample.pts", SyntheticFixtures.CreateSyntheticPts()));
+
+        var limit1 = doc.Scans[0].ReadPoints(new PclReadOptions { MaxPoints = 1 }).ToList();
+        Assert.Single(limit1);
+        AssertNear(new PclVector3(1, 2, 3), limit1[0].Position);
+
+        var step2 = doc.Scans[0].ReadPoints(new PclReadOptions { SubsampleStep = 2 }).ToList();
+        Assert.Equal(2, step2.Count);
+        AssertNear(new PclVector3(1, 2, 3), step2[0].Position);
+        AssertNear(new PclVector3(7, 8, 9), step2[1].Position);
+    }
+
+    [Fact]
+    public void Pts_Reads_Empty_File_With_Zero_Declared_Count()
+    {
+        using var dir = new TempDirectory();
+        using var doc = PtsDocument.Open(dir.Write("empty.pts", "0\n"u8.ToArray()));
+
+        Assert.True(doc.HasCountHeader);
+        Assert.Equal(0, doc.DeclaredPointCount);
+        Assert.Equal(0, doc.Scans[0].PointCount);
+        Assert.Empty(doc.Scans[0].ReadPoints(NoTransform));
+    }
+
+    [Fact]
+    public void Pts_Rejects_Negative_Declared_Count()
+    {
+        using var dir = new TempDirectory();
+        Assert.Throws<InvalidDataException>(() =>
+            PtsDocument.Open(dir.Write("bad.pts", "-5\n1 2 3 50 255 0 0\n"u8.ToArray())));
+    }
+
+    [Fact]
+    public void Pts_Rejects_Oversized_Declared_Count()
+    {
+        using var dir = new TempDirectory();
+        Assert.Throws<InvalidDataException>(() =>
+            PtsDocument.Open(dir.Write("bad.pts", "1000000000\n1 2 3\n"u8.ToArray())));
+    }
+
+    [Fact]
+    public void Pts_Rejects_Truncated_Points()
+    {
+        using var dir = new TempDirectory();
+        using var doc = PtsDocument.Open(dir.WriteText("truncated.pts",
+            "3\n1.0 2.0 3.0 100 255 0 0\n4.0 5.0 6.0 100 0 255 0\n"));
+
+        Assert.Throws<InvalidDataException>(() => doc.Scans[0].ReadPoints(NoTransform).ToList());
+    }
+
+    [Fact]
+    public void Pts_Rejects_Mismatched_Or_Unsupported_Columns()
+    {
+        using var dir = new TempDirectory();
+        // 5 columns is unsupported
+        Assert.Throws<NotSupportedException>(() =>
+            PtsDocument.Open(dir.Write("bad.pts", "1\n1 2 3 4 5\n"u8.ToArray())));
+
+        // Mismatched columns across lines
+        using var doc = PtsDocument.Open(dir.Write("mismatch.pts", "2\n1 2 3\n1 2 3 4 5 6 7\n"u8.ToArray()));
+        Assert.Throws<InvalidDataException>(() => doc.Scans[0].ReadPoints(NoTransform).ToList());
+    }
+
+    [Fact]
+    public void Pts_Rejects_Invalid_Numeric_Values()
+    {
+        using var dir = new TempDirectory();
+        Assert.Throws<InvalidDataException>(() =>
+            PtsDocument.Open(dir.Write("bad.pts", "1\n1 abc 3\n"u8.ToArray())));
+    }
+
+    [Fact]
+    public void Pts_Rejects_Line_Exceeding_Max_Length()
+    {
+        using var dir = new TempDirectory();
+        string longLine = "1 2 3 " + new string('9', (1 << 20) + 10) + "\n";
+        Assert.Throws<InvalidDataException>(() =>
+            PtsDocument.Open(dir.WriteText("long.pts", "1\n" + longLine)));
     }
 }
