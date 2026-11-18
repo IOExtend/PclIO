@@ -537,6 +537,72 @@ public sealed class KindDetectionTests
         Assert.Equal(PclFileKind.Unknown, Detect(plainText, "text.ptg"));
     }
 
+    [Theory]
+    [InlineData("scan.bin")]
+    [InlineData("SCAN.BIN")]
+    [InlineData("scan.dat")]
+    public void Detects_Cc_Bin_By_Signature(string name)
+    {
+        byte[] bytes = SyntheticFixtures.CreateSyntheticCcBin([new CcBinSamplePoint(1, 2, 3)]);
+        Assert.Equal(PclFileKind.CcBin, Detect(bytes, name));
+
+        using var ms = new MemoryStream(bytes);
+        Assert.Equal(PclFileKind.CcBin, PclFile.DetectKind(ms));
+    }
+
+    [Fact]
+    public void Cc_Bin_Needs_The_Signature_Not_Just_The_Extension()
+    {
+        byte[] randomBin = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+        Assert.Equal(PclFileKind.Unknown, Detect(randomBin, "random.bin"));
+    }
+
+    [Fact]
+    public void Detects_Cc_Bin_File_Path()
+    {
+        using var tempDir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticCcBin([new CcBinSamplePoint(10, 20, 30)]);
+        string binPath = tempDir.Write("test.bin", bytes);
+        Assert.Equal(PclFileKind.CcBin, PclFile.DetectKind(binPath));
+
+        string badBin = tempDir.Write("bad.bin", [0x00, 0x01, 0x02, 0x03]);
+        Assert.Equal(PclFileKind.Unknown, PclFile.DetectKind(badBin));
+    }
+
+    [Fact]
+    public void Potree_Node_With_Cc_Magic_Coordinates_Is_Detected_As_Potree_Near_Manifest()
+    {
+        using var tempDir = new TempDirectory();
+        const double scale = 0.001;
+        var (manifest, data, hierarchy) = SyntheticFixtures.CreateSyntheticPotree1x(
+            [new(0x32424343 * scale, 47 * scale, 257 * scale), new(0, 100 * scale, 0)],
+            new PclVector3(scale, scale, scale), PclVector3.Zero, hasColors: false, normalType: "",
+            hasIntensity: false, hasClassification: false);
+        tempDir.WriteText("cloud.js", manifest);
+        tempDir.WriteText("data/r/metadata.json", "{}");
+        tempDir.Write("data/r/r.hrc", hierarchy);
+        string rBinPath = tempDir.Write("data/r/r.bin", data);
+
+        Assert.Equal(PclFileKind.CcBin, Detect(data, "r.bin"));
+        Assert.Equal(PclFileKind.Potree, PclFile.DetectKind(rBinPath));
+        using var doc = PclFile.Open(rBinPath);
+        Assert.Equal(2, doc.ReadAllPoints().Count());
+    }
+
+    [Theory]
+    [InlineData("metadata.json")]
+    [InlineData("cloud.js")]
+    public void Unrelated_Manifest_Does_Not_Hide_Cc_Bin(string manifestName)
+    {
+        using var dir = new TempDirectory();
+        dir.WriteText(manifestName, "{}");
+        string path = dir.Write("cloud.bin", SyntheticFixtures.CreateSyntheticCcBin([new(1, 2, 3)]));
+
+        using var doc = PclFile.Open(path);
+        Assert.Equal(PclFileKind.CcBin, doc.Kind);
+        Assert.Single(doc.ReadAllPoints());
+    }
+
     private sealed class NonSeekableStream(byte[] bytes) : MemoryStream(bytes)
     {
         public override bool CanSeek => false;

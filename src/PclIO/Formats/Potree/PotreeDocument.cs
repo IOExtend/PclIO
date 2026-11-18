@@ -25,7 +25,7 @@ namespace PclIO.Formats.Potree;
 /// </remarks>
 public sealed class PotreeDocument : PclDocument
 {
-    private const int MaxManifestBytes = 16 * 1024 * 1024; // 16 MB
+    private const int MaxManifestBytes = KindDetector.MaxPotreeManifestBytes;
 
     /// <inheritdoc />
     public override PclFileKind Kind => PclFileKind.Potree;
@@ -132,11 +132,11 @@ public sealed class PotreeDocument : PclDocument
             for (int depth = 0; depth < 5 && dir != null; depth++)
             {
                 string cjs = Path.Combine(dir, "cloud.js");
-                if (File.Exists(cjs))
+                if (KindDetector.IsPotreeManifest(cjs))
                     return OpenPotree1x(cjs);
 
                 string mjs = Path.Combine(dir, "metadata.json");
-                if (File.Exists(mjs))
+                if (KindDetector.IsPotreeManifest(mjs))
                     return OpenPotree2x(mjs);
 
                 string? parent = Path.GetDirectoryName(dir);

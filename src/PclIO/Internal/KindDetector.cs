@@ -11,6 +11,8 @@ namespace PclIO.Internal;
 /// </summary>
 internal static class KindDetector
 {
+    internal const int MaxPotreeManifestBytes = 16 * 1024 * 1024;
+
     private static readonly byte[] E57Magic = "ASTM-E57"u8.ToArray();
     // Container signatures at the start of the files the readers accept.
     private static readonly byte[] LeicaMagic = "wild::geosystems"u8.ToArray();
@@ -28,6 +30,8 @@ internal static class KindDetector
     // Leica PTG binary scan signature and magic number.
     private static readonly byte[] PtgTag = [0x50, 0x54, 0x47, 0x00];
     private const uint PtgMagicNumber = 0x928FA3C7;
+    // CC BIN entity file signature (CCB2).
+    private static readonly byte[] CcBinMagic = "CCB2"u8.ToArray();
 
     public static PclFileKind Detect(string path)
     {
@@ -84,7 +88,7 @@ internal static class KindDetector
             string? dir = Path.GetDirectoryName(Path.GetFullPath(path));
             for (int depth = 0; depth < 5 && dir != null; depth++)
             {
-                if (File.Exists(Path.Combine(dir, "cloud.js")) || File.Exists(Path.Combine(dir, "metadata.json")))
+                if (IsPotreeManifest(Path.Combine(dir, "cloud.js")) || IsPotreeManifest(Path.Combine(dir, "metadata.json")))
                     return PclFileKind.Potree;
                 string? parent = Path.GetDirectoryName(dir);
                 if (parent == dir) break;
@@ -121,6 +125,9 @@ internal static class KindDetector
         // The extension rule for the cluster file below needs no content, so it also applies to a very short file.
         if (read < 4) return extension is ".c3db" or ".c3ptx" ? PclFileKind.EdgeWise : PclFileKind.Unknown;
         ReadOnlySpan<byte> head = buffer[..read];
+
+        if (head.StartsWith(CcBinMagic) && IsCcBinStructure(head))
+            return PclFileKind.CcBin;
 
         if (head.Length >= 8 && head.StartsWith(PtgTag) && BinaryPrimitives.ReadUInt32LittleEndian(head[4..8]) == PtgMagicNumber)
             return PclFileKind.LeicaPtg;
@@ -1090,8 +1097,16 @@ internal static class KindDetector
         }
     }
 
+    internal static bool IsPotreeManifest(string path)
+    {
+        if (!File.Exists(path)) return false;
+        using var stream = File.OpenRead(path);
+        return stream.Length <= MaxPotreeManifestBytes &&
+            IsPotreeJsonHeader(stream, 0, Path.GetExtension(path), MaxPotreeManifestBytes);
+    }
+
     // Potree manifest: cloud.js (1.x) or metadata.json (2.x)
-    private static bool IsPotreeJsonHeader(Stream stream, long origin, string? extension)
+    private static bool IsPotreeJsonHeader(Stream stream, long origin, string? extension, int maxProbeBytes = 8192)
     {
         if (extension != null && extension != ".js" && extension != ".json")
             return false;
@@ -1099,7 +1114,7 @@ internal static class KindDetector
         long length = stream.CanSeek ? stream.Length : long.MaxValue;
         if (length - origin < 10) return false;
 
-        int toRead = (int)Math.Min(8192, length - origin);
+        int toRead = (int)Math.Min(maxProbeBytes, length - origin);
         byte[] buf = new byte[toRead];
         stream.Position = origin;
         try
@@ -1129,7 +1144,7 @@ internal static class KindDetector
             }
 
             // Potree 2.x (metadata.json)
-            if (root.TryGetProperty("version", out var verElem) &&
+            if (root.TryGetProperty("version", out var verElem) && verElem.ValueKind == JsonValueKind.String &&
                 verElem.GetString() is { } v && v.StartsWith("2.") &&
                 root.TryGetProperty("points", out _) &&
                 (root.TryGetProperty("hierarchy", out _) || root.TryGetProperty("attributes", out _)))
@@ -1139,7 +1154,7 @@ internal static class KindDetector
 
             return false;
         }
-        catch
+        catch (JsonException)
         {
             return false;
         }
@@ -1304,5 +1319,29 @@ internal static class KindDetector
         {
             stream.Position = origin;
         }
+    }
+
+    private static bool IsCcBinStructure(ReadOnlySpan<byte> head)
+    {
+        if (head.Length < 24 || !head.StartsWith(CcBinMagic))
+            return false;
+
+        uint version = BinaryPrimitives.ReadUInt32LittleEndian(head[4..8]);
+        if (version is < 1 or > 100)
+            return false;
+
+        uint entityType = BinaryPrimitives.ReadUInt32LittleEndian(head[8..12]);
+        if (entityType is not (1 or 257 or 33 or 34 or 65))
+            return false;
+
+        uint f2 = BinaryPrimitives.ReadUInt32LittleEndian(head[12..16]);
+        if (f2 != 0)
+            return false;
+
+        uint nameLen = BinaryPrimitives.ReadUInt32BigEndian(head[20..24]);
+        if (nameLen != 0xFFFF_FFFF && (nameLen > 2048 || (nameLen % 2) != 0))
+            return false;
+
+        return true;
     }
 }

@@ -70,6 +70,12 @@ public readonly record struct EptSamplePoint(
     PclVector3? Normal = null,
     byte? Classification = null);
 
+/// <summary>One point of a synthetic CC BIN file: position, colour and intensity.</summary>
+public readonly record struct CcBinSamplePoint(
+    double X, double Y, double Z,
+    PclColor? Color = null,
+    float? Intensity = null);
+
 /// <summary>Generates small synthetic scan files for the tests. Every layout is written from what the readers implement;
 /// no byte of any of them comes from a real scan.</summary>
 internal static class SyntheticFixtures
@@ -2934,5 +2940,293 @@ internal static class SyntheticFixtures
             sb.AppendLine(path);
         }
         return Encoding.UTF8.GetBytes(sb.ToString());
+    }
+
+    // ---- CC BIN (.bin) ------------------------------------------------------------------------------------------
+
+    /// <summary>Creates a synthetic CC BIN point cloud file (.bin, CCB2).</summary>
+    public static byte[] CreateSyntheticCcBin(
+        IReadOnlyList<CcBinSamplePoint> points,
+        string name = "Cloud",
+        double shiftX = 0,
+        double shiftY = 0,
+        double shiftZ = 0,
+        double scale = 1.0,
+        bool withColors = true,
+        bool withIntensity = true,
+        uint version = 47,
+        double[]? matrix16 = null,
+        IReadOnlyDictionary<string, double>? doubleProperties = null,
+        byte[]? rawMagic = null,
+        bool truncatePoints = false,
+        bool truncateColorBlock = false,
+        bool truncateIntensityData = false,
+        int? declaredIntensityCount = null)
+    {
+        using var ms = new MemoryStream();
+
+        // 1. Magic signature (4 bytes)
+        ms.Write(rawMagic ?? "CCB2"u8.ToArray());
+
+        // 2. Version (uint32 LE)
+        Span<byte> u32Buf = stackalloc byte[4];
+        BinaryPrimitives.WriteUInt32LittleEndian(u32Buf, version);
+        ms.Write(u32Buf);
+
+        WriteCcBinCloudEntity(
+            ms,
+            points,
+            name: name,
+            id: 100,
+            shiftX: shiftX,
+            shiftY: shiftY,
+            shiftZ: shiftZ,
+            scale: scale,
+            withColors: withColors,
+            withIntensity: withIntensity,
+            declaredIntensityCount: declaredIntensityCount,
+            matrix16: matrix16,
+            doubleProperties: doubleProperties,
+            truncatePoints: truncatePoints,
+            truncateColorBlock: truncateColorBlock,
+            truncateIntensityData: truncateIntensityData);
+
+        return ms.ToArray();
+    }
+
+    /// <summary>Creates a synthetic CC BIN file containing multiple adjacent cloud entities.</summary>
+    public static byte[] CreateSyntheticCcBinMultiCloud(
+        IReadOnlyList<IReadOnlyList<CcBinSamplePoint>> clouds,
+        uint version = 47)
+    {
+        using var ms = new MemoryStream();
+        ms.Write("CCB2"u8.ToArray());
+
+        Span<byte> u32Buf = stackalloc byte[4];
+        BinaryPrimitives.WriteUInt32LittleEndian(u32Buf, version);
+        ms.Write(u32Buf);
+
+        for (int c = 0; c < clouds.Count; c++)
+        {
+            WriteCcBinCloudEntity(
+                ms,
+                clouds[c],
+                name: $"Cloud_{c + 1}",
+                id: (uint)(100 + c));
+        }
+
+        return ms.ToArray();
+    }
+
+    private static void WriteCcBinCloudEntity(
+        Stream ms,
+        IReadOnlyList<CcBinSamplePoint> points,
+        string name = "Cloud",
+        uint id = 100,
+        double shiftX = 0,
+        double shiftY = 0,
+        double shiftZ = 0,
+        double scale = 1.0,
+        bool withColors = true,
+        bool withIntensity = true,
+        int? declaredIntensityCount = null,
+        double[]? matrix16 = null,
+        IReadOnlyDictionary<string, double>? doubleProperties = null,
+        bool truncatePoints = false,
+        bool truncateColorBlock = false,
+        bool truncateIntensityData = false)
+    {
+        Span<byte> u32Buf = stackalloc byte[4];
+
+        // 3. Entity header: f1 (257), f2 (0), id
+        BinaryPrimitives.WriteUInt32LittleEndian(u32Buf, 257);
+        ms.Write(u32Buf);
+        BinaryPrimitives.WriteUInt32LittleEndian(u32Buf, 0);
+        ms.Write(u32Buf);
+        BinaryPrimitives.WriteUInt32LittleEndian(u32Buf, id);
+        ms.Write(u32Buf);
+
+        // Name (UTF-16 BE)
+        byte[] nameBytes = Encoding.BigEndianUnicode.GetBytes(name);
+        BinaryPrimitives.WriteUInt32BigEndian(u32Buf, (uint)nameBytes.Length);
+        ms.Write(u32Buf);
+        ms.Write(nameBytes);
+
+        // 4. QVariantMap properties
+        BinaryPrimitives.WriteUInt32LittleEndian(u32Buf, 2); // mapType
+        ms.Write(u32Buf);
+        BinaryPrimitives.WriteUInt32LittleEndian(u32Buf, (uint)(doubleProperties?.Count ?? 0));
+        ms.Write(u32Buf);
+
+        if (doubleProperties != null)
+        {
+            Span<byte> dBuf = stackalloc byte[8];
+            foreach (var kvp in doubleProperties)
+            {
+                byte[] kBytes = Encoding.BigEndianUnicode.GetBytes(kvp.Key);
+                BinaryPrimitives.WriteUInt32BigEndian(u32Buf, (uint)kBytes.Length);
+                ms.Write(u32Buf);
+                ms.Write(kBytes);
+
+                BinaryPrimitives.WriteUInt32BigEndian(u32Buf, 6); // vType = double
+                ms.Write(u32Buf);
+                ms.WriteByte(0); // isNull = 0
+
+                BinaryPrimitives.WriteUInt64BigEndian(dBuf, BitConverter.DoubleToUInt64Bits(kvp.Value));
+                ms.Write(dBuf);
+            }
+        }
+
+        // 5. Flags (8 bytes), shift (24 bytes), scale (8 bytes), marker (3 bytes)
+        ms.WriteByte(0x01);
+        ms.WriteByte(0x00);
+        ms.WriteByte(0x01);
+        ms.WriteByte(0x00);
+        ms.WriteByte(0x00);
+        ms.WriteByte(0x00);
+        ms.WriteByte(0x00);
+        ms.WriteByte(0x00);
+
+        Span<byte> dblBuf = stackalloc byte[8];
+        BinaryPrimitives.WriteDoubleLittleEndian(dblBuf, shiftX);
+        ms.Write(dblBuf);
+        BinaryPrimitives.WriteDoubleLittleEndian(dblBuf, shiftY);
+        ms.Write(dblBuf);
+        BinaryPrimitives.WriteDoubleLittleEndian(dblBuf, shiftZ);
+        ms.Write(dblBuf);
+        BinaryPrimitives.WriteDoubleLittleEndian(dblBuf, scale);
+        ms.Write(dblBuf);
+
+        ms.WriteByte(0x00);
+        ms.WriteByte(0x00);
+        ms.WriteByte(0x03);
+
+        // 6. Point count (uint32 LE)
+        BinaryPrimitives.WriteUInt32LittleEndian(u32Buf, (uint)points.Count);
+        ms.Write(u32Buf);
+
+        // 7. Points data (12 bytes per point)
+        int ptCountToWrite = truncatePoints ? points.Count / 2 : points.Count;
+        Span<byte> ptBuf = stackalloc byte[12];
+        for (int i = 0; i < ptCountToWrite; i++)
+        {
+            var pt = points[i];
+            BinaryPrimitives.WriteSingleLittleEndian(ptBuf.Slice(0, 4), (float)pt.X);
+            BinaryPrimitives.WriteSingleLittleEndian(ptBuf.Slice(4, 4), (float)pt.Y);
+            BinaryPrimitives.WriteSingleLittleEndian(ptBuf.Slice(8, 4), (float)pt.Z);
+            ms.Write(ptBuf);
+        }
+
+        if (truncatePoints)
+            return;
+
+        // 8. Colors
+        if (truncateColorBlock)
+        {
+            ms.WriteByte(0x01); // color flag declared, but stream ends immediately
+            return;
+        }
+
+        if (withColors)
+        {
+            ms.WriteByte(0x01); // color flag
+
+            // Header: f1, f2, id, nameLen, name ("RGB colors"), colType, colFlags, channels, colCount
+            BinaryPrimitives.WriteUInt32LittleEndian(u32Buf, 0x10000012);
+            ms.Write(u32Buf);
+            BinaryPrimitives.WriteUInt32LittleEndian(u32Buf, 0);
+            ms.Write(u32Buf);
+            BinaryPrimitives.WriteUInt32LittleEndian(u32Buf, 101);
+            ms.Write(u32Buf);
+
+            byte[] colNameBytes = Encoding.BigEndianUnicode.GetBytes("RGB colors");
+            BinaryPrimitives.WriteUInt32BigEndian(u32Buf, (uint)colNameBytes.Length);
+            ms.Write(u32Buf);
+            ms.Write(colNameBytes);
+
+            BinaryPrimitives.WriteUInt32LittleEndian(u32Buf, 6);
+            ms.Write(u32Buf);
+            BinaryPrimitives.WriteUInt32LittleEndian(u32Buf, 0);
+            ms.Write(u32Buf);
+            ms.WriteByte(3); // channels
+
+            BinaryPrimitives.WriteUInt32LittleEndian(u32Buf, (uint)points.Count);
+            ms.Write(u32Buf);
+
+            Span<byte> rgb = stackalloc byte[3];
+            for (int i = 0; i < points.Count; i++)
+            {
+                var pt = points[i];
+                rgb[0] = pt.Color?.R ?? 255;
+                rgb[1] = pt.Color?.G ?? 255;
+                rgb[2] = pt.Color?.B ?? 255;
+                ms.Write(rgb);
+            }
+        }
+        else
+        {
+            ms.WriteByte(0x00);
+        }
+
+        // 9. Matrix 4x4 (8 bytes + 64 bytes)
+        Span<byte> zeros8 = stackalloc byte[8];
+        ms.Write(zeros8);
+
+        Span<byte> matBuf = stackalloc byte[64];
+        for (int m = 0; m < 16; m++)
+        {
+            float val;
+            if (matrix16 != null && m < matrix16.Length)
+            {
+                val = (float)matrix16[m];
+            }
+            else
+            {
+                int row = m / 4;
+                int col = m % 4;
+                val = row == col ? 1f : 0f;
+            }
+            BinaryPrimitives.WriteSingleLittleEndian(matBuf.Slice(m * 4, 4), val);
+        }
+        ms.Write(matBuf);
+
+        // 10. Scalar fields (Intensity)
+        if (withIntensity)
+        {
+            ms.WriteByte(0x00);
+            BinaryPrimitives.WriteUInt32LittleEndian(u32Buf, 1); // 1 scalar field
+            ms.Write(u32Buf);
+
+            byte[] nameBuf256 = new byte[256];
+            Encoding.ASCII.GetBytes("Intensity", nameBuf256.AsSpan());
+            ms.Write(nameBuf256);
+
+            ms.WriteByte(0x01); // flag
+            int actualIntensityCount = declaredIntensityCount ?? (truncateIntensityData ? 2 : points.Count);
+            BinaryPrimitives.WriteUInt32LittleEndian(u32Buf, (uint)actualIntensityCount);
+            ms.Write(u32Buf);
+
+            Span<byte> fltBuf = stackalloc byte[4];
+            int toWrite = truncateIntensityData ? 1 : actualIntensityCount;
+            for (int i = 0; i < toWrite; i++)
+            {
+                float val = i < points.Count ? (points[i].Intensity ?? 0f) : 0f;
+                BinaryPrimitives.WriteSingleLittleEndian(fltBuf, val);
+                ms.Write(fltBuf);
+            }
+
+            if (truncateIntensityData)
+                return;
+
+            // Write 4 trailing bytes with float value 99f to ensure reading past actualIntensityCount would read 99
+            BinaryPrimitives.WriteSingleLittleEndian(fltBuf, 99f);
+            ms.Write(fltBuf);
+        }
+        else
+        {
+            ms.WriteByte(0x00);
+            BinaryPrimitives.WriteUInt32LittleEndian(u32Buf, 0);
+            ms.Write(u32Buf);
+        }
     }
 }

@@ -1,4 +1,5 @@
 using PclIO.Export;
+using PclIO.Formats.CcBin;
 using PclIO.Formats.Copc;
 using PclIO.Formats.E57;
 using PclIO.Formats.EdgeWise;
@@ -604,7 +605,7 @@ public sealed class FormatTests
         using var dir = new TempDirectory();
         using var doc = E57Document.Open(dir.Write("partial.e57", spec.Build()));
 
-        Assert.Throws<InvalidDataException>(() => doc.Scans[0].ReadPoints().ToList());
+        Assert.Throws<InvalidDataException>(() => { _ = doc.Scans[0].ReadPoints().ToList(); });
     }
 
     [Fact]
@@ -714,7 +715,7 @@ public sealed class FormatTests
         using var dir = new TempDirectory();
         using var doc = E57Document.Open(dir.Write("partial.e57", spec.Build()));
 
-        Assert.Throws<InvalidDataException>(() => doc.Scans[0].ReadPoints().ToList());
+        Assert.Throws<InvalidDataException>(() => { _ = doc.Scans[0].ReadPoints().ToList(); });
     }
 
     [Fact]
@@ -979,7 +980,7 @@ public sealed class FormatTests
         using var dir = new TempDirectory();
         using var doc = E57Document.Open(dir.Write("partial.e57", spec.Build()));
 
-        Assert.Throws<InvalidDataException>(() => doc.Scans[0].ReadPoints().ToList());
+        Assert.Throws<InvalidDataException>(() => { _ = doc.Scans[0].ReadPoints().ToList(); });
     }
 
     [Fact]
@@ -2424,7 +2425,7 @@ public sealed class FormatTests
         using var doc = LasDocument.Open(dir.Write("sample.las", bytes));
 
         Assert.Equal(uint.MaxValue, doc.Scans[0].PointCount);
-        Assert.Throws<InvalidDataException>(() => doc.Scans[0].ReadPoints().ToList());
+        Assert.Throws<InvalidDataException>(() => { _ = doc.Scans[0].ReadPoints().ToList(); });
     }
 
     [Fact]
@@ -2487,7 +2488,7 @@ public sealed class FormatTests
         using var doc = LasDocument.Open(dir.Write("cut.las", cut));
 
         Assert.Equal(3, doc.Scans[0].PointCount);
-        Assert.Throws<InvalidDataException>(() => doc.Scans[0].ReadPoints().ToList());
+        Assert.Throws<InvalidDataException>(() => { _ = doc.Scans[0].ReadPoints().ToList(); });
     }
 
     [Fact]
@@ -2736,7 +2737,7 @@ public sealed class FormatTests
         using var doc = PcdDocument.Open(dir.Write("cut.pcd", cut));
 
         Assert.Equal(3, doc.Scans[0].PointCount);
-        Assert.Throws<InvalidDataException>(() => doc.Scans[0].ReadPoints().ToList());
+        Assert.Throws<InvalidDataException>(() => { _ = doc.Scans[0].ReadPoints().ToList(); });
     }
 
     [Theory]
@@ -2763,7 +2764,7 @@ public sealed class FormatTests
         bytes[bodyAt + 8] = 0xFF; // a match reaching before the start of the output
         using var doc = PcdDocument.Open(dir.Write("sample.pcd", bytes));
 
-        Assert.Throws<InvalidDataException>(() => doc.Scans[0].ReadPoints().ToList());
+        Assert.Throws<InvalidDataException>(() => { _ = doc.Scans[0].ReadPoints().ToList(); });
     }
 
     [Fact]
@@ -2890,7 +2891,7 @@ public sealed class FormatTests
         byte[] body = System.Text.Encoding.ASCII.GetBytes(new string('1', (1 << 20) + 1) + "\n");
         using var doc = PcdDocument.Open(dir.Write("sample.pcd", SyntheticFixtures.CreatePcdFile(header, body)));
 
-        Assert.Throws<InvalidDataException>(() => doc.Scans[0].ReadPoints().ToList());
+        Assert.Throws<InvalidDataException>(() => { _ = doc.Scans[0].ReadPoints().ToList(); });
     }
 
     [Fact]
@@ -3117,7 +3118,7 @@ public sealed class FormatTests
 
         using var doc = PlyDocument.Open(dir.Write("cut.ply", bytes[..(bytes.Length - 5)]));
         Assert.Equal(3, doc.Scans[0].PointCount);
-        Assert.Throws<InvalidDataException>(() => doc.Scans[0].ReadPoints().ToList());
+        Assert.Throws<InvalidDataException>(() => { _ = doc.Scans[0].ReadPoints().ToList(); });
     }
 
     [Fact]
@@ -3137,7 +3138,7 @@ public sealed class FormatTests
         ], []);
         using var doc = PlyDocument.Open(dir.Write("sample.ply", bytes));
 
-        Assert.Throws<InvalidDataException>(() => doc.Scans[0].ReadPoints().ToList());
+        Assert.Throws<InvalidDataException>(() => { _ = doc.Scans[0].ReadPoints().ToList(); });
     }
 
     [Fact]
@@ -6334,5 +6335,360 @@ public sealed class FormatTests
         byte[] missingScanIdx = SyntheticFixtures.CreateSyntheticPtgIndex(["nonexistent.ptg"]);
         string missingPath = dir.Write("missing_ref.ptg", missingScanIdx);
         Assert.Throws<FileNotFoundException>(() => PtgDocument.Open(missingPath));
+    }
+
+    // ---- CC BIN (.bin) ------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void Cc_Bin_Reads_Points_Coordinates_Colors_And_Intensity()
+    {
+        using var dir = new TempDirectory();
+        var samplePoints = new List<CcBinSamplePoint>
+        {
+            new(1.0, 2.0, 3.0, new PclColor(255, 0, 0), 10.5f),
+            new(4.0, 5.0, 6.0, new PclColor(0, 255, 0), 20.0f),
+            new(7.0, 8.0, 9.0, new PclColor(0, 0, 255), 30.25f),
+        };
+
+        byte[] bytes = SyntheticFixtures.CreateSyntheticCcBin(samplePoints, name: "TestCloud");
+        string path = dir.Write("test.bin", bytes);
+
+        using var doc = CcBinDocument.Open(path);
+        Assert.Equal(PclFileKind.CcBin, doc.Kind);
+        Assert.Single(doc.Scans);
+
+        var scan = doc.Scans[0];
+        Assert.Equal("TestCloud", scan.Name);
+        Assert.Equal(3, scan.PointCount);
+        Assert.True(scan.HasColors);
+        Assert.True(scan.HasIntensities);
+
+        var points = scan.ReadPoints().ToList();
+        Assert.Equal(3, points.Count);
+
+        Assert.Equal(1.0, points[0].X, precision: 4);
+        Assert.Equal(2.0, points[0].Y, precision: 4);
+        Assert.Equal(3.0, points[0].Z, precision: 4);
+        Assert.Equal(new PclColor(255, 0, 0), points[0].Color);
+        Assert.Equal(10.5f, points[0].Intensity);
+        Assert.Equal(0UL, points[0].Index);
+
+        Assert.Equal(4.0, points[1].X, precision: 4);
+        Assert.Equal(5.0, points[1].Y, precision: 4);
+        Assert.Equal(6.0, points[1].Z, precision: 4);
+        Assert.Equal(new PclColor(0, 255, 0), points[1].Color);
+        Assert.Equal(20.0f, points[1].Intensity);
+        Assert.Equal(1UL, points[1].Index);
+
+        Assert.Equal(7.0, points[2].X, precision: 4);
+        Assert.Equal(8.0, points[2].Y, precision: 4);
+        Assert.Equal(9.0, points[2].Z, precision: 4);
+        Assert.Equal(new PclColor(0, 0, 255), points[2].Color);
+        Assert.Equal(30.25f, points[2].Intensity);
+        Assert.Equal(2UL, points[2].Index);
+    }
+
+    [Fact]
+    public void Cc_Bin_Applies_Shift_And_Scale_Transform()
+    {
+        using var dir = new TempDirectory();
+        var samplePoints = new List<CcBinSamplePoint>
+        {
+            new(100.0, 200.0, 300.0),
+        };
+
+        // Shift by (10, 20, 30) and scale by 2.0 -> original global coordinates:
+        // P_global = P_local / scale - shift: (100 / 2 - 10, 200 / 2 - 20, 300 / 2 - 30) = (40, 80, 120)
+        byte[] bytes = SyntheticFixtures.CreateSyntheticCcBin(
+            samplePoints,
+            shiftX: 10.0,
+            shiftY: 20.0,
+            shiftZ: 30.0,
+            scale: 2.0);
+
+        string path = dir.Write("shifted.bin", bytes);
+        using var doc = CcBinDocument.Open(path);
+        var scan = doc.Scans[0];
+
+        // Without transform: raw local
+        var raw = scan.ReadPoints(new PclReadOptions { ApplyTransform = false }).First();
+        Assert.Equal(100.0, raw.X, precision: 4);
+        Assert.Equal(200.0, raw.Y, precision: 4);
+        Assert.Equal(300.0, raw.Z, precision: 4);
+
+        // With transform
+        var transformed = scan.ReadPoints(new PclReadOptions { ApplyTransform = true }).First();
+        Assert.Equal(40.0, transformed.X, precision: 4);
+        Assert.Equal(80.0, transformed.Y, precision: 4);
+        Assert.Equal(120.0, transformed.Z, precision: 4);
+    }
+
+    [Fact]
+    public void Cc_Bin_Opens_Adjacent_Multi_Cloud_Entities()
+    {
+        using var dir = new TempDirectory();
+        var cloud1 = new List<CcBinSamplePoint> { new(1, 2, 3), new(4, 5, 6) };
+        var cloud2 = new List<CcBinSamplePoint> { new(7, 8, 9), new(10, 11, 12) };
+
+        byte[] bytes = SyntheticFixtures.CreateSyntheticCcBinMultiCloud([cloud1, cloud2]);
+        string path = dir.Write("multi.bin", bytes);
+
+        using var doc = CcBinDocument.Open(path);
+        Assert.Equal(2, doc.Scans.Count);
+        Assert.Equal("Cloud_1", doc.Scans[0].Name);
+        Assert.Equal(2, doc.Scans[0].PointCount);
+        Assert.Equal("Cloud_2", doc.Scans[1].Name);
+        Assert.Equal(2, doc.Scans[1].PointCount);
+    }
+
+    [Fact]
+    public void Cc_Bin_Reads_Intensity_Within_Declared_Count_Only()
+    {
+        using var dir = new TempDirectory();
+        var samplePoints = new List<CcBinSamplePoint>
+        {
+            new(1.0, 2.0, 3.0, Intensity: 12f),
+            new(4.0, 5.0, 6.0, Intensity: 0f),
+        };
+
+        // 2 points, but only 1 intensity value declared in the scalar field
+        byte[] bytes = SyntheticFixtures.CreateSyntheticCcBin(
+            samplePoints,
+            declaredIntensityCount: 1);
+
+        string path = dir.Write("partial_intensity.bin", bytes);
+        using var doc = CcBinDocument.Open(path);
+        var scan = doc.Scans[0];
+
+        var points = scan.ReadPoints().ToList();
+        Assert.Equal(2, points.Count);
+        Assert.Equal(12f, points[0].Intensity);
+        Assert.Null(points[1].Intensity);
+    }
+
+    [Fact]
+    public void Cc_Bin_Rejects_Truncated_Color_Block()
+    {
+        using var dir = new TempDirectory();
+        var samplePoints = new List<CcBinSamplePoint> { new(1.0, 2.0, 3.0) };
+
+        // Color flag is 1, but file ends right after the flag
+        byte[] bytes = SyntheticFixtures.CreateSyntheticCcBin(samplePoints, truncateColorBlock: true);
+        string path = dir.Write("cut_color.bin", bytes);
+
+        Assert.Throws<InvalidDataException>(() => CcBinDocument.Open(path));
+    }
+
+    [Fact]
+    public void Cc_Bin_Rejects_Truncated_Scalar_Field_Data()
+    {
+        using var dir = new TempDirectory();
+        var samplePoints = new List<CcBinSamplePoint> { new(1.0, 2.0, 3.0), new(4.0, 5.0, 6.0) };
+
+        // 2 points declared in scalar field, but stream truncated after 1 value
+        byte[] bytes = SyntheticFixtures.CreateSyntheticCcBin(samplePoints, truncateIntensityData: true);
+        string path = dir.Write("cut_scalar.bin", bytes);
+
+        Assert.Throws<InvalidDataException>(() => CcBinDocument.Open(path));
+    }
+
+    [Fact]
+    public void Cc_Bin_Rejects_Truncated_Scalar_Field_Count()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticCcBin([new(1, 2, 3)], withIntensity: false);
+        string path = dir.Write("cut_scalar_count.bin", bytes[..^2]);
+
+        Assert.Throws<InvalidDataException>(() => CcBinDocument.Open(path));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Cc_Bin_Reads_Intensity_After_Scalar_Display_Metadata(bool withPalette)
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticCcBin([new(1, 2, 3, Intensity: 42)]);
+        int fieldStart = bytes.AsSpan().IndexOf("Intensity"u8);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(fieldStart - 4, 4), 2);
+        byte[] firstField = bytes[fieldStart..(fieldStart + 261 + sizeof(float))];
+        firstField.AsSpan(0, 256).Clear();
+        "Time"u8.CopyTo(firstField);
+
+        byte[] display = new byte[53];
+        byte[] palette = [];
+        if (withPalette)
+        {
+            display[^1] = 1;
+            byte[] nameAndId =
+            [
+                0, 0, 0, 8, 0, (byte)'G', 0, (byte)'r', 0, (byte)'e', 0, (byte)'y',
+                0, 0, 0, 2, 0, (byte)'1',
+            ];
+            byte[] paletteSteps = new byte[18 + 4 + 2 * 19];
+            paletteSteps[18] = 2;
+            palette = [..nameAndId, ..paletteSteps];
+        }
+
+        string path = dir.Write("two_scalars.bin", [..bytes.AsSpan(0, fieldStart), ..firstField, ..display,
+            ..palette, ..new byte[16], ..bytes.AsSpan(fieldStart)]);
+
+        using var doc = PclFile.Open(path);
+        Assert.Equal(42f, Assert.Single(doc.ReadAllPoints()).Intensity);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Cc_Bin_Transforms_Finite_Points_With_Subnormal_Scale(bool withMatrix)
+    {
+        using var dir = new TempDirectory();
+        const float x = 1e-30f;
+        double[]? matrix = withMatrix ? [1, 0, 0, 0, 0, -1, 0, 0, 0, 0, -1, 0, 0, 0, 0, 1] : null;
+        byte[] bytes = SyntheticFixtures.CreateSyntheticCcBin([new(x, 0, 0), new(1, 0, 0)],
+            scale: double.Epsilon, matrix16: matrix);
+
+        using var doc = PclFile.Open(dir.Write("subnormal.bin", bytes));
+        var point = Assert.Single(doc.ReadAllPoints());
+        Assert.Equal(new PclVector3(x / double.Epsilon, 0, 0), point.Position);
+        Assert.Equal(point.Position, doc.Scans[0].Transform.TransformPoint(new PclVector3(x, 0, 0)));
+        Assert.Equal(2, doc.ReadAllPoints(new PclReadOptions { ApplyTransform = false }).Count());
+    }
+
+    [Theory]
+    [InlineData(0.0)]
+    [InlineData(double.NaN)]
+    [InlineData(double.PositiveInfinity)]
+    public void Cc_Bin_Rejects_Invalid_Global_Scale(double scale)
+    {
+        using var dir = new TempDirectory();
+        var path = dir.Write("bad_scale.bin", SyntheticFixtures.CreateSyntheticCcBin([new(1, 2, 3)], scale: scale));
+        Assert.Throws<InvalidDataException>(() => CcBinDocument.Open(path));
+    }
+
+    [Fact]
+    public void Cc_Bin_Transforms_With_Tiny_Scale()
+    {
+        using var dir = new TempDirectory();
+        var samplePoints = new List<CcBinSamplePoint> { new(1.0, 0.0, 0.0) };
+
+        byte[] bytes = SyntheticFixtures.CreateSyntheticCcBin(
+            samplePoints,
+            scale: 1e-13);
+
+        string path = dir.Write("tiny_scale.bin", bytes);
+        using var doc = CcBinDocument.Open(path);
+        var scan = doc.Scans[0];
+
+        var point = scan.ReadPoints(new PclReadOptions { ApplyTransform = true }).First();
+        Assert.Equal(1e13, point.X, precision: 1);
+    }
+
+    [Fact]
+    public void Cc_Bin_Composes_Transform_Matrix_With_Shift_And_Scale()
+    {
+        using var dir = new TempDirectory();
+        var samplePoints = new List<CcBinSamplePoint> { new(0.0, 0.0, 0.0) };
+
+        // Rotation around X (4x4 matrix):
+        // 1  0  0  0
+        // 0  0 -1  0
+        // 0  1  0  0
+        // 0  0  0  1
+        double[] rotX =
+        [
+            1, 0, 0, 0,
+            0, 0, -1, 0,
+            0, 1, 0, 0,
+            0, 0, 0, 1
+        ];
+
+        byte[] bytes = SyntheticFixtures.CreateSyntheticCcBin(
+            samplePoints,
+            shiftX: 10.0,
+            shiftY: 0.0,
+            shiftZ: 0.0,
+            scale: 1.0,
+            matrix16: rotX);
+
+        string path = dir.Write("rot_shift.bin", bytes);
+        using var doc = CcBinDocument.Open(path);
+        var scan = doc.Scans[0];
+
+        var point = scan.ReadPoints(new PclReadOptions { ApplyTransform = true }).First();
+        // Point is (0, 0, 0). After rotation around X: (0, 0, 0).
+        // Then global shift and scale: P_global = P_rot / 1.0 - shiftX = 0 - 10 = -10.
+        Assert.Equal(-10.0, point.X, precision: 4);
+    }
+
+    [Fact]
+    public void Cc_Bin_Supports_Subsample_And_MaxPoints()
+    {
+        using var dir = new TempDirectory();
+        var samplePoints = Enumerable.Range(0, 100)
+            .Select(i => new CcBinSamplePoint(i, i * 2, i * 3))
+            .ToList();
+
+        byte[] bytes = SyntheticFixtures.CreateSyntheticCcBin(samplePoints);
+        string path = dir.Write("large.bin", bytes);
+        using var doc = CcBinDocument.Open(path);
+        var scan = doc.Scans[0];
+
+        Assert.Equal(10, scan.ReadPoints(new PclReadOptions { MaxPoints = 10 }).Count());
+        Assert.Equal(20, scan.ReadPoints(new PclReadOptions { SubsampleStep = 5 }).Count());
+        Assert.Empty(scan.ReadPoints(new PclReadOptions { MaxPoints = 0 }));
+    }
+
+    [Fact]
+    public void Cc_Bin_Rejects_Invalid_Signature_Or_Version()
+    {
+        using var dir = new TempDirectory();
+        var pts = new List<CcBinSamplePoint> { new(1, 2, 3) };
+
+        // Wrong signature
+        byte[] badSig = SyntheticFixtures.CreateSyntheticCcBin(pts, rawMagic: "XXXX"u8.ToArray());
+        string path1 = dir.Write("bad_sig.bin", badSig);
+        Assert.Throws<InvalidDataException>(() => CcBinDocument.Open(path1));
+
+        // Unsupported version
+        byte[] badVer = SyntheticFixtures.CreateSyntheticCcBin(pts, version: 5);
+        string path2 = dir.Write("bad_ver.bin", badVer);
+        Assert.Throws<InvalidDataException>(() => CcBinDocument.Open(path2));
+    }
+
+    [Fact]
+    public void Cc_Bin_Rejects_Truncated_Files()
+    {
+        using var dir = new TempDirectory();
+        var pts = new List<CcBinSamplePoint> { new(1, 2, 3), new(4, 5, 6) };
+
+        // Header truncated < 8 bytes
+        string path1 = dir.Write("cut_header.bin", [0x43, 0x43, 0x42]);
+        Assert.Throws<InvalidDataException>(() => CcBinDocument.Open(path1));
+
+        // Truncated points data
+        byte[] cutPts = SyntheticFixtures.CreateSyntheticCcBin(pts, truncatePoints: true);
+        string path2 = dir.Write("cut_points.bin", cutPts);
+        Assert.Throws<InvalidDataException>(() => CcBinDocument.Open(path2));
+    }
+
+    [Fact]
+    public void Cc_Bin_Loads_Custom_Properties()
+    {
+        using var dir = new TempDirectory();
+        var pts = new List<CcBinSamplePoint> { new(1, 2, 3) };
+        var customProps = new Dictionary<string, double>
+        {
+            ["Custom.Step"] = 0.05,
+            ["Scale.Factor"] = 1.25,
+        };
+
+        byte[] bytes = SyntheticFixtures.CreateSyntheticCcBin(pts, doubleProperties: customProps);
+        string path = dir.Write("props.bin", bytes);
+        using var doc = CcBinDocument.Open(path);
+        var scan = doc.Scans[0];
+
+        Assert.Equal("0.05", scan.Properties["Custom.Step"]);
+        Assert.Equal("1.25", scan.Properties["Scale.Factor"]);
     }
 }

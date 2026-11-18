@@ -68,4 +68,7 @@ public enum PclFileKind
 
     /// <summary>Leica gridded point cloud (.ptg).</summary>
     LeicaPtg = 21,
+
+    /// <summary>CC BIN point cloud entity file (.bin, CCB2).</summary>
+    CcBin = 22,
 }
