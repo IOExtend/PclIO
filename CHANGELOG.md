@@ -31,6 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   states no transform, the transform of the scan file is used.
 - The per-point flags (`FilterBits`) of the PinPoint sectioned layout are read and validated. The new
   `PclReadOptions.ExcludeFilteredPoints` excludes the points with a non-zero flag; by default every stored point is returned.
+- The normals (`Normals`) of the PinPoint sectioned layout are read when the file holds them, and `HasNormals` reports
+  what the file contains.
 
 ## [0.1.0] - 2026-11-15
 

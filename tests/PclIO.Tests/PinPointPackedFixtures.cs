@@ -16,11 +16,13 @@ internal static class PinPointPackedFixtures
     /// <summary>Creates a file. Colours are RGB (three bytes per point), intensities one byte per point.</summary>
     /// <param name="runEncodedColors">Stores the colour channel as one literal followed by copies, which needs identical colours.</param>
     /// <param name="filterBits">One flag byte per point; a non-zero flag marks the point as filtered. All zero by default.</param>
+    /// <param name="normals">Three float32 components per point. Absent by default.</param>
     public static PackedBin Create(IReadOnlyList<(float X, float Y, float Z)> points, byte[]? rgb = null, byte[]? intensities = null,
-        bool runEncodedColors = false, byte[]? filterBits = null)
+        bool runEncodedColors = false, byte[]? filterBits = null, float[]? normals = null)
     {
         int n = points.Count;
         if (filterBits != null && filterBits.Length != n) throw new ArgumentException("One flag byte per point is needed.", nameof(filterBits));
+        if (normals != null && normals.Length != n * 3) throw new ArgumentException("Three components per point are needed.", nameof(normals));
         byte[] positions = new byte[n * 12];
         for (int i = 0; i < n; i++)
         {
@@ -37,6 +39,12 @@ internal static class PinPointPackedFixtures
         };
         if (rgb != null) channels.Add(("RGB8", runEncodedColors ? Runs(rgb, 3) : Literals(rgb)));
         if (intensities != null) channels.Add(("Intensities8", Literals(intensities)));
+        if (normals != null)
+        {
+            byte[] raw = new byte[normals.Length * 4];
+            for (int i = 0; i < normals.Length; i++) BinaryPrimitives.WriteSingleLittleEndian(raw.AsSpan(i * 4, 4), normals[i]);
+            channels.Add(("Normals", Literals(raw)));
+        }
 
         return Assemble(channels, n);
     }

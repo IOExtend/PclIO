@@ -344,7 +344,7 @@ public sealed class PinPointDocument : PclDocument
 
         public bool HasIntensities => Packed ? PackedPoints > 0 && IntensitiesLength > 0 : IntensitiesLength >= 1;
 
-        public bool HasNormals => NormalsLength >= 12;
+        public bool HasNormals => Packed ? PackedPoints > 0 && NormalsLength > 0 : NormalsLength >= 12;
 
         /// <summary>True when the file holds a per-point flags channel (one byte per stored point).</summary>
         public bool HasFilterBits => Packed ? PackedPoints > 0 && FilterLength > 0 : false;
@@ -462,9 +462,9 @@ public sealed class PinPointScan : PclScan
     /// <para>
     /// A point data file whose layout is neither a table of named channels nor a list of sections with a property table is
     /// not decoded, because the file does not describe its layout. Of the channels of the sectioned layout the positions
-    /// ("Points"), colours ("RGB8", three bytes per point), intensities ("Intensities8") and per-point flags
-    /// ("FilterBits", one byte per point) are read; a non-zero flag marks the point as filtered. The grid indices stored
-    /// beside them ("RowColIndex") are not interpreted.
+    /// ("Points"), colours ("RGB8", three bytes per point), intensities ("Intensities8"), normals ("Normals", three
+    /// float32 components per point) and per-point flags ("FilterBits", one byte per point) are read; a non-zero flag
+    /// marks the point as filtered. The grid indices stored beside them ("RowColIndex") are not interpreted.
     /// </para>
     /// <para>
     /// By default every stored point that passes the plausibility rule above is returned. With
@@ -506,7 +506,7 @@ public sealed class PinPointScan : PclScan
         int colorSize = table.ColorSize;
         long pointTotal = table.PointCount;
         long colorTotal = !table.HasColors ? 0 : table.Packed ? pointTotal : table.ColorsLength / colorSize;
-        long normalTotal = !table.HasNormals ? 0 : table.NormalsLength / 12;
+        long normalTotal = !table.HasNormals ? 0 : table.Packed ? pointTotal : table.NormalsLength / 12;
         long intensityTotal = !table.HasIntensities ? 0 : table.Packed ? pointTotal : table.IntensitiesLength;
 
         using var points = OpenChannel(table, table.PointsOffset, table.PointsLength, pointTotal > 0);
@@ -590,7 +590,7 @@ public sealed class PinPointScan : PclScan
         // Once every point has been read, a compressed stream must end there: bytes after its last element are an error.
         if (table.Packed && start >= pointTotal)
         {
-            foreach (var stream in new[] { points, colors, intensities, filters })
+            foreach (var stream in new[] { points, colors, normals, intensities, filters })
                 if (stream != null && stream.ReadByte() >= 0) throw FormatError.Corrupted("a compressed channel holds more data than it declares");
         }
     }
