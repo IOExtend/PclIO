@@ -107,6 +107,10 @@ internal static class KindDetector
         if (IsPlyHeader(stream, origin))
             return PclFileKind.Ply;
 
+        // PTX files start with grid dimensions, scanner pose and transformation matrix.
+        if (IsPtxHeader(stream, origin, extension))
+            return PclFileKind.Ptx;
+
         // PTS files start with an integer point count, or coordinate lines in a .pts file.
         if (IsPtsHeader(stream, origin, extension))
             return PclFileKind.Pts;
@@ -365,6 +369,117 @@ internal static class KindDetector
         string[] parts = line.Split([' ', '\t'], StringSplitOptions.RemoveEmptyEntries);
         tokenCount = parts.Length;
         if (tokenCount is not (3 or 4 or 6 or 7 or 8 or 9 or 10)) return false;
+        foreach (var p in parts)
+        {
+            if (!double.TryParse(p, NumberStyles.Float, CultureInfo.InvariantCulture, out _))
+                return false;
+        }
+        return true;
+    }
+
+    // True when the stream starts with a PTX layout: grid dimensions (cols, rows), scanner origin and axes,
+    // and a 4x4 transformation matrix (10 lines total), optionally followed by point lines.
+    // At most the first 64 KiB are inspected; the position is restored.
+    private static bool IsPtxHeader(Stream stream, long origin, string? extension)
+    {
+        const int maxProbeBytes = 64 * 1024;
+        long length = stream.CanSeek ? stream.Length : long.MaxValue;
+        int toRead = (int)Math.Min(maxProbeBytes, Math.Max(0, length - origin));
+        if (toRead < 20) return false;
+
+        byte[] buffer = new byte[toRead];
+        stream.Position = origin;
+        try
+        {
+            int got = 0;
+            while (got < toRead)
+            {
+                int n = stream.Read(buffer, got, toRead - got);
+                if (n == 0) break;
+                got += n;
+            }
+
+            if (got < 20) return false;
+
+            // Reject files containing NUL bytes in the probe region (binary files)
+            ReadOnlySpan<byte> headSpan = buffer.AsSpan(0, got);
+            if (headSpan.Contains((byte)0)) return false;
+
+            var lines = new List<string>(11);
+            int pos = 0;
+            while (pos < got && lines.Count < 11)
+            {
+                int end = Array.IndexOf(buffer, (byte)'\n', pos, got - pos);
+                if (end < 0) break;
+
+                int lineLen = end - pos;
+                if (lineLen > 0 && buffer[end - 1] == (byte)'\r') lineLen--;
+                if (lineLen > 4096) return false;
+
+                if (lineLen > 0)
+                {
+                    string line = System.Text.Encoding.ASCII.GetString(buffer, pos, lineLen).Trim();
+                    if (line.Length > 0)
+                    {
+                        lines.Add(line);
+                    }
+                }
+
+                pos = end + 1;
+            }
+
+            if (lines.Count < 10) return false;
+
+            // Lines 0 and 1: Columns and Rows (integers >= 0)
+            if (!int.TryParse(lines[0], NumberStyles.None, CultureInfo.InvariantCulture, out int cols) || cols < 0)
+                return false;
+            if (!int.TryParse(lines[1], NumberStyles.None, CultureInfo.InvariantCulture, out int rows) || rows < 0)
+                return false;
+
+            // Lines 2..5: 3 floats each (scanner position and orientation axes)
+            for (int i = 2; i <= 5; i++)
+            {
+                if (!IsFloatTokens(lines[i], 3)) return false;
+            }
+
+            // Lines 6..9: 4 floats each (transformation matrix)
+            for (int i = 6; i <= 9; i++)
+            {
+                if (!IsFloatTokens(lines[i], 4)) return false;
+            }
+
+            // Line 10 (if present): first point line (must have 3, 4, 6 or 7 numeric tokens)
+            if (lines.Count > 10)
+            {
+                if (!IsFloatTokens(lines[10], out int ptCols) || ptCols is not (3 or 4 or 6 or 7))
+                    return false;
+            }
+
+            return true;
+        }
+        finally
+        {
+            stream.Position = origin;
+        }
+    }
+
+    private static bool IsFloatTokens(string line, int expectedCount)
+    {
+        string[] parts = line.Split([' ', '\t'], StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length != expectedCount) return false;
+        foreach (var p in parts)
+        {
+            if (!double.TryParse(p, NumberStyles.Float, CultureInfo.InvariantCulture, out _))
+                return false;
+        }
+        return true;
+    }
+
+    private static bool IsFloatTokens(string line, out int count)
+    {
+        string[] parts = line.Split([' ', '\t'], StringSplitOptions.RemoveEmptyEntries);
+        count = parts.Length;
+        if (count == 0) return false;
         foreach (var p in parts)
         {
             if (!double.TryParse(p, NumberStyles.Float, CultureInfo.InvariantCulture, out _))

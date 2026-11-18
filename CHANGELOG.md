@@ -71,6 +71,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - PTS files are read (`PclFileKind.Pts`): Leica Cyclone ASCII exchange point clouds with or without an initial
   point count line; positions, intensity, 8-bit colour and normals across 3, 4, 6, 7, 8, 9 and 10 column layouts.
   Points with non-finite coordinates are not returned.
+- PTX files are read (`PclFileKind.Ptx`): Leica Cyclone gridded ASCII exchange point clouds containing one or
+  more scans per file. Reads 10-line headers (columns, rows, scanner position, scanner orientation axes, 4x4
+  transformation matrix) and points across 3, 4, 6 and 7 column layouts (with intensity and 8-bit RGB colour).
+  Empty grid cells (coordinates 0, 0, 0) and non-finite coordinates are skipped. Scans apply their 4x4 transformation
+  matrices unless `ApplyTransform` is false.
 - Leica scans read a block range with opt-in parallel decoding: the new `PclReadOptions.Blocks` selects the blocks of the
   scan in file order (per scan) and the new `PclReadOptions.MaxDegreeOfParallelism` (default 1, sequential streaming)
   decodes the selected blocks in parallel, keeping file order, consecutive `Index` values and `MaxPoints`/`SubsampleStep`
