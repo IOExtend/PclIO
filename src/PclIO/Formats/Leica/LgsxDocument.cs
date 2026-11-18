@@ -70,6 +70,18 @@ public sealed class LgsxDocument : PclDocument
         _metadata["Format"] = isLegacy ? "Leica LGS" : "Leica LGSx";
     }
 
+    /// <summary>
+    /// Adds a warning to the document. The same message is added only once, so that reading the same scan twice
+    /// does not repeat it. Reads of different scans may add warnings at the same time, so the list is guarded.
+    /// </summary>
+    internal void AddWarning(string message)
+    {
+        lock (_warnings)
+        {
+            if (!_warnings.Contains(message, StringComparer.Ordinal)) _warnings.Add(message);
+        }
+    }
+
     /// <summary>Opens a Leica container and reads its table of contents.</summary>
     /// <param name="path">Path of the .lgsx or .lgs file.</param>
     /// <param name="options">Read options; currently unused when opening.</param>
@@ -235,7 +247,8 @@ public sealed class LgsxDocument : PclDocument
                     blockStarts: blockStarts,
                     transform: setup.Translation is { } translation ? new PclTransform { Translation = translation } : null,
                     bounds: setup.Bounds,
-                    declaredPointCount: setup.PointCount >= 0 ? setup.PointCount : null));
+                    declaredPointCount: setup.PointCount >= 0 ? setup.PointCount : null,
+                    document: document));
             }
 
             document._warnings.Add(
@@ -251,7 +264,8 @@ public sealed class LgsxDocument : PclDocument
                     name: Path.GetFileNameWithoutExtension(path),
                     path: path,
                     pointCloudEntry: pointCloudEntry,
-                    declaredPointCount: declaredCount));
+                    declaredPointCount: declaredCount,
+                    document: document));
             }
 
             if (scanSetups.Count > 0)
@@ -522,6 +536,7 @@ public sealed class LgsxScan : PclScan
 
     private readonly string _filePath;
     private readonly LgsxEntry? _entry;
+    private readonly LgsxDocument? _document;
 
     // Start offsets of the blocks that belong to this scan; null when the scan holds all blocks of the container.
     private readonly long[]? _blockStarts;
@@ -531,6 +546,21 @@ public sealed class LgsxScan : PclScan
 
     private long _pointCount = -1;
     private (bool Colors, bool Intensities, bool Normals)? _channels;
+
+    /// <summary>
+    /// What one read did not return. Each enumeration keeps its own state, so interleaved or parallel reads of the
+    /// same scan do not mix their counts; the state is reported when the read is done.
+    /// </summary>
+    private sealed class ReadState
+    {
+        public long DroppedPoints;
+        public long SkippedStreams;
+        public long BlocksRead;
+        public long UnusableBlocks;
+        public long IncompleteBlocks;
+        public bool ChainEndedEarly;
+        public long ChainBlocks;
+    }
 
     /// <inheritdoc />
     public override string Id { get; }
@@ -558,7 +588,7 @@ public sealed class LgsxScan : PclScan
     private (bool Colors, bool Intensities, bool Normals) Channels => _channels ??= DetectChannels();
 
     internal LgsxScan(string id, string name, string path, LgsxEntry? pointCloudEntry, long[]? blockStarts = null,
-        PclTransform? transform = null, PclBounds? bounds = null, long? declaredPointCount = null)
+        PclTransform? transform = null, PclBounds? bounds = null, long? declaredPointCount = null, LgsxDocument? document = null)
     {
         Id = id;
         Name = name;
@@ -566,6 +596,7 @@ public sealed class LgsxScan : PclScan
         _entry = pointCloudEntry;
         _blockStarts = blockStarts;
         _declaredPointCount = declaredPointCount;
+        _document = document;
         if (transform != null) Transform = transform;
         if (bounds != null) Bounds = bounds.Value;
     }
@@ -580,7 +611,7 @@ public sealed class LgsxScan : PclScan
         if (_entry == null) return (false, false, false);
 
         using var fs = File.OpenRead(_filePath);
-        foreach (var block in ReadBlocks(fs))
+        foreach (var block in ReadBlocks(fs, new ReadState()))
         {
             int n = block.Frames.Count;
             return (n >= ColorFrames, n >= IntensityFrames, n >= NormalFrames);
@@ -591,13 +622,22 @@ public sealed class LgsxScan : PclScan
 
     /// <summary>Streams the points of this scan.</summary>
     /// <remarks>
+    /// <para>
     /// Positions are decoded from the packed position planes of each block. A code of zero at any slot except the
     /// first of a block is treated as unused padding and is not returned, so a real point that sits exactly at the
     /// block origin is dropped. A block yields as many points as its shortest position plane holds. Returned points
     /// keep consecutive <see cref="PclPoint.Index"/> values.
+    /// </para>
+    /// <para>
+    /// Data that the reader cannot use is counted and reported in the warnings of the document: the points that were
+    /// dropped as padding, the compressed streams that were skipped because they are too large, the point blocks that
+    /// carry no positions or whose frame list ends before the block does, and the point data that ends at a block the
+    /// reader does not know. With <see cref="PclReadOptions.Strict"/> the read fails with
+    /// <see cref="InvalidDataException"/> instead of the warning.
+    /// </para>
     /// </remarks>
     /// <param name="options">Read options; null uses defaults.</param>
-    /// <exception cref="InvalidDataException">The point data is malformed or declares oversized data.</exception>
+    /// <exception cref="InvalidDataException">The point data is malformed, declares oversized data or is incomplete in strict mode.</exception>
     public override IEnumerable<PclPoint> ReadPoints(PclReadOptions? options = null)
     {
         options ??= PclReadOptions.Default;
@@ -608,8 +648,11 @@ public sealed class LgsxScan : PclScan
         int step = Math.Max(1, options.SubsampleStep);
         long yielded = 0;
 
+        // The counters describe this read alone; they start at zero every time.
+        var state = new ReadState();
+
         using var fs = File.OpenRead(_filePath);
-        foreach (var block in ReadBlocks(fs))
+        foreach (var block in ReadBlocks(fs, state))
         {
             var frames = block.Frames;
             byte[] p0 = frames[0];
@@ -629,7 +672,12 @@ public sealed class LgsxScan : PclScan
                 if (i % step != 0) continue;
 
                 uint val = (uint)(p0[i] | (p1[i] << 8) | (p2[i] << 16) | (p3[i] << 24));
-                if (val == 0 && i > 0 && p0[i] == 0 && p1[i] == 0) continue;
+                if (val == 0 && i > 0 && p0[i] == 0 && p1[i] == 0)
+                {
+                    // The slot holds no point: it is padding or a point at the origin of the block.
+                    state.DroppedPoints++;
+                    continue;
+                }
 
                 // Unpack the three 10-bit coordinates from the packed code.
                 uint xm = 0, ym = 0, zm = 0;
@@ -694,17 +742,55 @@ public sealed class LgsxScan : PclScan
                 if (yielded >= targetCount) yield break;
             }
         }
+
+        // The whole point data was read, so what it did not hold can be reported.
+        ReportIncompleteData(options.Strict, state);
+    }
+
+    /// <summary>
+    /// Reports the data that the point data did not hold: the points that were dropped as padding, the compressed
+    /// streams that were skipped, the point blocks that carry no positions or whose frame list is cut short, and the
+    /// point data that ends at a block the reader does not know. In strict mode the read fails instead.
+    /// </summary>
+    private void ReportIncompleteData(bool strict, ReadState state)
+    {
+        var problems = new List<string>();
+
+        if (state.DroppedPoints > 0)
+            problems.Add($"{state.DroppedPoints} points were dropped because their slot holds no point");
+
+        if (state.SkippedStreams > 0)
+            problems.Add($"{state.SkippedStreams} compressed streams were skipped because they are larger than the accepted size");
+
+        if (state.UnusableBlocks > 0)
+            problems.Add($"{state.UnusableBlocks} point blocks were skipped because they hold fewer than four planes");
+
+        if (state.IncompleteBlocks > 0)
+            problems.Add($"{state.IncompleteBlocks} point blocks have a frame list that ends before the block does");
+
+        if (state.ChainEndedEarly)
+            problems.Add($"the point data ends after {state.ChainBlocks} blocks at a block that is not a point block");
+
+        if (problems.Count == 0) return;
+
+        string message = "The point data is incomplete: " + string.Join("; ", problems) + ".";
+        if (strict) throw FormatError.Corrupted(message);
+
+        _document?.AddWarning(message);
     }
 
     /// <summary>Walks the chain of point blocks and yields those that carry point planes and belong to this scan.</summary>
-    private IEnumerable<Block> ReadBlocks(FileStream fs)
+    private IEnumerable<Block> ReadBlocks(FileStream fs, ReadState state)
     {
         long fileLength = fs.Length;
         long decodedLimit = DecodedAllowanceBytes + (fileLength * DecodedBytesPerFileByte);
         long decodedBytes = 0;
         byte[] blockHeader = new byte[128];
 
-        foreach (var (blockStart, blockLength) in LgsxDocument.ReadBlockChain(fs, _entry!))
+        var chain = LgsxDocument.ReadBlockChain(fs, _entry!);
+        long payloadEnd = (long)_entry!.Offset + (long)_entry.Size;
+
+        foreach (var (blockStart, blockLength) in chain)
         {
             if (!BelongsToScan(blockStart)) continue;
 
@@ -738,7 +824,7 @@ public sealed class LgsxScan : PclScan
             if (firstFrame >= 8)
             {
                 long firstFrameOffset = blockStart + firstFrame;
-                var frames = ReadAllFrames(fs, firstFrameOffset, blockEnd);
+                var frames = ReadAllFrames(fs, firstFrameOffset, blockEnd, state);
 
                 // Many small blocks that each expand a lot would otherwise make the file cost unbounded time.
                 foreach (byte[] plane in frames) decodedBytes += plane.Length;
@@ -753,8 +839,34 @@ public sealed class LgsxScan : PclScan
                           double.IsFinite(minX) && double.IsFinite(minY) && double.IsFinite(minZ)))
                         throw FormatError.Corrupted("point block has an invalid coordinate scale or origin.");
 
+                    state.BlocksRead++;
                     yield return new Block(scaleX, scaleY, scaleZ, minX, minY, minZ, frames);
                 }
+                else state.UnusableBlocks++;
+            }
+            else state.UnusableBlocks++;
+        }
+
+        // Data that is left in the point data but that is not a point block means that the reader did not read
+        // everything the container holds. The gap belongs to the payload, so only the unified scan or the scan
+        // that owns the last block reports it, and the count is the count of the whole chain.
+        state.ChainBlocks = chain.Count;
+        if (_blockStarts == null || (chain.Count > 0 && BelongsToScan(chain[^1].Start)))
+        {
+            if (chain.Count > 0)
+            {
+                long lastEnd = chain[^1].Start + chain[^1].Length;
+                if (payloadEnd - lastEnd >= 8 + 128) state.ChainEndedEarly = true;
+            }
+            else
+            {
+                // An empty chain means the very first chunk is not a point block. When a full block could have
+                // fit there, the point data ends at a block the reader does not know, just as with a later one.
+                fs.Position = (long)_entry!.Offset;
+                byte[] payloadHeader = new byte[64];
+                fs.ReadExactly(payloadHeader);
+                long firstBlock = (long)_entry.Offset + Bytes.ReadUInt32LE(payloadHeader.AsSpan(0x20, 4));
+                if (payloadEnd - firstBlock >= 8 + 128) state.ChainEndedEarly = true;
             }
         }
     }
@@ -763,7 +875,7 @@ public sealed class LgsxScan : PclScan
     private bool BelongsToScan(long blockStart) =>
         _blockStarts == null || Array.BinarySearch(_blockStarts, blockStart) >= 0;
 
-    private static List<byte[]> ReadAllFrames(FileStream fs, long offset, long maxOffset)
+    private List<byte[]> ReadAllFrames(FileStream fs, long offset, long maxOffset, ReadState state)
     {
         var list = new List<byte[]>();
         long limit = Math.Min(maxOffset, fs.Length);
@@ -777,14 +889,32 @@ public sealed class LgsxScan : PclScan
         {
             fs.ReadExactly(lenBuf);
 
-            // A zero or out-of-range length marks the end of the frame list.
+            // A zero length marks the end of the frame list.
             ulong fLen = Bytes.ReadUInt64LE(lenBuf);
-            if (fLen == 0 || fLen > MaxCompressedFrameBytes || (long)fLen > limit - fs.Position) break;
+            if (fLen == 0) break;
+
+            // A stream that is larger than the accepted size is skipped: the rest of the block is lost with it.
+            if (fLen > MaxCompressedFrameBytes)
+            {
+                state.SkippedStreams++;
+                break;
+            }
+
+            // A frame list that ends before the block does leaves the rest of the block unread.
+            if ((long)fLen > limit - fs.Position)
+            {
+                state.IncompleteBlocks++;
+                break;
+            }
 
             byte[] fData = new byte[(int)fLen];
             fs.ReadExactly(fData);
 
-            if (!fData.AsSpan().StartsWith(FrameMagic)) break;
+            if (!fData.AsSpan().StartsWith(FrameMagic))
+            {
+                state.IncompleteBlocks++;
+                break;
+            }
 
             if (list.Count >= MaxFramesPerBlock)
                 throw FormatError.Corrupted($"point block has more than {MaxFramesPerBlock} planes.");

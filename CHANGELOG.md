@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ApplyTransform` is false. A record that does not hold usable values is left unread, and the setup keeps an unknown pose.
 - The point count of a Leica scan is taken from the container when it states one, so that reading it does not decode the
   point data. Only a container without that number still needs the decoding.
+- The Leica reader counts the data it cannot use (the points that are dropped as padding, the compressed streams that are
+  skipped and the point data that ends at an unknown block) and reports it in the warnings of the document. The new
+  `PclReadOptions.Strict` makes such a read fail with `InvalidDataException` instead.
 
 ## [0.1.0] - 2026-11-15
 

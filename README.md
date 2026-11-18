@@ -89,8 +89,9 @@ These readers drop data without an error or a warning, so a scan can yield fewer
   data file in neither layout, or in the sectioned layout with an element type or header value the reader does not support, cannot
   be read: the project lists it with a warning and reading its points throws `NotSupportedException`. A compressed stream whose
   copies reach back more than 1 MiB is not decoded either: reading its points throws `NotSupportedException`, without an earlier warning.
-- Leica: padding entries and points that coincide with a block's origin can be dropped, a compressed stream above its size limit
-  is skipped, and a block that is not recognised ends the scan. The result can therefore be incomplete.
+- Leica: padding entries and points that coincide with a block's origin are dropped, a compressed stream above its size limit is
+  skipped, and a block that is not recognised ends the scan. The reader counts what it dropped or skipped and reports it in the
+  warnings of the document, so that an incomplete result is visible. With `PclReadOptions.Strict` the read fails instead.
 - EdgeWise: a database node whose point count is 0 is skipped.
 
 ### Limits
@@ -98,8 +99,9 @@ These readers drop data without an error or a warning, so a scan can yield fewer
 A file that exceeds one of these limits, or whose declared sizes and counts do not fit the file, is rejected with
 `InvalidDataException`, with the exceptions below. A FARO scan grid above its limit gives `NotSupportedException` when the file is
 opened. An E57 point prototype with more than 1024 fields gives `NotSupportedException` when the points are read; the scan still
-lists. A compressed Leica stream above its size limit is not rejected: its data is skipped, which is one of the Leica data filters
-above. An unsupported PinPoint feature (see the data filters) gives `NotSupportedException` when the points are read. Point data is streamed and there is no limit on the file size, except for FARO container files: each compressed data stream is
+lists. A compressed Leica stream above its size limit is not rejected: its data is skipped and the skip is reported in the warnings
+of the document, which is one of the Leica data filters above. An unsupported PinPoint feature (see the data filters) gives
+`NotSupportedException` when the points are read. Point data is streamed and there is no limit on the file size, except for FARO container files: each compressed data stream is
 read into memory as a whole, so its size must fit a .NET array (about 2 GB), otherwise reading fails with
 `NotSupportedException`. The XML of E57 and ReCap project files is read with DTDs prohibited, so no entity is expanded and nothing
 outside the file is fetched.
