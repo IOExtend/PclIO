@@ -85,6 +85,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   INI-style header text files (`.sbf`). Reads 32-bit floating point XYZ coordinates and optional 32-bit scalar fields
   mapped to intensity, 8-bit RGB colour or unit normals. Big-endian and little-endian byte orders supported. Applies
   global shift and scale transformations when `ApplyTransform` is true. Points with non-finite coordinates are skipped.
+- OGC 3D Tiles point clouds and tilesets are read (`PclFileKind.Tiles3d`):
+  `.pnts` tile files (version 1) with float32 or 16-bit quantised positions (`POSITION_QUANTIZED`), RGB, RGBA,
+  RGB565 or constant RGBA colour, float32 or octahedral oct16p normals (`NORMAL_OCT16P`), relative-to-center
+  offsets (`RTC_CENTER`), and batch table scalar properties (`Intensity`, `Classification`);
+  glTF 2.0 binary point clouds (`.glb`) with mesh primitive mode 0 (POINTS), reading `POSITION`, `COLOR_0`,
+  `NORMAL`, and `INTENSITY` accessors with standard component types and node transforms;
+  3D Tiles tilesets (`tileset.json`) or directories containing them, traversing hierarchical tile trees
+  and composing 4x4 transformation matrices for referenced point cloud tiles.
 - Leica scans read a block range with opt-in parallel decoding: the new `PclReadOptions.Blocks` selects the blocks of the
   scan in file order (per scan) and the new `PclReadOptions.MaxDegreeOfParallelism` (default 1, sequential streaming)
   decodes the selected blocks in parallel, keeping file order, consecutive `Index` values and `MaxPoints`/`SubsampleStep`

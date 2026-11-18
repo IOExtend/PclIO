@@ -50,4 +50,7 @@ public enum PclFileKind
 
     /// <summary>Simple Binary Format point cloud (.sbf, .sbf.data).</summary>
     Sbf = 15,
+
+    /// <summary>OGC 3D Tiles point cloud (.pnts, .glb, tileset.json).</summary>
+    Tiles3d = 16,
 }

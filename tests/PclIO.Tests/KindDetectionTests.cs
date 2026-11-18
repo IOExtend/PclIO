@@ -295,12 +295,79 @@ public sealed class KindDetectionTests
         Assert.Equal(PclFileKind.Unknown, Detect(new byte[100], name));
     }
 
+    [Theory]
+    [InlineData("sample.pnts")]
+    [InlineData("SAMPLE.PNTS")]
+    [InlineData("sample.bin")]
+    public void Detects_Pnts_By_Signature_And_Header(string name)
+    {
+        byte[] pnts = SyntheticFixtures.CreateSyntheticPnts([new(1, 2, 3)]);
+        Assert.Equal(PclFileKind.Tiles3d, Detect(pnts, name));
+    }
+
+    [Theory]
+    [InlineData("sample.pnts")]
+    [InlineData("SAMPLE.PNTS")]
+    public void Pnts_Rejects_Right_Extension_With_Wrong_Content(string name)
+    {
+        Assert.Equal(PclFileKind.Unknown, Detect("just some random text"u8.ToArray(), name));
+        Assert.Equal(PclFileKind.Unknown, Detect(new byte[100], name));
+        // Wrong magic but 28 bytes
+        byte[] wrongMagic = new byte[28];
+        wrongMagic[0] = 0xAA;
+        Assert.Equal(PclFileKind.Unknown, Detect(wrongMagic, name));
+        // Right magic but corrupt header length
+        byte[] badLen = SyntheticFixtures.CreateSyntheticPnts([new(1, 2, 3)]);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(badLen.AsSpan(8, 4), 999999);
+        Assert.Equal(PclFileKind.Unknown, Detect(badLen, name));
+    }
+
+    [Theory]
+    [InlineData("sample.glb")]
+    [InlineData("SAMPLE.GLB")]
+    [InlineData("sample.bin")]
+    public void Detects_Glb_Point_Cloud_By_Signature_And_Mode0(string name)
+    {
+        byte[] glb = SyntheticFixtures.CreateSyntheticGlbPoints([new(1, 2, 3)]);
+        Assert.Equal(PclFileKind.Tiles3d, Detect(glb, name));
+    }
+
+    [Theory]
+    [InlineData("sample.glb")]
+    [InlineData("SAMPLE.GLB")]
+    public void Glb_Rejects_Right_Extension_With_Wrong_Content_Or_Mesh_Only(string name)
+    {
+        Assert.Equal(PclFileKind.Unknown, Detect(new byte[100], name));
+        Assert.Equal(PclFileKind.Unknown, Detect("glTF not really a gltf"u8.ToArray(), name));
+    }
+
+    [Theory]
+    [InlineData("tileset.json")]
+    [InlineData("TILESET.JSON")]
+    [InlineData("my_tileset.json")]
+    public void Detects_Tileset_Json_By_Content(string name)
+    {
+        string json = SyntheticFixtures.CreateSyntheticTilesetJson("points.pnts");
+        Assert.Equal(PclFileKind.Tiles3d, Detect(System.Text.Encoding.UTF8.GetBytes(json), name));
+    }
+
+    [Fact]
+    public void Tileset_Json_Rejects_Arbitrary_Json()
+    {
+        Assert.Equal(PclFileKind.Unknown, Detect("{\"name\": \"John\", \"age\": 30}"u8.ToArray(), "data.json"));
+    }
+
     [Fact]
     public void Detects_Files_On_Disk_The_Same_Way()
     {
         using var dir = new TempDirectory();
         Assert.Equal(PclFileKind.E57, PclFile.DetectKind(dir.Write("a.e57", SyntheticFixtures.CreateSyntheticE57())));
         Assert.Equal(PclFileKind.Unknown, PclFile.DetectKind(dir.Write("zero.fls", new byte[100])));
+        Assert.Equal(PclFileKind.Tiles3d, PclFile.DetectKind(dir.Write("points.pnts", SyntheticFixtures.CreateSyntheticPnts([new(1, 2, 3)]))));
+        Assert.Equal(PclFileKind.Tiles3d, PclFile.DetectKind(dir.Write("model.glb", SyntheticFixtures.CreateSyntheticGlbPoints([new(1, 2, 3)]))));
+        Assert.Equal(PclFileKind.Tiles3d, PclFile.DetectKind(dir.WriteText("tileset.json", SyntheticFixtures.CreateSyntheticTilesetJson("points.pnts"))));
+        // Directory with tileset.json
+        Assert.Equal(PclFileKind.Tiles3d, PclFile.DetectKind(dir.Root));
     }
 
     private sealed class NonSeekableStream(byte[] bytes) : MemoryStream(bytes)

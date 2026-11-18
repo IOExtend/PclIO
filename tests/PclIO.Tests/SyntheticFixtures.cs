@@ -3,6 +3,7 @@ using System.Globalization;
 using System.IO.Compression;
 using System.Security;
 using System.Text;
+using System.Text.Json;
 
 namespace PclIO.Tests;
 
@@ -44,6 +45,14 @@ public readonly record struct PtxSampleScan(
     double[] Matrix16,
     IReadOnlyList<PtxSamplePoint> Points,
     int ColumnsPerPoint = 7);
+
+/// <summary>One point of a synthetic 3D Tiles .pnts or glTF file: position, colour, intensity, normal and classification.</summary>
+public readonly record struct PntsSamplePoint(
+    double X, double Y, double Z,
+    PclColor? Color = null,
+    float? Intensity = null,
+    PclVector3? Normal = null,
+    byte? Classification = null);
 
 /// <summary>Generates small synthetic scan files for the tests. Every layout is written from what the readers implement;
 /// no byte of any of them comes from a real scan.</summary>
@@ -1499,5 +1508,522 @@ internal static class SyntheticFixtures
         }
 
         return (headerBytes, dataBytes);
+    }
+
+    // ---- 3D Tiles (.pnts, .glb, tileset.json) -------------------------------------------------------------------
+
+    /// <summary>Encodes a 3D unit normal vector using octahedral oct16p encoding.</summary>
+    public static (byte b0, byte b1) EncodeOct16p(double nx, double ny, double nz)
+    {
+        double l1 = Math.Abs(nx) + Math.Abs(ny) + Math.Abs(nz);
+        if (l1 > 0.0)
+        {
+            nx /= l1;
+            ny /= l1;
+        }
+        if (nz < 0.0)
+        {
+            double oldX = nx;
+            double oldY = ny;
+            nx = (1.0 - Math.Abs(oldY)) * (oldX >= 0.0 ? 1.0 : -1.0);
+            ny = (1.0 - Math.Abs(oldX)) * (oldY >= 0.0 ? 1.0 : -1.0);
+        }
+        byte bx = (byte)Math.Clamp((int)Math.Round(((nx + 1.0) * 0.5) * 255.0), 0, 255);
+        byte by = (byte)Math.Clamp((int)Math.Round(((ny + 1.0) * 0.5) * 255.0), 0, 255);
+        return (bx, by);
+    }
+
+    /// <summary>Generates a synthetic .pnts file adhering strictly to the OGC 3D Tiles specification.</summary>
+    public static byte[] CreateSyntheticPnts(
+        IReadOnlyList<PntsSamplePoint> points,
+        bool isQuantized = false,
+        PclVector3? qOffset = null,
+        PclVector3? qScale = null,
+        PclVector3? rtcCenter = null,
+        string? colorFormat = null,
+        PclColor? constantColor = null,
+        string? normalFormat = null,
+        bool hasIntensity = false,
+        bool intensityBinary = true,
+        bool hasClassification = false)
+    {
+        qOffset ??= PclVector3.Zero;
+        qScale ??= new PclVector3(100.0, 100.0, 100.0);
+
+        // Auto-detect formats if not specified
+        if (colorFormat == null && points.Count > 0 && points.Any(p => p.Color.HasValue))
+            colorFormat = "RGB";
+
+        if (normalFormat == null && points.Count > 0 && points.Any(p => p.Normal.HasValue))
+            normalFormat = "NORMAL";
+
+        // 1. Calculate Feature Table binary layout
+        int ftBinLen = 0;
+        int posOffset = 0;
+        if (isQuantized)
+            ftBinLen += points.Count * 6;
+        else
+            ftBinLen += points.Count * 12;
+
+        int colOffset = ftBinLen;
+        if (colorFormat == "RGB") ftBinLen += points.Count * 3;
+        else if (colorFormat == "RGBA") ftBinLen += points.Count * 4;
+        else if (colorFormat == "RGB565") ftBinLen += points.Count * 2;
+
+        int normOffset = ftBinLen;
+        if (normalFormat == "NORMAL") ftBinLen += points.Count * 12;
+        else if (normalFormat == "NORMAL_OCT16P") ftBinLen += points.Count * 2;
+
+        int ftBinPadded = (ftBinLen + 7) & ~7;
+        byte[] ftBinBytes = new byte[ftBinPadded];
+
+        // Fill Feature Table binary data
+        for (int i = 0; i < points.Count; i++)
+        {
+            var pt = points[i];
+            if (isQuantized)
+            {
+                int off = posOffset + i * 6;
+                ushort qx = (ushort)Math.Clamp((int)Math.Round(((pt.X - qOffset.Value.X) / qScale.Value.X) * 65535.0), 0, 65535);
+                ushort qy = (ushort)Math.Clamp((int)Math.Round(((pt.Y - qOffset.Value.Y) / qScale.Value.Y) * 65535.0), 0, 65535);
+                ushort qz = (ushort)Math.Clamp((int)Math.Round(((pt.Z - qOffset.Value.Z) / qScale.Value.Z) * 65535.0), 0, 65535);
+                BinaryPrimitives.WriteUInt16LittleEndian(ftBinBytes.AsSpan(off, 2), qx);
+                BinaryPrimitives.WriteUInt16LittleEndian(ftBinBytes.AsSpan(off + 2, 2), qy);
+                BinaryPrimitives.WriteUInt16LittleEndian(ftBinBytes.AsSpan(off + 4, 2), qz);
+            }
+            else
+            {
+                int off = posOffset + i * 12;
+                BinaryPrimitives.WriteSingleLittleEndian(ftBinBytes.AsSpan(off, 4), (float)pt.X);
+                BinaryPrimitives.WriteSingleLittleEndian(ftBinBytes.AsSpan(off + 4, 4), (float)pt.Y);
+                BinaryPrimitives.WriteSingleLittleEndian(ftBinBytes.AsSpan(off + 8, 4), (float)pt.Z);
+            }
+
+            var c = pt.Color ?? new PclColor(255, 255, 255, 255);
+            if (colorFormat == "RGB")
+            {
+                int off = colOffset + i * 3;
+                ftBinBytes[off] = c.R;
+                ftBinBytes[off + 1] = c.G;
+                ftBinBytes[off + 2] = c.B;
+            }
+            else if (colorFormat == "RGBA")
+            {
+                int off = colOffset + i * 4;
+                ftBinBytes[off] = c.R;
+                ftBinBytes[off + 1] = c.G;
+                ftBinBytes[off + 2] = c.B;
+                ftBinBytes[off + 3] = c.A;
+            }
+            else if (colorFormat == "RGB565")
+            {
+                int off = colOffset + i * 2;
+                ushort val = (ushort)(((c.R >> 3) << 11) | ((c.G >> 2) << 5) | (c.B >> 3));
+                BinaryPrimitives.WriteUInt16LittleEndian(ftBinBytes.AsSpan(off, 2), val);
+            }
+
+            if (normalFormat == "NORMAL")
+            {
+                int off = normOffset + i * 12;
+                var n = pt.Normal ?? new PclVector3(0, 0, 1);
+                BinaryPrimitives.WriteSingleLittleEndian(ftBinBytes.AsSpan(off, 4), (float)n.X);
+                BinaryPrimitives.WriteSingleLittleEndian(ftBinBytes.AsSpan(off + 4, 4), (float)n.Y);
+                BinaryPrimitives.WriteSingleLittleEndian(ftBinBytes.AsSpan(off + 8, 4), (float)n.Z);
+            }
+            else if (normalFormat == "NORMAL_OCT16P")
+            {
+                int off = normOffset + i * 2;
+                var n = pt.Normal ?? new PclVector3(0, 0, 1);
+                var (b0, b1) = EncodeOct16p(n.X, n.Y, n.Z);
+                ftBinBytes[off] = b0;
+                ftBinBytes[off + 1] = b1;
+            }
+        }
+
+        // 2. Build Feature Table JSON
+        var ftDict = new Dictionary<string, object>
+        {
+            ["POINTS_LENGTH"] = points.Count
+        };
+
+        if (isQuantized)
+        {
+            ftDict["POSITION_QUANTIZED"] = new Dictionary<string, int> { ["byteOffset"] = posOffset };
+            ftDict["QUANTIZED_VOLUME_OFFSET"] = new[] { qOffset.Value.X, qOffset.Value.Y, qOffset.Value.Z };
+            ftDict["QUANTIZED_VOLUME_SCALE"] = new[] { qScale.Value.X, qScale.Value.Y, qScale.Value.Z };
+        }
+        else
+        {
+            ftDict["POSITION"] = new Dictionary<string, int> { ["byteOffset"] = posOffset };
+        }
+
+        if (rtcCenter.HasValue)
+        {
+            ftDict["RTC_CENTER"] = new[] { rtcCenter.Value.X, rtcCenter.Value.Y, rtcCenter.Value.Z };
+        }
+
+        if (colorFormat == "RGB") ftDict["RGB"] = new Dictionary<string, int> { ["byteOffset"] = colOffset };
+        else if (colorFormat == "RGBA") ftDict["RGBA"] = new Dictionary<string, int> { ["byteOffset"] = colOffset };
+        else if (colorFormat == "RGB565") ftDict["RGB565"] = new Dictionary<string, int> { ["byteOffset"] = colOffset };
+        else if (colorFormat == "CONSTANT_RGBA")
+        {
+            var cc = constantColor ?? new PclColor(200, 100, 50, 255);
+            ftDict["CONSTANT_RGBA"] = new int[] { cc.R, cc.G, cc.B, cc.A };
+        }
+
+        if (normalFormat == "NORMAL") ftDict["NORMAL"] = new Dictionary<string, int> { ["byteOffset"] = normOffset };
+        else if (normalFormat == "NORMAL_OCT16P") ftDict["NORMAL_OCT16P"] = new Dictionary<string, int> { ["byteOffset"] = normOffset };
+
+        string ftJsonRaw = JsonSerializer.Serialize(ftDict);
+        byte[] ftJsonRawBytes = Encoding.UTF8.GetBytes(ftJsonRaw);
+        int ftJsonPadded = (ftJsonRawBytes.Length + 7) & ~7;
+        byte[] ftJsonBytes = new byte[ftJsonPadded];
+        Array.Fill(ftJsonBytes, (byte)0x20); // Pad with spaces
+        ftJsonRawBytes.CopyTo(ftJsonBytes, 0);
+
+        // 3. Build Batch Table binary and JSON
+        int btBinLen = 0;
+        int intOffset = 0;
+        int classOffset = 0;
+        if (hasIntensity && intensityBinary)
+        {
+            intOffset = btBinLen;
+            btBinLen += points.Count * 4;
+        }
+        if (hasClassification)
+        {
+            classOffset = btBinLen;
+            btBinLen += points.Count * 1;
+        }
+        int btBinPadded = (btBinLen + 7) & ~7;
+        byte[] btBinBytes = new byte[btBinPadded];
+
+        if (hasIntensity && intensityBinary)
+        {
+            for (int i = 0; i < points.Count; i++)
+            {
+                float val = points[i].Intensity ?? 1.0f;
+                BinaryPrimitives.WriteSingleLittleEndian(btBinBytes.AsSpan(intOffset + i * 4, 4), val);
+            }
+        }
+        if (hasClassification)
+        {
+            for (int i = 0; i < points.Count; i++)
+            {
+                byte cls = points[i].Classification ?? 2;
+                btBinBytes[classOffset + i] = cls;
+            }
+        }
+
+        var btDict = new Dictionary<string, object>();
+        if (hasIntensity)
+        {
+            if (intensityBinary)
+            {
+                btDict["Intensity"] = new Dictionary<string, object>
+                {
+                    ["byteOffset"] = intOffset,
+                    ["componentType"] = "FLOAT",
+                    ["type"] = "SCALAR"
+                };
+            }
+            else
+            {
+                btDict["Intensity"] = points.Select(p => p.Intensity ?? 1.0f).ToArray();
+            }
+        }
+        if (hasClassification)
+        {
+            btDict["Classification"] = new Dictionary<string, object>
+            {
+                ["byteOffset"] = classOffset,
+                ["componentType"] = "UNSIGNED_BYTE",
+                ["type"] = "SCALAR"
+            };
+        }
+
+        byte[] btJsonBytes;
+        if (btDict.Count > 0)
+        {
+            string btJsonRaw = JsonSerializer.Serialize(btDict);
+            byte[] btJsonRawBytes = Encoding.UTF8.GetBytes(btJsonRaw);
+            int btJsonPadded = (btJsonRawBytes.Length + 7) & ~7;
+            btJsonBytes = new byte[btJsonPadded];
+            Array.Fill(btJsonBytes, (byte)0x20);
+            btJsonRawBytes.CopyTo(btJsonBytes, 0);
+        }
+        else
+        {
+            btJsonBytes = Array.Empty<byte>();
+        }
+
+        // 4. Assemble final .pnts byte array
+        uint totalLength = (uint)(28 + ftJsonBytes.Length + ftBinBytes.Length + btJsonBytes.Length + btBinBytes.Length);
+        byte[] pntsData = new byte[totalLength];
+
+        // Header (28 bytes)
+        pntsData[0] = 0x70; pntsData[1] = 0x6E; pntsData[2] = 0x74; pntsData[3] = 0x73; // "pnts"
+        BinaryPrimitives.WriteUInt32LittleEndian(pntsData.AsSpan(4, 4), 1); // version
+        BinaryPrimitives.WriteUInt32LittleEndian(pntsData.AsSpan(8, 4), totalLength);
+        BinaryPrimitives.WriteUInt32LittleEndian(pntsData.AsSpan(12, 4), (uint)ftJsonBytes.Length);
+        BinaryPrimitives.WriteUInt32LittleEndian(pntsData.AsSpan(16, 4), (uint)ftBinBytes.Length);
+        BinaryPrimitives.WriteUInt32LittleEndian(pntsData.AsSpan(20, 4), (uint)btJsonBytes.Length);
+        BinaryPrimitives.WriteUInt32LittleEndian(pntsData.AsSpan(24, 4), (uint)btBinBytes.Length);
+
+        int pos = 28;
+        ftJsonBytes.CopyTo(pntsData, pos); pos += ftJsonBytes.Length;
+        ftBinBytes.CopyTo(pntsData, pos); pos += ftBinBytes.Length;
+        btJsonBytes.CopyTo(pntsData, pos); pos += btJsonBytes.Length;
+        btBinBytes.CopyTo(pntsData, pos);
+
+        return pntsData;
+    }
+
+    /// <summary>Generates a synthetic glTF 2.0 binary point cloud (.glb) with mode 0 (POINTS).</summary>
+    public static byte[] CreateSyntheticGlbPoints(
+        IReadOnlyList<PntsSamplePoint> points,
+        bool hasColors = false,
+        int colorComponentType = 5121, // 5121: UBYTE, 5123: USHORT, 5126: FLOAT
+        bool colorHasAlpha = false,
+        bool hasNormals = false,
+        bool hasIntensity = false,
+        double[]? nodeMatrixColMajor = null)
+    {
+        int count = points.Count;
+
+        // Calculate binary layout
+        int posLen = count * 12;
+        int colCompCount = colorHasAlpha ? 4 : 3;
+        int colElemSize = colorComponentType switch { 5121 => colCompCount, 5123 => colCompCount * 2, 5126 => colCompCount * 4, _ => 3 };
+        int colLen = hasColors ? count * colElemSize : 0;
+        int colLenPadded = (colLen + 3) & ~3;
+
+        int normLen = hasNormals ? count * 12 : 0;
+        int intLen = hasIntensity ? count * 4 : 0;
+
+        int totalBinLen = posLen + (hasColors ? colLenPadded : 0) + normLen + intLen;
+        int totalBinPadded = (totalBinLen + 3) & ~3;
+        byte[] binData = new byte[totalBinPadded];
+
+        // Fill POS
+        for (int i = 0; i < count; i++)
+        {
+            var pt = points[i];
+            BinaryPrimitives.WriteSingleLittleEndian(binData.AsSpan(i * 12, 4), (float)pt.X);
+            BinaryPrimitives.WriteSingleLittleEndian(binData.AsSpan(i * 12 + 4, 4), (float)pt.Y);
+            BinaryPrimitives.WriteSingleLittleEndian(binData.AsSpan(i * 12 + 8, 4), (float)pt.Z);
+        }
+
+        // Fill COLOR
+        int curBinOffset = posLen;
+        int colOffset = curBinOffset;
+        if (hasColors)
+        {
+            for (int i = 0; i < count; i++)
+            {
+                var c = points[i].Color ?? new PclColor(255, 255, 255, 255);
+                int off = colOffset + i * colElemSize;
+                if (colorComponentType == 5121)
+                {
+                    binData[off] = c.R; binData[off + 1] = c.G; binData[off + 2] = c.B;
+                    if (colorHasAlpha) binData[off + 3] = c.A;
+                }
+                else if (colorComponentType == 5123)
+                {
+                    BinaryPrimitives.WriteUInt16LittleEndian(binData.AsSpan(off, 2), (ushort)(c.R * 65535 / 255));
+                    BinaryPrimitives.WriteUInt16LittleEndian(binData.AsSpan(off + 2, 2), (ushort)(c.G * 65535 / 255));
+                    BinaryPrimitives.WriteUInt16LittleEndian(binData.AsSpan(off + 4, 2), (ushort)(c.B * 65535 / 255));
+                    if (colorHasAlpha) BinaryPrimitives.WriteUInt16LittleEndian(binData.AsSpan(off + 6, 2), (ushort)(c.A * 65535 / 255));
+                }
+                else if (colorComponentType == 5126)
+                {
+                    BinaryPrimitives.WriteSingleLittleEndian(binData.AsSpan(off, 4), c.R / 255.0f);
+                    BinaryPrimitives.WriteSingleLittleEndian(binData.AsSpan(off + 4, 4), c.G / 255.0f);
+                    BinaryPrimitives.WriteSingleLittleEndian(binData.AsSpan(off + 8, 4), c.B / 255.0f);
+                    if (colorHasAlpha) BinaryPrimitives.WriteSingleLittleEndian(binData.AsSpan(off + 12, 4), c.A / 255.0f);
+                }
+            }
+            curBinOffset += colLenPadded;
+        }
+
+        // Fill NORMAL
+        int normOffset = curBinOffset;
+        if (hasNormals)
+        {
+            for (int i = 0; i < count; i++)
+            {
+                var n = points[i].Normal ?? new PclVector3(0, 0, 1);
+                int off = normOffset + i * 12;
+                BinaryPrimitives.WriteSingleLittleEndian(binData.AsSpan(off, 4), (float)n.X);
+                BinaryPrimitives.WriteSingleLittleEndian(binData.AsSpan(off + 4, 4), (float)n.Y);
+                BinaryPrimitives.WriteSingleLittleEndian(binData.AsSpan(off + 8, 4), (float)n.Z);
+            }
+            curBinOffset += normLen;
+        }
+
+        // Fill INTENSITY
+        int intOffset = curBinOffset;
+        if (hasIntensity)
+        {
+            for (int i = 0; i < count; i++)
+            {
+                float val = points[i].Intensity ?? 1.0f;
+                int off = intOffset + i * 4;
+                BinaryPrimitives.WriteSingleLittleEndian(binData.AsSpan(off, 4), val);
+            }
+            curBinOffset += intLen;
+        }
+
+        // Build Accessors and BufferViews
+        var accessors = new List<object>();
+        var bufferViews = new List<object>();
+        var attributes = new Dictionary<string, int>();
+
+        // 0: POSITION
+        attributes["POSITION"] = accessors.Count;
+        bufferViews.Add(new { buffer = 0, byteOffset = 0, byteLength = posLen });
+        accessors.Add(new
+        {
+            bufferView = 0,
+            byteOffset = 0,
+            componentType = 5126,
+            count = count,
+            type = "VEC3",
+            min = new[] { points.Min(p => p.X), points.Min(p => p.Y), points.Min(p => p.Z) },
+            max = new[] { points.Max(p => p.X), points.Max(p => p.Y), points.Max(p => p.Z) }
+        });
+
+        if (hasColors)
+        {
+            int bvIdx = bufferViews.Count;
+            attributes["COLOR_0"] = accessors.Count;
+            bufferViews.Add(new { buffer = 0, byteOffset = colOffset, byteLength = colLen });
+            accessors.Add(new
+            {
+                bufferView = bvIdx,
+                byteOffset = 0,
+                componentType = colorComponentType,
+                count = count,
+                type = colorHasAlpha ? "VEC4" : "VEC3",
+                normalized = colorComponentType != 5126
+            });
+        }
+
+        if (hasNormals)
+        {
+            int bvIdx = bufferViews.Count;
+            attributes["NORMAL"] = accessors.Count;
+            bufferViews.Add(new { buffer = 0, byteOffset = normOffset, byteLength = normLen });
+            accessors.Add(new
+            {
+                bufferView = bvIdx,
+                byteOffset = 0,
+                componentType = 5126,
+                count = count,
+                type = "VEC3"
+            });
+        }
+
+        if (hasIntensity)
+        {
+            int bvIdx = bufferViews.Count;
+            attributes["_INTENSITY"] = accessors.Count;
+            bufferViews.Add(new { buffer = 0, byteOffset = intOffset, byteLength = intLen });
+            accessors.Add(new
+            {
+                bufferView = bvIdx,
+                byteOffset = 0,
+                componentType = 5126,
+                count = count,
+                type = "SCALAR"
+            });
+        }
+
+        var node = new Dictionary<string, object> { ["mesh"] = 0 };
+        if (nodeMatrixColMajor != null && nodeMatrixColMajor.Length == 16)
+        {
+            node["matrix"] = nodeMatrixColMajor;
+        }
+
+        var gltfDict = new
+        {
+            asset = new { version = "2.0" },
+            scenes = new[] { new { nodes = new[] { 0 } } },
+            nodes = new[] { node },
+            meshes = new[]
+            {
+                new
+                {
+                    name = "PointsMesh",
+                    primitives = new[]
+                    {
+                        new
+                        {
+                            mode = 0, // POINTS
+                            attributes = attributes
+                        }
+                    }
+                }
+            },
+            accessors = accessors,
+            bufferViews = bufferViews,
+            buffers = new[] { new { byteLength = totalBinPadded } }
+        };
+
+        string jsonStr = JsonSerializer.Serialize(gltfDict);
+        byte[] jsonRawBytes = Encoding.UTF8.GetBytes(jsonStr);
+        int jsonPadded = (jsonRawBytes.Length + 3) & ~3;
+        byte[] jsonBytes = new byte[jsonPadded];
+        Array.Fill(jsonBytes, (byte)0x20);
+        jsonRawBytes.CopyTo(jsonBytes, 0);
+
+        uint totalGlbLength = (uint)(12 + 8 + jsonBytes.Length + 8 + binData.Length);
+        byte[] glb = new byte[totalGlbLength];
+
+        // Header (12 bytes)
+        glb[0] = 0x67; glb[1] = 0x6C; glb[2] = 0x54; glb[3] = 0x46; // "glTF"
+        BinaryPrimitives.WriteUInt32LittleEndian(glb.AsSpan(4, 4), 2); // version 2
+        BinaryPrimitives.WriteUInt32LittleEndian(glb.AsSpan(8, 4), totalGlbLength);
+
+        // Chunk 0: JSON
+        BinaryPrimitives.WriteUInt32LittleEndian(glb.AsSpan(12, 4), (uint)jsonBytes.Length);
+        BinaryPrimitives.WriteUInt32LittleEndian(glb.AsSpan(16, 4), 0x4E4F534A); // "JSON"
+        jsonBytes.CopyTo(glb, 20);
+
+        // Chunk 1: BIN
+        int binChunkHeaderPos = 20 + jsonBytes.Length;
+        BinaryPrimitives.WriteUInt32LittleEndian(glb.AsSpan(binChunkHeaderPos, 4), (uint)binData.Length);
+        BinaryPrimitives.WriteUInt32LittleEndian(glb.AsSpan(binChunkHeaderPos + 4, 4), 0x004E4942); // "BIN\0"
+        binData.CopyTo(glb, binChunkHeaderPos + 8);
+
+        return glb;
+    }
+
+    /// <summary>Generates a synthetic tileset.json string.</summary>
+    public static string CreateSyntheticTilesetJson(string tileUri, double[]? transformColMajor = null, double geometricError = 10.0)
+    {
+        var tileDict = new Dictionary<string, object>
+        {
+            ["geometricError"] = geometricError,
+            ["content"] = new Dictionary<string, string> { ["uri"] = tileUri },
+            ["boundingVolume"] = new Dictionary<string, double[]>
+            {
+                ["sphere"] = new double[] { 0, 0, 0, 100 }
+            }
+        };
+
+        if (transformColMajor != null && transformColMajor.Length == 16)
+        {
+            tileDict["transform"] = transformColMajor;
+        }
+
+        var root = new Dictionary<string, object>
+        {
+            ["asset"] = new Dictionary<string, string> { ["version"] = "1.0" },
+            ["geometricError"] = geometricError,
+            ["root"] = tileDict
+        };
+
+        return JsonSerializer.Serialize(root, new JsonSerializerOptions { WriteIndented = true });
     }
 }

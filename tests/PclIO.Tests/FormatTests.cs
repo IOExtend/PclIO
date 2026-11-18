@@ -11,6 +11,7 @@ using PclIO.Formats.Pts;
 using PclIO.Formats.Ptx;
 using PclIO.Formats.Recap;
 using PclIO.Formats.Sbf;
+using PclIO.Formats.Tiles3d;
 using PclIO.Formats.Xyz;
 using Xunit;
 
@@ -4591,5 +4592,566 @@ public sealed class FormatTests
         Assert.Equal(PclFileKind.Sbf, doc.Kind);
         Assert.IsType<SbfDocument>(doc);
         Assert.Equal(3, doc.ReadAllPoints().Count());
+    }
+
+    // ==============================================================================================================
+    // 3D Tiles (*.pnts, *.glb, tileset.json)
+    // ==============================================================================================================
+
+    [Fact]
+    public void Pnts_Reads_Basic_Positions_And_Metadata()
+    {
+        using var dir = new TempDirectory();
+        var pts = new[]
+        {
+            new PntsSamplePoint(1.0, 2.0, 3.0),
+            new PntsSamplePoint(4.0, 5.0, 6.0),
+            new PntsSamplePoint(7.0, 8.0, 9.0),
+        };
+        byte[] pntsData = SyntheticFixtures.CreateSyntheticPnts(pts);
+        string path = dir.Write("points.pnts", pntsData);
+
+        using var doc = Tiles3dDocument.Open(path);
+        Assert.Equal(PclFileKind.Tiles3d, doc.Kind);
+        Assert.Equal("3D Tiles Point Cloud (PNTS)", doc.Metadata["Format"]);
+        Assert.Single(doc.Scans);
+        Assert.Equal(3, doc.TotalPoints);
+
+        var points = doc.ReadAllPoints().ToList();
+        Assert.Equal(3, points.Count);
+        Assert.Equal(1.0, points[0].X, 4);
+        Assert.Equal(2.0, points[0].Y, 4);
+        Assert.Equal(3.0, points[0].Z, 4);
+        Assert.Equal(4.0, points[1].X, 4);
+        Assert.Equal(7.0, points[2].X, 4);
+    }
+
+    [Fact]
+    public void Pnts_Reads_Rgb_Colors()
+    {
+        using var dir = new TempDirectory();
+        var pts = new[]
+        {
+            new PntsSamplePoint(1, 2, 3, Color: new PclColor(255, 0, 0, 255)),
+            new PntsSamplePoint(4, 5, 6, Color: new PclColor(0, 255, 0, 255)),
+            new PntsSamplePoint(7, 8, 9, Color: new PclColor(0, 0, 255, 255)),
+        };
+        byte[] pntsData = SyntheticFixtures.CreateSyntheticPnts(pts, colorFormat: "RGB");
+        string path = dir.Write("rgb.pnts", pntsData);
+
+        using var doc = Tiles3dDocument.Open(path);
+        Assert.True(doc.Scans[0].HasColors);
+        var points = doc.ReadAllPoints().ToList();
+        Assert.Equal(new PclColor(255, 0, 0, 255), points[0].Color);
+        Assert.Equal(new PclColor(0, 255, 0, 255), points[1].Color);
+        Assert.Equal(new PclColor(0, 0, 255, 255), points[2].Color);
+    }
+
+    [Fact]
+    public void Pnts_Reads_Rgba_Colors()
+    {
+        using var dir = new TempDirectory();
+        var pts = new[]
+        {
+            new PntsSamplePoint(1, 2, 3, Color: new PclColor(10, 20, 30, 40)),
+            new PntsSamplePoint(4, 5, 6, Color: new PclColor(50, 60, 70, 80)),
+        };
+        byte[] pntsData = SyntheticFixtures.CreateSyntheticPnts(pts, colorFormat: "RGBA");
+        string path = dir.Write("rgba.pnts", pntsData);
+
+        using var doc = Tiles3dDocument.Open(path);
+        Assert.True(doc.Scans[0].HasColors);
+        var points = doc.ReadAllPoints().ToList();
+        Assert.Equal(new PclColor(10, 20, 30, 40), points[0].Color);
+        Assert.Equal(new PclColor(50, 60, 70, 80), points[1].Color);
+    }
+
+    [Fact]
+    public void Pnts_Reads_Rgb565_Colors()
+    {
+        using var dir = new TempDirectory();
+        var pts = new[]
+        {
+            new PntsSamplePoint(1, 2, 3, Color: new PclColor(255, 0, 0, 255)),
+            new PntsSamplePoint(4, 5, 6, Color: new PclColor(0, 255, 0, 255)),
+        };
+        byte[] pntsData = SyntheticFixtures.CreateSyntheticPnts(pts, colorFormat: "RGB565");
+        string path = dir.Write("rgb565.pnts", pntsData);
+
+        using var doc = Tiles3dDocument.Open(path);
+        Assert.True(doc.Scans[0].HasColors);
+        var points = doc.ReadAllPoints().ToList();
+        Assert.NotNull(points[0].Color);
+        Assert.NotNull(points[1].Color);
+        // Red channel should be near 255
+        Assert.True(points[0].Color!.Value.R > 240);
+        // Green channel should be near 255
+        Assert.True(points[1].Color!.Value.G > 240);
+    }
+
+    [Fact]
+    public void Pnts_Reads_Constant_Rgba()
+    {
+        using var dir = new TempDirectory();
+        var pts = new[]
+        {
+            new PntsSamplePoint(1, 2, 3),
+            new PntsSamplePoint(4, 5, 6),
+        };
+        var expectedColor = new PclColor(111, 222, 123, 255);
+        byte[] pntsData = SyntheticFixtures.CreateSyntheticPnts(pts, colorFormat: "CONSTANT_RGBA", constantColor: expectedColor);
+        string path = dir.Write("const.pnts", pntsData);
+
+        using var doc = Tiles3dDocument.Open(path);
+        Assert.True(doc.Scans[0].HasColors);
+        var points = doc.ReadAllPoints().ToList();
+        Assert.Equal(expectedColor, points[0].Color);
+        Assert.Equal(expectedColor, points[1].Color);
+    }
+
+    [Fact]
+    public void Pnts_Reads_Normals_Vec3Float()
+    {
+        using var dir = new TempDirectory();
+        var pts = new[]
+        {
+            new PntsSamplePoint(1, 2, 3, Normal: new PclVector3(0, 0, 1)),
+            new PntsSamplePoint(4, 5, 6, Normal: new PclVector3(1, 0, 0)),
+        };
+        byte[] pntsData = SyntheticFixtures.CreateSyntheticPnts(pts, normalFormat: "NORMAL");
+        string path = dir.Write("norm.pnts", pntsData);
+
+        using var doc = Tiles3dDocument.Open(path);
+        Assert.True(doc.Scans[0].HasNormals);
+        var points = doc.ReadAllPoints().ToList();
+        Assert.NotNull(points[0].Normal);
+        Assert.Equal(0.0, points[0].Normal!.Value.X, 4);
+        Assert.Equal(0.0, points[0].Normal!.Value.Y, 4);
+        Assert.Equal(1.0, points[0].Normal!.Value.Z, 4);
+    }
+
+    [Fact]
+    public void Pnts_Reads_Normals_Oct16p()
+    {
+        using var dir = new TempDirectory();
+        var pts = new[]
+        {
+            new PntsSamplePoint(1, 2, 3, Normal: new PclVector3(0, 0, 1)),
+            new PntsSamplePoint(4, 5, 6, Normal: new PclVector3(1, 0, 0)),
+            new PntsSamplePoint(7, 8, 9, Normal: new PclVector3(0, 1, 0)),
+        };
+        byte[] pntsData = SyntheticFixtures.CreateSyntheticPnts(pts, normalFormat: "NORMAL_OCT16P");
+        string path = dir.Write("oct16.pnts", pntsData);
+
+        using var doc = Tiles3dDocument.Open(path);
+        Assert.True(doc.Scans[0].HasNormals);
+        var points = doc.ReadAllPoints().ToList();
+        Assert.NotNull(points[0].Normal);
+        Assert.True(points[0].Normal!.Value.Z > 0.95);
+        Assert.True(points[1].Normal!.Value.X > 0.95);
+        Assert.True(points[2].Normal!.Value.Y > 0.95);
+    }
+
+    [Fact]
+    public void Pnts_Reads_Position_Quantized()
+    {
+        using var dir = new TempDirectory();
+        var offset = new PclVector3(10.0, 20.0, 30.0);
+        var scale = new PclVector3(100.0, 100.0, 100.0);
+        var pts = new[]
+        {
+            new PntsSamplePoint(10.0, 20.0, 30.0), // at offset
+            new PntsSamplePoint(110.0, 120.0, 130.0), // at offset + scale
+            new PntsSamplePoint(60.0, 70.0, 80.0), // center
+        };
+        byte[] pntsData = SyntheticFixtures.CreateSyntheticPnts(pts, isQuantized: true, qOffset: offset, qScale: scale);
+        string path = dir.Write("quantized.pnts", pntsData);
+
+        using var doc = Tiles3dDocument.Open(path);
+        var scan = (PntsScan)doc.Scans[0];
+        Assert.True(scan.IsQuantized);
+        Assert.Equal(offset.X, scan.Bounds.Min.X, 4);
+        Assert.Equal(offset.X + scale.X, scan.Bounds.Max.X, 4);
+
+        var points = doc.ReadAllPoints().ToList();
+        Assert.Equal(3, points.Count);
+        Assert.Equal(10.0, points[0].X, 1);
+        Assert.Equal(20.0, points[0].Y, 1);
+        Assert.Equal(30.0, points[0].Z, 1);
+        Assert.Equal(110.0, points[1].X, 1);
+        Assert.Equal(60.0, points[2].X, 1);
+    }
+
+    [Fact]
+    public void Pnts_Reads_RtcCenter_With_And_Without_ApplyTransform()
+    {
+        using var dir = new TempDirectory();
+        var rtc = new PclVector3(1000.0, 2000.0, 3000.0);
+        var pts = new[]
+        {
+            new PntsSamplePoint(1.0, 2.0, 3.0),
+            new PntsSamplePoint(4.0, 5.0, 6.0),
+        };
+        byte[] pntsData = SyntheticFixtures.CreateSyntheticPnts(pts, rtcCenter: rtc);
+        string path = dir.Write("rtc.pnts", pntsData);
+
+        using var doc = Tiles3dDocument.Open(path);
+        var scan = (PntsScan)doc.Scans[0];
+        Assert.Equal(rtc, scan.RtcCenter);
+
+        // With ApplyTransform: coordinates are in world space (local + RTC)
+        var transformed = doc.ReadAllPoints(new PclReadOptions { ApplyTransform = true }).ToList();
+        Assert.Equal(1001.0, transformed[0].X, 4);
+        Assert.Equal(2002.0, transformed[0].Y, 4);
+        Assert.Equal(3003.0, transformed[0].Z, 4);
+
+        // Without ApplyTransform: coordinates are in local space
+        var raw = doc.ReadAllPoints(new PclReadOptions { ApplyTransform = false }).ToList();
+        Assert.Equal(1.0, raw[0].X, 4);
+        Assert.Equal(2.0, raw[0].Y, 4);
+        Assert.Equal(3.0, raw[0].Z, 4);
+    }
+
+    [Fact]
+    public void Pnts_Reads_BatchTable_Intensity_Binary_And_Json()
+    {
+        using var dir = new TempDirectory();
+        var pts = new[]
+        {
+            new PntsSamplePoint(1, 2, 3, Intensity: 42.5f),
+            new PntsSamplePoint(4, 5, 6, Intensity: 88.0f),
+        };
+
+        // Binary batch table
+        byte[] pntsBin = SyntheticFixtures.CreateSyntheticPnts(pts, hasIntensity: true, intensityBinary: true);
+        string pathBin = dir.Write("bin_int.pnts", pntsBin);
+        using (var docBin = Tiles3dDocument.Open(pathBin))
+        {
+            Assert.True(docBin.Scans[0].HasIntensities);
+            var points = docBin.ReadAllPoints().ToList();
+            Assert.Equal(42.5f, points[0].Intensity);
+            Assert.Equal(88.0f, points[1].Intensity);
+        }
+
+        // JSON batch table array
+        byte[] pntsJson = SyntheticFixtures.CreateSyntheticPnts(pts, hasIntensity: true, intensityBinary: false);
+        string pathJson = dir.Write("json_int.pnts", pntsJson);
+        using (var docJson = Tiles3dDocument.Open(pathJson))
+        {
+            Assert.True(docJson.Scans[0].HasIntensities);
+            var points = docJson.ReadAllPoints().ToList();
+            Assert.Equal(42.5f, points[0].Intensity);
+            Assert.Equal(88.0f, points[1].Intensity);
+        }
+    }
+
+    [Fact]
+    public void Pnts_Reads_BatchTable_Classification()
+    {
+        using var dir = new TempDirectory();
+        var pts = new[]
+        {
+            new PntsSamplePoint(1, 2, 3, Classification: 2), // Ground
+            new PntsSamplePoint(4, 5, 6, Classification: 5), // High vegetation
+        };
+        byte[] pntsData = SyntheticFixtures.CreateSyntheticPnts(pts, hasClassification: true);
+        string path = dir.Write("class.pnts", pntsData);
+
+        using var doc = Tiles3dDocument.Open(path);
+        var points = doc.ReadAllPoints().ToList();
+        Assert.Equal((byte)2, points[0].Classification);
+        Assert.Equal((byte)5, points[1].Classification);
+    }
+
+    [Fact]
+    public void Pnts_Options_MaxPoints_And_SubsampleStep()
+    {
+        using var dir = new TempDirectory();
+        var pts = new[]
+        {
+            new PntsSamplePoint(1, 1, 1),
+            new PntsSamplePoint(2, 2, 2),
+            new PntsSamplePoint(3, 3, 3),
+            new PntsSamplePoint(4, 4, 4),
+            new PntsSamplePoint(5, 5, 5),
+        };
+        byte[] pntsData = SyntheticFixtures.CreateSyntheticPnts(pts);
+        string path = dir.Write("sub.pnts", pntsData);
+
+        using var doc = Tiles3dDocument.Open(path);
+
+        // MaxPoints
+        var limited = doc.ReadAllPoints(new PclReadOptions { MaxPoints = 2 }).ToList();
+        Assert.Equal(2, limited.Count);
+        Assert.Equal(1.0, limited[0].X, 4);
+        Assert.Equal(2.0, limited[1].X, 4);
+
+        // SubsampleStep
+        var stepped = doc.ReadAllPoints(new PclReadOptions { SubsampleStep = 2 }).ToList();
+        Assert.Equal(3, stepped.Count);
+        Assert.Equal(1.0, stepped[0].X, 4);
+        Assert.Equal(3.0, stepped[1].X, 4);
+        Assert.Equal(5.0, stepped[2].X, 4);
+    }
+
+    [Fact]
+    public void Pnts_Skips_NonFinite_Coordinates()
+    {
+        using var dir = new TempDirectory();
+        var pts = new[]
+        {
+            new PntsSamplePoint(1, 2, 3),
+            new PntsSamplePoint(double.NaN, 5, 6),
+            new PntsSamplePoint(7, double.PositiveInfinity, 9),
+            new PntsSamplePoint(10, 11, 12),
+        };
+        byte[] pntsData = SyntheticFixtures.CreateSyntheticPnts(pts);
+        string path = dir.Write("nan.pnts", pntsData);
+
+        using var doc = Tiles3dDocument.Open(path);
+        var points = doc.ReadAllPoints().ToList();
+        Assert.Equal(2, points.Count);
+        Assert.Equal(1.0, points[0].X, 4);
+        Assert.Equal(10.0, points[1].X, 4);
+    }
+
+    [Fact]
+    public void Pnts_Rejects_Bad_Magic()
+    {
+        using var dir = new TempDirectory();
+        byte[] data = SyntheticFixtures.CreateSyntheticPnts([new(1, 2, 3)]);
+        data[0] = (byte)'X';
+        string path = dir.Write("badmagic.pnts", data);
+
+        Assert.Throws<InvalidDataException>(() => Tiles3dDocument.Open(path));
+    }
+
+    [Fact]
+    public void Pnts_Rejects_Unsupported_Version()
+    {
+        using var dir = new TempDirectory();
+        byte[] data = SyntheticFixtures.CreateSyntheticPnts([new(1, 2, 3)]);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(data.AsSpan(4, 4), 2); // version 2
+        string path = dir.Write("badversion.pnts", data);
+
+        Assert.Throws<NotSupportedException>(() => Tiles3dDocument.Open(path));
+    }
+
+    [Fact]
+    public void Pnts_Rejects_Mismatched_ByteLength()
+    {
+        using var dir = new TempDirectory();
+        byte[] data = SyntheticFixtures.CreateSyntheticPnts([new(1, 2, 3)]);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(data.AsSpan(8, 4), 99999);
+        string path = dir.Write("badlen.pnts", data);
+
+        Assert.Throws<InvalidDataException>(() => Tiles3dDocument.Open(path));
+    }
+
+    [Fact]
+    public void Pnts_Rejects_Truncated_Binary_Data()
+    {
+        using var dir = new TempDirectory();
+        byte[] data = SyntheticFixtures.CreateSyntheticPnts([new(1, 2, 3), new(4, 5, 6)]);
+        byte[] trunc = data[..^6];
+        string path = dir.Write("trunc.pnts", trunc);
+
+        Assert.Throws<InvalidDataException>(() => Tiles3dDocument.Open(path));
+    }
+
+    [Fact]
+    public void Glb_Reads_Points_Mode0()
+    {
+        using var dir = new TempDirectory();
+        var pts = new[]
+        {
+            new PntsSamplePoint(1.0, 2.0, 3.0),
+            new PntsSamplePoint(4.0, 5.0, 6.0),
+            new PntsSamplePoint(7.0, 8.0, 9.0),
+        };
+        byte[] glbData = SyntheticFixtures.CreateSyntheticGlbPoints(pts);
+        string path = dir.Write("points.glb", glbData);
+
+        using var doc = Tiles3dDocument.Open(path);
+        Assert.Equal(PclFileKind.Tiles3d, doc.Kind);
+        Assert.Equal("3D Tiles Point Cloud (GLB)", doc.Metadata["Format"]);
+        Assert.Single(doc.Scans);
+        Assert.Equal(3, doc.TotalPoints);
+
+        var points = doc.ReadAllPoints().ToList();
+        Assert.Equal(3, points.Count);
+        Assert.Equal(1.0, points[0].X, 4);
+        Assert.Equal(2.0, points[0].Y, 4);
+        Assert.Equal(3.0, points[0].Z, 4);
+    }
+
+    [Fact]
+    public void Glb_Reads_Colors_Ubyte_Ushort_Float()
+    {
+        using var dir = new TempDirectory();
+        var pts = new[]
+        {
+            new PntsSamplePoint(1, 2, 3, Color: new PclColor(200, 100, 50, 255)),
+        };
+
+        // UBYTE
+        byte[] glbUbyte = SyntheticFixtures.CreateSyntheticGlbPoints(pts, hasColors: true, colorComponentType: 5121);
+        string pathUbyte = dir.Write("ubyte.glb", glbUbyte);
+        using (var doc = Tiles3dDocument.Open(pathUbyte))
+        {
+            Assert.True(doc.Scans[0].HasColors);
+            var p = doc.ReadAllPoints().First();
+            Assert.Equal(new PclColor(200, 100, 50, 255), p.Color);
+        }
+
+        // USHORT
+        byte[] glbUshort = SyntheticFixtures.CreateSyntheticGlbPoints(pts, hasColors: true, colorComponentType: 5123);
+        string pathUshort = dir.Write("ushort.glb", glbUshort);
+        using (var doc = Tiles3dDocument.Open(pathUshort))
+        {
+            Assert.True(doc.Scans[0].HasColors);
+            var p = doc.ReadAllPoints().First();
+            Assert.NotNull(p.Color);
+            Assert.True(Math.Abs(p.Color!.Value.R - 200) <= 1);
+        }
+
+        // FLOAT
+        byte[] glbFloat = SyntheticFixtures.CreateSyntheticGlbPoints(pts, hasColors: true, colorComponentType: 5126);
+        string pathFloat = dir.Write("float.glb", glbFloat);
+        using (var doc = Tiles3dDocument.Open(pathFloat))
+        {
+            Assert.True(doc.Scans[0].HasColors);
+            var p = doc.ReadAllPoints().First();
+            Assert.NotNull(p.Color);
+            Assert.True(Math.Abs(p.Color!.Value.R - 200) <= 1);
+        }
+    }
+
+    [Fact]
+    public void Glb_Reads_Normals_And_Intensity()
+    {
+        using var dir = new TempDirectory();
+        var pts = new[]
+        {
+            new PntsSamplePoint(1, 2, 3, Normal: new PclVector3(0, 0, 1), Intensity: 77.0f),
+        };
+        byte[] glbData = SyntheticFixtures.CreateSyntheticGlbPoints(pts, hasNormals: true, hasIntensity: true);
+        string path = dir.Write("full.glb", glbData);
+
+        using var doc = Tiles3dDocument.Open(path);
+        Assert.True(doc.Scans[0].HasNormals);
+        Assert.True(doc.Scans[0].HasIntensities);
+
+        var p = doc.ReadAllPoints().First();
+        Assert.Equal(1.0, p.Normal!.Value.Z, 4);
+        Assert.Equal(77.0f, p.Intensity);
+    }
+
+    [Fact]
+    public void Glb_Applies_Node_Matrix()
+    {
+        using var dir = new TempDirectory();
+        var pts = new[]
+        {
+            new PntsSamplePoint(1.0, 2.0, 3.0),
+        };
+        // 4x4 translation column-major matrix: translate by (10, 20, 30)
+        double[] colMajor = [
+            1, 0, 0, 0,
+            0, 1, 0, 0,
+            0, 0, 1, 0,
+            10, 20, 30, 1
+        ];
+        byte[] glbData = SyntheticFixtures.CreateSyntheticGlbPoints(pts, nodeMatrixColMajor: colMajor);
+        string path = dir.Write("matrix.glb", glbData);
+
+        using var doc = Tiles3dDocument.Open(path);
+        var transformed = doc.ReadAllPoints(new PclReadOptions { ApplyTransform = true }).First();
+        Assert.Equal(11.0, transformed.X, 4);
+        Assert.Equal(22.0, transformed.Y, 4);
+        Assert.Equal(33.0, transformed.Z, 4);
+
+        var raw = doc.ReadAllPoints(new PclReadOptions { ApplyTransform = false }).First();
+        Assert.Equal(1.0, raw.X, 4);
+        Assert.Equal(2.0, raw.Y, 4);
+        Assert.Equal(3.0, raw.Z, 4);
+    }
+
+    [Fact]
+    public void Glb_Rejects_Truncated_Bin()
+    {
+        using var dir = new TempDirectory();
+        byte[] glbData = SyntheticFixtures.CreateSyntheticGlbPoints([new(1, 2, 3)]);
+        byte[] trunc = glbData[..^8];
+        string path = dir.Write("trunc.glb", trunc);
+
+        Assert.Throws<InvalidDataException>(() => Tiles3dDocument.Open(path));
+    }
+
+    [Fact]
+    public void TilesetJson_Reads_Hierarchy_And_Applies_Transforms()
+    {
+        using var dir = new TempDirectory();
+        var pts = new[]
+        {
+            new PntsSamplePoint(1.0, 2.0, 3.0),
+        };
+        byte[] pntsData = SyntheticFixtures.CreateSyntheticPnts(pts);
+        dir.Write("tile.pnts", pntsData);
+
+        // 4x4 translation column-major matrix: translate by (100, 200, 300)
+        double[] colMajor = [
+            1, 0, 0, 0,
+            0, 1, 0, 0,
+            0, 0, 1, 0,
+            100, 200, 300, 1
+        ];
+        string tilesetJson = SyntheticFixtures.CreateSyntheticTilesetJson("tile.pnts", transformColMajor: colMajor);
+        string tilesetPath = dir.WriteText("tileset.json", tilesetJson);
+
+        using var doc = PclFile.Open(tilesetPath);
+        Assert.Equal(PclFileKind.Tiles3d, doc.Kind);
+        Assert.IsType<Tiles3dDocument>(doc);
+        Assert.Single(doc.Scans);
+
+        var transformed = doc.ReadAllPoints(new PclReadOptions { ApplyTransform = true }).First();
+        Assert.Equal(101.0, transformed.X, 4);
+        Assert.Equal(202.0, transformed.Y, 4);
+        Assert.Equal(303.0, transformed.Z, 4);
+    }
+
+    [Fact]
+    public void TilesetJson_Opens_From_Directory()
+    {
+        using var dir = new TempDirectory();
+        byte[] pntsData = SyntheticFixtures.CreateSyntheticPnts([new(1, 2, 3)]);
+        dir.Write("tile.pnts", pntsData);
+        dir.WriteText("tileset.json", SyntheticFixtures.CreateSyntheticTilesetJson("tile.pnts"));
+
+        using var doc = PclFile.Open(dir.Root);
+        Assert.Equal(PclFileKind.Tiles3d, doc.Kind);
+        Assert.Single(doc.Scans);
+        Assert.Equal(1, doc.TotalPointCount);
+    }
+
+    [Fact]
+    public void TilesetJson_Handles_Missing_Tile_With_Warning()
+    {
+        using var dir = new TempDirectory();
+        string tilesetJson = SyntheticFixtures.CreateSyntheticTilesetJson("nonexistent.pnts");
+        string tilesetPath = dir.WriteText("tileset.json", tilesetJson);
+
+        using var doc = Tiles3dDocument.Open(tilesetPath);
+        Assert.NotEmpty(doc.Warnings);
+        Assert.Empty(doc.Scans);
+    }
+
+    [Fact]
+    public void TilesetJson_Rejects_Corrupt_Json()
+    {
+        using var dir = new TempDirectory();
+        string tilesetPath = dir.WriteText("tileset.json", "{ not valid json ... ");
+
+        Assert.Throws<InvalidDataException>(() => Tiles3dDocument.Open(tilesetPath));
     }
 }
