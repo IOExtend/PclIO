@@ -91,6 +91,27 @@ public sealed class PinPointPackedTests
     }
 
     [Fact]
+    public void A_Points_Channel_With_A_Copy_Further_Back_Than_One_Mebibyte_Is_Decoded()
+    {
+        // A copy that reaches 2 MiB back: beyond the old 1 MiB window, inside the new one.
+        const int points = 200_000;
+        var pointsStream = new SnappyBuilder().Literal(new byte[2_100_000]);
+        for (int done = 0; done < 300_000; done += 64) pointsStream.Copy(2_000_000, Math.Min(64, 300_000 - done), 4);
+        var bin = PinPointPackedFixtures.Assemble(
+        [
+            ("RowColIndex", PinPointPackedFixtures.Literals(new byte[points * 8])),
+            ("Points", pointsStream.Build()),
+            ("FilterBits", PinPointPackedFixtures.Literals(new byte[points])),
+        ], points);
+        using var dir = new TempDirectory();
+        using var doc = Open(dir, bin);
+
+        var scan = (PinPointScan)Assert.Single(doc.Scans);
+        Assert.Equal(points, scan.PointCount);
+        Assert.Equal(points, ReadAll(doc).Count);
+    }
+
+    [Fact]
     public void Flagged_Points_Are_Returned_By_Default_And_Excluded_On_Request()
     {
         using var dir = new TempDirectory();

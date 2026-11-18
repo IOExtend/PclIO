@@ -4,21 +4,23 @@ namespace PclIO.Internal;
 
 /// <summary>
 /// Decodes a raw Snappy stream incrementally: a varint holding the uncompressed length, followed by literal and copy
-/// elements. Only the last <see cref="WindowSize"/> decoded bytes are kept, so memory use does not depend on the size of
-/// the data. The reader owns <c>source</c> and disposes it.
+/// elements. Only the last decoded bytes up to the window are kept: the window is the declared uncompressed length
+/// rounded up to a power of two, but never more than <see cref="MaxWindowBytes"/>, so memory use stays bounded.
+/// A stream whose copies reach back further than the window cannot be decoded and is reported as unsupported instead
+/// of being decoded wrongly. The reader owns <c>source</c> and disposes it.
 /// </summary>
 internal sealed class SnappyReader : Stream
 {
-    // Copies may reach back at most this far. Encoders that split their input into 64 KiB fragments never exceed it;
-    // a stream that does is reported as unsupported instead of being decoded wrongly.
-    private const int WindowSize = 1 << 20;
-    private const int WindowMask = WindowSize - 1;
+    // The window never grows beyond this, however long the stream declares to be.
+    private const int MaxWindowBytes = 8 << 20;
     private const int InputSize = 64 * 1024;
     private const int MaxPreambleBytes = 5;
 
     private readonly Stream _source;
     private readonly byte[] _input = ArrayPool<byte>.Shared.Rent(InputSize);
-    private readonly byte[] _window = ArrayPool<byte>.Shared.Rent(WindowSize);
+    private readonly byte[] _window;
+    private readonly int _windowSize;
+    private readonly int _windowMask;
     private long _sourceLeft;
     private int _inputPos, _inputEnd;
     private long _produced;
@@ -35,14 +37,35 @@ internal sealed class SnappyReader : Stream
     public SnappyReader(Stream source, long compressedLength)
     {
         _source = source;
+
+        // The preamble is read before anything is rented, so its failure only needs the source disposed.
+        Span<byte> head = stackalloc byte[MaxPreambleBytes];
+        int want = (int)Math.Min(MaxPreambleBytes, compressedLength);
+        int got;
+        int used;
+        long length;
         try
         {
-            Span<byte> head = stackalloc byte[MaxPreambleBytes];
-            int want = (int)Math.Min(MaxPreambleBytes, compressedLength);
-            int got = source.ReadAtLeast(head[..want], want, throwOnEndOfStream: false);
-            int used = ParsePreamble(head[..got], out long length);
-            UncompressedLength = length;
+            got = source.ReadAtLeast(head[..want], want, throwOnEndOfStream: false);
+            used = ParsePreamble(head[..got], out length);
+        }
+        catch
+        {
+            source.Dispose();
+            throw;
+        }
 
+        UncompressedLength = length;
+
+        // The window holds every byte the stream can copy from, unless the stream is longer than the cap.
+        long windowBytes = 1;
+        while (windowBytes < length && windowBytes < MaxWindowBytes) windowBytes <<= 1;
+        _window = ArrayPool<byte>.Shared.Rent((int)windowBytes);
+        _windowSize = (int)windowBytes;
+        _windowMask = (int)windowBytes - 1;
+
+        try
+        {
             // Bytes read past the preamble are the start of the first element.
             head[used..got].CopyTo(_input);
             _inputEnd = got - used;
@@ -104,8 +127,8 @@ internal sealed class SnappyReader : Stream
                 for (int i = 0; i < n; i++)
                 {
                     // A copy may overlap its own output, so it proceeds byte by byte.
-                    byte value = _window[(int)((_produced - _copyOffset) & WindowMask)];
-                    _window[(int)(_produced & WindowMask)] = value;
+                    byte value = _window[(int)((_produced - _copyOffset) & _windowMask)];
+                    _window[(int)(_produced & _windowMask)] = value;
                     buffer[written + i] = value;
                     _produced++;
                 }
@@ -175,7 +198,8 @@ internal sealed class SnappyReader : Stream
         }
 
         if (offset == 0 || offset > _produced) throw FormatError.Corrupted("a copy reaches before the start of the data");
-        if (offset > WindowSize) throw FormatError.Unsupported($"a compressed stream copies from more than {WindowSize} bytes back");
+        if (offset > _windowSize) throw FormatError.Unsupported(
+            $"a compressed stream copies from more than {_windowSize} bytes back; the decoder keeps at most {MaxWindowBytes} bytes");
         if (copyLength > remaining) throw FormatError.Corrupted("a copy runs past the declared length");
         _copyLeft = copyLength;
         _copyOffset = (int)offset;
@@ -184,8 +208,8 @@ internal sealed class SnappyReader : Stream
 
     private void StoreInWindow(ReadOnlySpan<byte> data)
     {
-        int position = (int)(_produced & WindowMask);
-        int first = Math.Min(data.Length, WindowSize - position);
+        int position = (int)(_produced & _windowMask);
+        int first = Math.Min(data.Length, _windowSize - position);
         data[..first].CopyTo(_window.AsSpan(position));
         data[first..].CopyTo(_window);
     }

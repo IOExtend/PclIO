@@ -106,15 +106,28 @@ public sealed class SnappyReaderTests
     }
 
     [Fact]
-    public void A_Copy_Can_Reach_Back_One_Mebibyte_Across_The_Window_Wrap()
+    public void A_Copy_Can_Reach_Back_Several_Mebibytes()
     {
-        byte[] data = Random((1 << 20) + 1000, 2);
+        byte[] data = Random((2 << 20) + 1000, 2);
         var expected = new List<byte>(data);
         var builder = new SnappyBuilder().Literal(data);
-        builder.Copy(1 << 20, 64, 4);
-        ExpandCopy(expected, 1 << 20, 64);
-        builder.Copy(1 << 20, 64, 4);
-        ExpandCopy(expected, 1 << 20, 64);
+        builder.Copy(2 << 20, 64, 4);
+        ExpandCopy(expected, 2 << 20, 64);
+        builder.Copy(2 << 20, 64, 4);
+        ExpandCopy(expected, 2 << 20, 64);
+
+        Assert.Equal(expected, DecodeAll(builder.Build()));
+    }
+
+    [Fact]
+    public void Copies_Stay_Correct_When_The_Window_Wraps()
+    {
+        // The stream declares more than the capped window, so the window wraps while an old copy is still in reach.
+        byte[] data = new byte[8 << 20];
+        var expected = new List<byte>(data);
+        var builder = new SnappyBuilder().Literal(data);
+        builder.Copy(8 << 20, 64, 4);
+        ExpandCopy(expected, 8 << 20, 64);
 
         Assert.Equal(expected, DecodeAll(builder.Build()));
     }
@@ -122,8 +135,8 @@ public sealed class SnappyReaderTests
     [Fact]
     public void A_Copy_Reaching_Further_Back_Than_The_Window_Is_Reported_As_Unsupported()
     {
-        byte[] data = Random((1 << 20) + 1000, 3);
-        byte[] stream = new SnappyBuilder().Literal(data).Copy((1 << 20) + 1, 64, 4).Build();
+        byte[] data = Random((8 << 20) + 1000, 3);
+        byte[] stream = new SnappyBuilder().Literal(data).Copy((8 << 20) + 1, 64, 4).Build();
 
         Assert.Throws<NotSupportedException>(() => DecodeAll(stream));
     }
