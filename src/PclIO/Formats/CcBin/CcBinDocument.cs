@@ -203,7 +203,8 @@ public sealed class CcBinDocument : PclDocument
 
         // 43 bytes: flags (8), shift (24), scale (8), marker (3)
         byte[] ccHead = new byte[43];
-        if (fs.Read(ccHead) < 43) return false;
+        // Confirm the XYZ array before treating an incomplete point block as a damaged scan.
+        if (fs.Read(ccHead) < ccHead.Length || ccHead[^1] != 3) return false;
 
         double sx = BinaryPrimitives.ReadDoubleLittleEndian(ccHead.AsSpan(8, 8));
         double sy = BinaryPrimitives.ReadDoubleLittleEndian(ccHead.AsSpan(16, 8));
@@ -213,13 +214,15 @@ public sealed class CcBinDocument : PclDocument
             throw FormatError.Corrupted("CC BIN has an invalid global shift or scale.");
 
         byte[] countBuf = new byte[4];
-        if (fs.Read(countBuf) < 4) return false;
+        if (fs.Read(countBuf) < countBuf.Length)
+            throw FormatError.Truncated($"CC BIN point count for scan {scanIndex}");
         uint count = BinaryPrimitives.ReadUInt32LittleEndian(countBuf);
         if (count == 0) return false;
 
         long ptStart = fs.Position;
         long ptBytes = (long)count * 12;
-        if (ptStart + ptBytes > fileLength) return false;
+        if (ptBytes > fileLength - ptStart)
+            throw FormatError.Truncated($"CC BIN XYZ coordinates for scan {scanIndex} ({count} declared points)");
 
         pointsEndOffset = ptStart + ptBytes;
 

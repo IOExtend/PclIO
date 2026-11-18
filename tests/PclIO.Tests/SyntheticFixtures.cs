@@ -3000,7 +3000,9 @@ internal static class SyntheticFixtures
     /// <summary>Creates a synthetic CC BIN file containing multiple adjacent cloud entities.</summary>
     public static byte[] CreateSyntheticCcBinMultiCloud(
         IReadOnlyList<IReadOnlyList<CcBinSamplePoint>> clouds,
-        uint version = 47)
+        uint version = 47,
+        bool truncateLastCloudPoints = false,
+        uint? declaredLastCloudPointCount = null)
     {
         using var ms = new MemoryStream();
         ms.Write("CCB2"u8.ToArray());
@@ -3011,12 +3013,15 @@ internal static class SyntheticFixtures
 
         for (int c = 0; c < clouds.Count; c++)
         {
+            bool isLast = c == clouds.Count - 1;
             WriteCcBinCloudEntity(
                 ms,
                 clouds[c],
                 name: $"Cloud_{c + 1}",
                 id: (uint)(100 + c),
-                version: version);
+                version: version,
+                truncatePoints: isLast && truncateLastCloudPoints,
+                declaredPointCount: isLast ? declaredLastCloudPointCount : null);
         }
 
         return ms.ToArray();
@@ -3040,7 +3045,8 @@ internal static class SyntheticFixtures
         IReadOnlyDictionary<string, double>? doubleProperties = null,
         bool truncatePoints = false,
         bool truncateColorBlock = false,
-        bool truncateIntensityData = false)
+        bool truncateIntensityData = false,
+        uint? declaredPointCount = null)
     {
         Span<byte> u32Buf = stackalloc byte[4];
 
@@ -3108,7 +3114,7 @@ internal static class SyntheticFixtures
         ms.WriteByte(0x03);
 
         // 6. Point count (uint32 LE)
-        BinaryPrimitives.WriteUInt32LittleEndian(u32Buf, (uint)points.Count);
+        BinaryPrimitives.WriteUInt32LittleEndian(u32Buf, declaredPointCount ?? (uint)points.Count);
         ms.Write(u32Buf);
 
         // 7. Points data (12 bytes per point)

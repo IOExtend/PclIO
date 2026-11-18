@@ -6520,6 +6520,28 @@ public sealed class FormatTests
     }
 
     [Fact]
+    public void Cc_Bin_Rejects_Truncated_Coordinates_In_A_Later_Cloud()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticCcBinMultiCloud(
+            [[new(1, 2, 3)], [new(4, 5, 6), new(7, 8, 9)]], truncateLastCloudPoints: true);
+
+        var error = Assert.Throws<InvalidDataException>(() => PclFile.Open(dir.Write("truncated_xyz.bin", bytes)));
+        Assert.Contains("XYZ coordinates", error.Message);
+    }
+
+    [Fact]
+    public void Cc_Bin_Rejects_An_Oversized_Point_Count_In_A_Later_Cloud()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticCcBinMultiCloud(
+            [[new(1, 2, 3)], [new(4, 5, 6)]], declaredLastCloudPointCount: uint.MaxValue);
+
+        var error = Assert.Throws<InvalidDataException>(() => PclFile.Open(dir.Write("oversized_count.bin", bytes)));
+        Assert.Contains("XYZ coordinates", error.Message);
+    }
+
+    [Fact]
     public void Cc_Bin_Reads_Intensity_Within_Declared_Count_Only()
     {
         using var dir = new TempDirectory();
