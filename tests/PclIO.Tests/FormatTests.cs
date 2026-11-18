@@ -114,6 +114,40 @@ public sealed class FormatTests
         Assert.Throws<NotSupportedException>(() => doc.ReadAllPoints().ToList());
     }
 
+    [Fact]
+    public void An_Rcs_Of_A_Version_Without_A_Described_Layout_Is_Rejected_With_A_Message_That_Names_It()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticRcsWithPoints(RcsPoints, (0, 0, 0));
+        bytes[8] = 4;
+        using var doc = RcsScanDocument.Open(dir.Write("new.rcs", bytes));
+
+        // The file is listed with its header, but its points cannot be decoded.
+        Assert.Equal(4u, doc.MajorVersion);
+        var error = Assert.Throws<NotSupportedException>(() => doc.ReadAllPoints().ToList());
+        Assert.Contains("4", error.Message, StringComparison.Ordinal);
+        Assert.Contains("3", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void The_Node_Layouts_That_Are_Decoded_Are_Named()
+    {
+        Assert.Equal([3u], RcsScanDocument.DecodedNodeLayoutVersions);
+    }
+
+    [Fact]
+    public void An_Rcs_With_A_Truncated_Node_Table_Is_Rejected()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticRcsWithPoints(RcsPoints, (0, 0, 0));
+
+        // The file ends in the middle of the node table.
+        string path = dir.Write("short.rcs", bytes[..(98605 + 100)]);
+        using var doc = RcsScanDocument.Open(path);
+
+        Assert.Throws<InvalidDataException>(() => doc.ReadAllPoints().ToList());
+    }
+
     // ---- ReCap project ----------------------------------------------------------------------------------------
 
     [Fact]

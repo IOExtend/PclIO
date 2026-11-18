@@ -5,13 +5,16 @@ using PclIO.Internal;
 namespace PclIO.Formats.Recap;
 
 /// <summary>
-/// Reads the header of a ReCap scan file (.rcs). Point decoding is experimental: only the node layout of
-/// major version 3 is supported, and any other layout is rejected instead of guessed.
+/// Reads the header of a ReCap scan file (.rcs). Point decoding is experimental: only the node layouts that are
+/// described in <see cref="RcsLayout"/> are decoded, and any other version is rejected instead of guessed.
 /// </summary>
 public sealed class RcsScanDocument : PclDocument
 {
     /// <inheritdoc />
     public override PclFileKind Kind => PclFileKind.RecapScan;
+
+    /// <summary>Major versions of the container whose node layout the reader decodes.</summary>
+    public static IReadOnlyList<uint> DecodedNodeLayoutVersions { get; } = [3];
 
     /// <summary>Container major version from the header.</summary>
     public uint MajorVersion { get; }
@@ -175,14 +178,38 @@ public sealed class RcsScanDocument : PclDocument
     }
 }
 
+/// <summary>
+/// The layout of the node table of a ReCap scan file, one per container major version.
+/// </summary>
+/// <remarks>
+/// A layout is described only when the files of that version may be used for the tests, so that its offsets can be
+/// verified. A file of a version without a described layout is listed with its header, but its points cannot be read:
+/// the reader rejects it with a message that names the version.
+/// </remarks>
+/// <param name="MajorVersion">Major version of the container that the layout belongs to.</param>
+/// <param name="NodeTableOffset">Offset of the node table in the file, in bytes.</param>
+/// <param name="NodeSize">Size of one entry of the node table, in bytes.</param>
+internal sealed record RcsLayout(uint MajorVersion, long NodeTableOffset, int NodeSize)
+{
+    // The layout of major version 3: the node table starts at a fixed offset and the node payloads occupy the end
+    // of the file.
+    private static readonly RcsLayout Version3 = new(3, 98605, 368);
+
+    private static readonly RcsLayout[] Described = [Version3];
+
+    /// <summary>The layout of the given major version, or null when the version has no described layout.</summary>
+    public static RcsLayout? ForVersion(uint majorVersion) =>
+        Described.FirstOrDefault(l => l.MajorVersion == majorVersion);
+
+    /// <summary>The major versions whose layout is described, for a message that names them.</summary>
+    public static string DescribedVersions => string.Join(", ", Described.Select(l => l.MajorVersion));
+}
+
 /// <summary>Individual scan of an RCS file.</summary>
 public sealed class RcsScan : PclScan
 {
     // Layout of major version 3: the node table starts at a fixed offset and the node
     // payloads occupy the end of the file. Both are verified against the file length before use.
-    private const uint SupportedMajorVersion = 3;
-    private const long NodeTableOffset = 98605;
-    private const int NodeSize = 368;
     private const ulong MaxNodes = 500_000;
     private const int PointRecordSize = 16;
     private const int NormalRecordSize = 4;
@@ -233,16 +260,17 @@ public sealed class RcsScan : PclScan
     {
         options ??= PclReadOptions.Default;
         if (PointCount == 0) yield break;
-        if (_document.MajorVersion != SupportedMajorVersion)
-            throw FormatError.Unsupported(
-                $"RCS container version {_document.MajorVersion}.{_document.MinorVersion}; only major version {SupportedMajorVersion} is decoded.");
+
+        var layout = RcsLayout.ForVersion(_document.MajorVersion)
+            ?? throw FormatError.Unsupported(
+                $"RCS container version {_document.MajorVersion}.{_document.MinorVersion}: the layout of its node table is not described. The described versions are {RcsLayout.DescribedVersions}.");
 
         long targetCount = options.MaxPoints ?? PointCount;
         int step = Math.Max(1, options.SubsampleStep);
         long yielded = 0;
 
         using var fs = File.OpenRead(_filePath);
-        var nodes = ReadNodeTable(fs, out long payloadStart);
+        var nodes = ReadNodeTable(fs, layout, out long payloadStart);
 
         long curOffset = payloadStart;
         byte[] chunkBuf = new byte[65536];
@@ -337,26 +365,26 @@ public sealed class RcsScan : PclScan
     }
 
     // Reads and validates the node table; payloadStart is where the first node payload begins.
-    private static List<Node> ReadNodeTable(FileStream fs, out long payloadStart)
+    private static List<Node> ReadNodeTable(FileStream fs, RcsLayout layout, out long payloadStart)
     {
-        if (fs.Length < NodeTableOffset + 8) throw FormatError.Truncated("RCS node table");
+        if (fs.Length < layout.NodeTableOffset + 8) throw FormatError.Truncated("RCS node table");
 
-        fs.Position = NodeTableOffset;
+        fs.Position = layout.NodeTableOffset;
         Span<byte> countBuf = stackalloc byte[8];
         fs.ReadExactly(countBuf);
         ulong numNodes = Bytes.ReadUInt64LE(countBuf);
 
-        long tableEnd = NodeTableOffset + 8 + ((long)Math.Min(numNodes, MaxNodes + 1) * NodeSize);
+        long tableEnd = layout.NodeTableOffset + 8 + ((long)Math.Min(numNodes, MaxNodes + 1) * layout.NodeSize);
         if (numNodes > MaxNodes || tableEnd > fs.Length)
             throw FormatError.Corrupted("RCS node table does not fit in the file.");
 
         var nodes = new List<Node>((int)numNodes);
-        byte[] nodeBuf = new byte[NodeSize];
+        byte[] nodeBuf = new byte[layout.NodeSize];
         long totalPayloadBytes = 0;
 
         for (ulong i = 0; i < numNodes; i++)
         {
-            fs.ReadExactly(nodeBuf, 0, NodeSize);
+            fs.ReadExactly(nodeBuf, 0, layout.NodeSize);
 
             double tMinX = Bytes.ReadDoubleLE(nodeBuf.AsSpan(0x30, 8));
             double tMinY = Bytes.ReadDoubleLE(nodeBuf.AsSpan(0x38, 8));
