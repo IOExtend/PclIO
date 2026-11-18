@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Runtime.CompilerServices;
 
 namespace PclIO.Internal;
 
@@ -416,10 +417,8 @@ internal static class ZstdDecoder
             if (size4 < 0 || regenerated - 3 * quarter < 0) throw FormatError.Corrupted("Zstandard Huffman stream sizes are inconsistent.");
 
             ReadOnlySpan<byte> body = content[6..];
-            _huffman.DecodeStream(body[..size1], literals[..quarter]);
-            _huffman.DecodeStream(body.Slice(size1, size2), literals.Slice(quarter, quarter));
-            _huffman.DecodeStream(body.Slice(size1 + size2, size3), literals.Slice(2 * quarter, quarter));
-            _huffman.DecodeStream(body[(size1 + size2 + size3)..], literals[(3 * quarter)..]);
+            _huffman.DecodeInterleaved(body[..size1], body.Slice(size1, size2), body.Slice(size1 + size2, size3), body[(size1 + size2 + size3)..],
+                literals[..quarter], literals.Slice(quarter, quarter), literals.Slice(2 * quarter, quarter), literals[(3 * quarter)..]);
             return regenerated;
         }
 
@@ -443,6 +442,8 @@ internal static class ZstdDecoder
             int position = _length;
             int literalPosition = 0;
             uint repeat1 = _repeat1, repeat2 = _repeat2, repeat3 = _repeat3;
+            int frameStart = _frameStart;
+            long windowSize = _windowSize;
 
             for (int i = 0; i < sequenceCount; i++)
             {
@@ -505,7 +506,7 @@ internal static class ZstdDecoder
                     }
                 }
 
-                if (offset == 0 || offset > position - _frameStart || offset > _windowSize)
+                if (offset == 0 || offset > position - frameStart || offset > windowSize)
                     throw FormatError.Corrupted("Zstandard match offset reaches outside the window.");
 
                 CopyMatch(output, position, (int)offset, matchLength);
@@ -524,6 +525,7 @@ internal static class ZstdDecoder
         }
 
         /// <summary>Copies a match that may overlap its own output: a distance shorter than the length repeats the pattern.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private static void CopyMatch(Span<byte> output, int position, int offset, int length)
         {
             int source = position - offset;

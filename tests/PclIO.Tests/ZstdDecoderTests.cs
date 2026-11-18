@@ -101,7 +101,7 @@ public sealed class ZstdDecoderTests
 
     private static byte[] FrameOf(string name) => Convert.FromBase64String(ZstdVectors.All.Single(v => v.Name == name).Base64);
 
-    private static byte[] ContentOf(string name) => Content(ZstdVectors.All.Single(v => v.Name == name).Content);
+    internal static byte[] ContentOf(string name) => Content(ZstdVectors.All.Single(v => v.Name == name).Content);
 
     // ---- Real frames --------------------------------------------------------------------------------------------------
 
