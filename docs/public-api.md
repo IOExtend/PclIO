@@ -67,9 +67,10 @@ drop points that fail a plausibility rule (see the README), so a scan can yield 
 | PinPoint | A manifest with a scan position list: declared by the manifest, else derived from the data file, else 0 (not known). A manifest with a data object list: always 0 (not known), so `TotalPointCount` is 0 for such a project. |
 | EdgeWise | A `.c3db` database node: the count the database declares. A `.c3ptx` file: computed by walking the cluster headers when the file is opened. |
 
-`HasColors`, `HasIntensities` and `HasNormals` follow what the file contains, except for ReCap scan, where they are constants of the
-supported layout and always true (a single point can still have no normal), and for the scans of a ReCap project, where all three
-are true when the `.rcs` file was found and false otherwise, without the file being opened.
+`HasColors`, `HasIntensities` and `HasNormals` follow what the file contains, except for the scans of a ReCap project, where all three
+are true when the `.rcs` file was found and false otherwise, without the file being opened. A ReCap scan reads the channels
+from the node table, so they are known after the node table has been read; a node whose points hold no colour gives its points
+no colour.
 
 ## Format documents
 

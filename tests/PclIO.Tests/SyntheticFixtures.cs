@@ -35,11 +35,18 @@ internal static class SyntheticFixtures
     /// <param name="points">Point records; the position is <paramref name="nodeMin"/> plus 0.0001 times each offset.</param>
     /// <param name="nodeMin">Tight minimum of the node.</param>
     /// <param name="withNormals">Whether the packed normal plane follows the records.</param>
+    /// <param name="withColor">Whether the records hold an intensity and a colour; without them they hold the position only.</param>
+    /// <param name="declaredPayloadBytes">Overrides the payload size the node declares; the records stay as written.</param>
+    /// <param name="tx">Translation of the scan.</param>
+    /// <param name="ty">Translation of the scan.</param>
+    /// <param name="tz">Translation of the scan.</param>
     public static byte[] CreateSyntheticRcsWithPoints(IReadOnlyList<RcsSamplePoint> points, (double X, double Y, double Z) nodeMin,
-        bool withNormals = false, double tx = 0.0, double ty = 0.0, double tz = 0.0)
+        bool withNormals = false, double tx = 0.0, double ty = 0.0, double tz = 0.0, bool withColor = true, uint? declaredPayloadBytes = null)
     {
-        int recordBytes = points.Count * (16 + (withNormals ? 4 : 0));
-        byte[] buffer = new byte[RcsNodeTableOffset + 8 + RcsNodeSize + recordBytes];
+        int recordBytes = withColor ? 16 : 10;
+        int recordBytesTotal = recordBytes + (withNormals ? 4 : 0);
+        int recordBytes_ = points.Count * recordBytesTotal;
+        byte[] buffer = new byte[RcsNodeTableOffset + 8 + RcsNodeSize + recordBytes_];
         WriteRcsHeader(buffer, points.Count, tx, ty, tz);
 
         BinaryPrimitives.WriteUInt64LittleEndian(buffer.AsSpan(RcsNodeTableOffset, 8), 1);
@@ -51,21 +58,25 @@ internal static class SyntheticFixtures
             BinaryPrimitives.WriteDoubleLittleEndian(node.Slice(0x48 + (i * 8), 8), min[i] + 7.0);
         }
         BinaryPrimitives.WriteUInt32LittleEndian(node.Slice(0x64, 4), (uint)points.Count);
-        BinaryPrimitives.WriteUInt32LittleEndian(node.Slice(0x68, 4), (uint)recordBytes);
+        BinaryPrimitives.WriteUInt32LittleEndian(node.Slice(0x68, 4), declaredPayloadBytes ?? (uint)recordBytes_);
 
-        int payload = buffer.Length - recordBytes;
-        int normals = payload + (points.Count * 16);
+        int payload = buffer.Length - recordBytes_;
+        int normals = payload + (points.Count * recordBytes);
         for (int i = 0; i < points.Count; i++)
         {
             var p = points[i];
-            Span<byte> record = buffer.AsSpan(payload + (i * 16), 16);
+            Span<byte> record = buffer.AsSpan(payload + (i * recordBytes), recordBytes);
             BinaryPrimitives.WriteUInt16LittleEndian(record.Slice(4, 2), p.X);
             BinaryPrimitives.WriteUInt16LittleEndian(record.Slice(6, 2), p.Y);
             BinaryPrimitives.WriteUInt16LittleEndian(record.Slice(8, 2), p.Z);
-            record[12] = p.Intensity;
-            record[13] = p.R;
-            record[14] = p.G;
-            record[15] = p.B;
+            if (withColor)
+            {
+                record[12] = p.Intensity;
+                record[13] = p.R;
+                record[14] = p.G;
+                record[15] = p.B;
+            }
+
             if (withNormals)
             {
                 buffer[normals + (i * 4)] = (byte)p.Nx;

@@ -25,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sizes do not fit.
 - The node layout of a ReCap scan is described in one place per container version. A file of a version without a described
   layout is rejected with a message that names the version and the described ones.
+- The channels of a ReCap scan follow from the file: the size of the payload of the nodes tells whether the points hold a
+  colour, an intensity and a normal. `HasColors`, `HasIntensities` and `HasNormals` are no longer constants.
 
 ## [0.1.0] - 2026-11-15
 
