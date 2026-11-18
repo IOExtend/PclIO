@@ -100,4 +100,30 @@ public sealed record PclReadOptions
             _edgeWiseCoordinateScale = value;
         }
     }
+
+    /// <summary>
+    /// Blocks of a scan to read, in file order; null reads all of the scan's blocks. A range that runs past the last
+    /// block simply ends there. Only readers whose points come in independent blocks use this option; the others read
+    /// the whole scan and ignore it. Currently only the Leica reader honours it.
+    /// </summary>
+    public BlockRange? Blocks { get; init; }
+
+    private int _maxDegreeOfParallelism = 1;
+
+    /// <summary>
+    /// How many blocks a reader may decode at once. The points keep file order whatever the value is.
+    /// Only readers with independent blocks use this option; the others read sequentially and ignore it.
+    /// Currently only the Leica reader decodes in parallel, holding the decoded points of the blocks in flight.
+    /// The default is 1: sequential decoding with constant memory besides the block being read.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">The value is less than 1.</exception>
+    public int MaxDegreeOfParallelism
+    {
+        get => _maxDegreeOfParallelism;
+        init
+        {
+            ArgumentOutOfRangeException.ThrowIfLessThan(value, 1);
+            _maxDegreeOfParallelism = value;
+        }
+    }
 }

@@ -103,7 +103,7 @@ file that exceeds a limit is rejected with `InvalidDataException`, with the exce
   non-finite coordinate or a coordinate beyond `PclReadOptions.MaxCoordinateMagnitude` in the file's own unit (5000 by default),
   and Leica padding entries. A scan can therefore yield fewer points than `PointCount`. The rules and the limits on file sizes
   and counts are listed in the repository README.
-- `SubsampleStep` is applied inside each format's internal blocks, so the spacing is approximate; `MaxPoints` limits one read call.
+- `SubsampleStep` is applied inside each format's internal blocks, so the spacing is approximate; `MaxPoints` limits one read call. Leica scans additionally accept `Blocks` (a file-order range of the scan's blocks) and `MaxDegreeOfParallelism` (above 1 decodes the selected blocks in parallel, keeping file order with consecutive `Index` values).
 - LAS and PTS export read the source twice; memory does not depend on the number of points. A point without intensity is written with full
   intensity and a point without colour as white. LAS uses a 1 mm scale by default, so the extent of each axis must fit 32-bit integers at the configured scale.
 - Normals are read where a format has them but no exporter writes them.

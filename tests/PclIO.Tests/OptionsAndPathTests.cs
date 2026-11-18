@@ -20,6 +20,8 @@ public sealed class OptionsAndPathTests
         Assert.True(options.ApplyTransform);
         Assert.False(options.Strict);
         Assert.False(options.ExcludeFilteredPoints);
+        Assert.Null(options.Blocks);
+        Assert.Equal(1, options.MaxDegreeOfParallelism);
         Assert.Equal(options, PclReadOptions.Default);
     }
 
@@ -106,6 +108,39 @@ public sealed class OptionsAndPathTests
         Assert.Null(options.Offset);
         Assert.False(options.WriteCoordinateSystem);
         Assert.Equal(options, PclLasOptions.Default);
+    }
+
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(int.MinValue)]
+    public void A_Negative_Block_Start_Is_Rejected(int value) =>
+        Assert.Throws<ArgumentOutOfRangeException>(() => new BlockRange { StartBlock = value });
+
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(int.MinValue)]
+    public void A_Negative_Block_Count_Is_Rejected(int value) =>
+        Assert.Throws<ArgumentOutOfRangeException>(() => new BlockRange { BlockCount = value });
+
+    [Fact]
+    public void A_Block_Range_Of_Zero_Count_And_Null_Count_Is_Accepted()
+    {
+        Assert.Equal(0, new BlockRange { StartBlock = 2, BlockCount = 0 }.BlockCount);
+        Assert.Null(new BlockRange { StartBlock = 2 }.BlockCount);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    [InlineData(int.MinValue)]
+    public void A_Parallelism_Below_One_Is_Rejected(int value) =>
+        Assert.Throws<ArgumentOutOfRangeException>(() => new PclReadOptions { MaxDegreeOfParallelism = value });
+
+    [Fact]
+    public void A_Parallelism_Of_One_Or_More_Is_Accepted()
+    {
+        Assert.Equal(1, new PclReadOptions { MaxDegreeOfParallelism = 1 }.MaxDegreeOfParallelism);
+        Assert.Equal(4, new PclReadOptions { MaxDegreeOfParallelism = 4 }.MaxDegreeOfParallelism);
     }
 
     [Fact]
