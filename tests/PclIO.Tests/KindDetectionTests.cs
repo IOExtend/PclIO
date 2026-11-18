@@ -569,6 +569,24 @@ public sealed class KindDetectionTests
         Assert.Equal(PclFileKind.Unknown, PclFile.DetectKind(badBin));
     }
 
+    [Fact]
+    public void Potree_Node_With_Cc_Magic_Coordinates_Is_Detected_As_Potree_Near_Manifest()
+    {
+        using var tempDir = new TempDirectory();
+        // Write cloud.js manifest
+        tempDir.Write("cloud.js", "{ \"version\": \"1.7\", \"octreeDir\": \"data\", \"points\": 1 }"u8.ToArray());
+
+        // Create an r.bin where the first 4 coordinate bytes happen to match CCB2 ("CCB2"),
+        // but remaining bytes are raw Potree point coordinates and not CC BIN structure.
+        byte[] potreeNode = new byte[32];
+        "CCB2"u8.CopyTo(potreeNode.AsSpan(0, 4)); // X coordinate
+        BinaryPrimitives.WriteInt32LittleEndian(potreeNode.AsSpan(4, 4), 500000); // Y coordinate
+        BinaryPrimitives.WriteInt32LittleEndian(potreeNode.AsSpan(8, 4), 600000); // Z coordinate
+        string rBinPath = tempDir.Write("data/r/r.bin", potreeNode);
+
+        Assert.Equal(PclFileKind.Potree, PclFile.DetectKind(rBinPath));
+    }
+
     private sealed class NonSeekableStream(byte[] bytes) : MemoryStream(bytes)
     {
         public override bool CanSeek => false;

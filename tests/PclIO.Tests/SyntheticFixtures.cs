@@ -2958,7 +2958,9 @@ internal static class SyntheticFixtures
         double[]? matrix16 = null,
         IReadOnlyDictionary<string, double>? doubleProperties = null,
         byte[]? rawMagic = null,
-        bool truncatePoints = false)
+        bool truncatePoints = false,
+        bool truncateColorBlock = false,
+        int? declaredIntensityCount = null)
     {
         using var ms = new MemoryStream();
 
@@ -2970,12 +2972,75 @@ internal static class SyntheticFixtures
         BinaryPrimitives.WriteUInt32LittleEndian(u32Buf, version);
         ms.Write(u32Buf);
 
-        // 3. Entity header: f1 (257), f2 (0), id (100)
+        WriteCcBinCloudEntity(
+            ms,
+            points,
+            name: name,
+            id: 100,
+            shiftX: shiftX,
+            shiftY: shiftY,
+            shiftZ: shiftZ,
+            scale: scale,
+            withColors: withColors,
+            withIntensity: withIntensity,
+            declaredIntensityCount: declaredIntensityCount,
+            matrix16: matrix16,
+            doubleProperties: doubleProperties,
+            truncatePoints: truncatePoints,
+            truncateColorBlock: truncateColorBlock);
+
+        return ms.ToArray();
+    }
+
+    /// <summary>Creates a synthetic CC BIN file containing multiple adjacent cloud entities.</summary>
+    public static byte[] CreateSyntheticCcBinMultiCloud(
+        IReadOnlyList<IReadOnlyList<CcBinSamplePoint>> clouds,
+        uint version = 47)
+    {
+        using var ms = new MemoryStream();
+        ms.Write("CCB2"u8.ToArray());
+
+        Span<byte> u32Buf = stackalloc byte[4];
+        BinaryPrimitives.WriteUInt32LittleEndian(u32Buf, version);
+        ms.Write(u32Buf);
+
+        for (int c = 0; c < clouds.Count; c++)
+        {
+            WriteCcBinCloudEntity(
+                ms,
+                clouds[c],
+                name: $"Cloud_{c + 1}",
+                id: (uint)(100 + c));
+        }
+
+        return ms.ToArray();
+    }
+
+    private static void WriteCcBinCloudEntity(
+        Stream ms,
+        IReadOnlyList<CcBinSamplePoint> points,
+        string name = "Cloud",
+        uint id = 100,
+        double shiftX = 0,
+        double shiftY = 0,
+        double shiftZ = 0,
+        double scale = 1.0,
+        bool withColors = true,
+        bool withIntensity = true,
+        int? declaredIntensityCount = null,
+        double[]? matrix16 = null,
+        IReadOnlyDictionary<string, double>? doubleProperties = null,
+        bool truncatePoints = false,
+        bool truncateColorBlock = false)
+    {
+        Span<byte> u32Buf = stackalloc byte[4];
+
+        // 3. Entity header: f1 (257), f2 (0), id
         BinaryPrimitives.WriteUInt32LittleEndian(u32Buf, 257);
         ms.Write(u32Buf);
         BinaryPrimitives.WriteUInt32LittleEndian(u32Buf, 0);
         ms.Write(u32Buf);
-        BinaryPrimitives.WriteUInt32LittleEndian(u32Buf, 100);
+        BinaryPrimitives.WriteUInt32LittleEndian(u32Buf, id);
         ms.Write(u32Buf);
 
         // Name (UTF-16 BE)
@@ -3050,9 +3115,15 @@ internal static class SyntheticFixtures
         }
 
         if (truncatePoints)
-            return ms.ToArray();
+            return;
 
         // 8. Colors
+        if (truncateColorBlock)
+        {
+            ms.WriteByte(0x01); // color flag declared, but stream ends immediately
+            return;
+        }
+
         if (withColors)
         {
             ms.WriteByte(0x01); // color flag
@@ -3128,16 +3199,21 @@ internal static class SyntheticFixtures
             ms.Write(nameBuf256);
 
             ms.WriteByte(0x01); // flag
-            BinaryPrimitives.WriteUInt32LittleEndian(u32Buf, (uint)points.Count);
+            int actualIntensityCount = declaredIntensityCount ?? points.Count;
+            BinaryPrimitives.WriteUInt32LittleEndian(u32Buf, (uint)actualIntensityCount);
             ms.Write(u32Buf);
 
             Span<byte> fltBuf = stackalloc byte[4];
-            for (int i = 0; i < points.Count; i++)
+            for (int i = 0; i < actualIntensityCount; i++)
             {
-                var pt = points[i];
-                BinaryPrimitives.WriteSingleLittleEndian(fltBuf, pt.Intensity ?? 0f);
+                float val = i < points.Count ? (points[i].Intensity ?? 0f) : 0f;
+                BinaryPrimitives.WriteSingleLittleEndian(fltBuf, val);
                 ms.Write(fltBuf);
             }
+
+            // Write 4 trailing bytes with float value 99f to ensure reading past actualIntensityCount would read 99
+            BinaryPrimitives.WriteSingleLittleEndian(fltBuf, 99f);
+            ms.Write(fltBuf);
         }
         else
         {
@@ -3145,7 +3221,5 @@ internal static class SyntheticFixtures
             BinaryPrimitives.WriteUInt32LittleEndian(u32Buf, 0);
             ms.Write(u32Buf);
         }
-
-        return ms.ToArray();
     }
 }

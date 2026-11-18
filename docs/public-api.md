@@ -45,7 +45,7 @@ is the argument, which may also be a file name.
   `Potree` is recognised by `cloud.js` (with `octreeDir` and attribute descriptors) or `metadata.json` (version 2.x and point attributes) in `.js` or `.json`, by `.hrc` hierarchy files with 5-byte node records, or by ancestor `cloud.js`/`metadata.json` next to a `.bin` file.
   `Ept` is recognised by `ept.json` manifest structure (bounds, dataType, schema) or by companion `ept.json` next to octree tiles.
   `LeicaPtg` is recognised by the `PTG\0` tag and magic number `0x928FA3C7` with any extension, or by the `PTG index` header with the `.ptg` extension.
-  `CcBin` is recognised by the `CCB2` signature with any extension; a `.bin` file without this signature is reported as `Potree` when inside an octree folder or `Unknown`.
+  `CcBin` is recognised by the `CCB2` signature and entity header structure with any extension; a `.bin` file without this structure is reported as `Potree` when next to an octree manifest or `Unknown`.
 - `FaroFls` needs an OLE2 compound file with the extension `.fls`, `RecapProject` a ZIP archive with the extension `.rcp`, and
   `PinPoint` a JSON text file with the extension `.smf` or `.srf`.
 - The extensions `.c3db` and `.c3ptx` select `EdgeWise` without a content check, so a damaged file with one of these extensions is

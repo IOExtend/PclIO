@@ -78,6 +78,7 @@ public sealed class CcBinDocument : PclDocument
             if (bytesRead < 44) break;
 
             int scanLimit = bytesRead - 44;
+            bool found = false;
             for (int i = 0; i <= scanLimit; i++)
             {
                 // Entity type f1 == 257 (0x01, 0x01, 0x00, 0x00) and f2 == 0 (0x00, 0x00, 0x00, 0x00)
@@ -88,13 +89,17 @@ public sealed class CcBinDocument : PclDocument
                     if (TryParsePointCloud(fs, fileLength, entityPos, _scans.Count, out var scan, out long nextOffset))
                     {
                         _scans.Add(scan);
-                        streamPos = Math.Max(streamPos, nextOffset);
+                        streamPos = Math.Max(entityPos + 8, nextOffset);
+                        found = true;
                         break;
                     }
                 }
             }
 
-            streamPos += BlockSize;
+            if (!found)
+            {
+                streamPos += BlockSize;
+            }
         }
     }
 
@@ -225,35 +230,38 @@ public sealed class CcBinDocument : PclDocument
         if (colorFlag == 1)
         {
             byte[] colH = new byte[16];
-            if (fs.Read(colH) == 16)
-            {
-                uint colNameLen = BinaryPrimitives.ReadUInt32BigEndian(colH.AsSpan(12, 4));
-                if (colNameLen < 500 && fs.Position + colNameLen + 9 <= fileLength)
-                {
-                    fs.Position += colNameLen;
-                    byte[] colProps = new byte[9];
-                    if (fs.Read(colProps) == 9)
-                    {
-                        channels = colProps[8];
-                        byte[] colCountBuf = new byte[4];
-                        if (fs.Read(colCountBuf) == 4)
-                        {
-                            uint colCount = BinaryPrimitives.ReadUInt32LittleEndian(colCountBuf);
-                            if (colCount == count && (channels is 3 or 4))
-                            {
-                                long cOffset = fs.Position;
-                                long cBytes = (long)colCount * channels;
-                                if (cOffset + cBytes <= fileLength)
-                                {
-                                    hasColors = true;
-                                    colorOffset = cOffset;
-                                    fs.Position += cBytes;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            if (fs.Read(colH) < 16)
+                throw new InvalidDataException("CC BIN RGB color header is truncated.");
+
+            uint colNameLen = BinaryPrimitives.ReadUInt32BigEndian(colH.AsSpan(12, 4));
+            if (colNameLen > 500 || fs.Position + colNameLen + 9 > fileLength)
+                throw new InvalidDataException("CC BIN RGB color name or properties are truncated.");
+
+            fs.Position += colNameLen;
+            byte[] colProps = new byte[9];
+            if (fs.Read(colProps) < 9)
+                throw new InvalidDataException("CC BIN RGB color properties are truncated.");
+
+            channels = colProps[8];
+            if (channels is not (3 or 4))
+                throw new InvalidDataException($"CC BIN unsupported color channels: {channels}.");
+
+            byte[] colCountBuf = new byte[4];
+            if (fs.Read(colCountBuf) < 4)
+                throw new InvalidDataException("CC BIN RGB color count is truncated.");
+
+            uint colCount = BinaryPrimitives.ReadUInt32LittleEndian(colCountBuf);
+            if (colCount != count)
+                throw new InvalidDataException($"CC BIN color count {colCount} does not match point count {count}.");
+
+            long cOffset = fs.Position;
+            long cBytes = (long)colCount * channels;
+            if (cOffset + cBytes > fileLength)
+                throw new InvalidDataException("CC BIN RGB color data is truncated.");
+
+            hasColors = true;
+            colorOffset = cOffset;
+            fs.Position += cBytes;
         }
 
         // Matrix 4x4
@@ -279,6 +287,7 @@ public sealed class CcBinDocument : PclDocument
         // Scalar fields (probe for Intensity)
         bool hasIntensity = false;
         long intensityOffset = -1;
+        uint intensityCount = 0;
         int sfFlag = fs.ReadByte();
         if (sfFlag >= 0)
         {
@@ -306,6 +315,7 @@ public sealed class CcBinDocument : PclDocument
                         {
                             hasIntensity = true;
                             intensityOffset = dataOffset;
+                            intensityCount = sCount;
                         }
 
                         fs.Position += sBytes;
@@ -319,12 +329,16 @@ public sealed class CcBinDocument : PclDocument
         }
 
         // Construct transform:
-        // P_global = (P_local - Shift) * Scale
-        // In PclTransform: P_transformed = P_local * Scale + Translation
+        // According to Global Shift and Scale mathematics:
+        // P_shifted = (P_original + Shift) * Scale
+        // Therefore, to recover the original (global) coordinate from stored local coordinate:
+        // P_original = P_local / Scale - Shift
+        // In PclTransform: P_transformed = P_local * Transform.Scale + Transform.Translation
+        double invScale = Math.Abs(scale) > 1e-12 ? (1.0 / scale) : 1.0;
         var transform = new PclTransform
         {
-            Scale = new PclVector3(scale, scale, scale),
-            Translation = new PclVector3(-sx * scale, -sy * scale, -sz * scale),
+            Scale = new PclVector3(invScale, invScale, invScale),
+            Translation = new PclVector3(-sx, -sy, -sz),
             Matrix4x4 = isIdentity ? null : matrix16,
         };
 
@@ -340,6 +354,7 @@ public sealed class CcBinDocument : PclDocument
             colorChannels: channels,
             hasIntensity: hasIntensity,
             intensityOffset: intensityOffset,
+            intensityCount: intensityCount,
             shiftX: sx,
             shiftY: sy,
             shiftZ: sz,
@@ -347,6 +362,7 @@ public sealed class CcBinDocument : PclDocument
             transform: transform,
             properties: props);
 
+        pointsEndOffset = Math.Max(pointsEndOffset, fs.Position);
         return true;
     }
 }

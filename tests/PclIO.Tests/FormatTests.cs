@@ -6397,7 +6397,8 @@ public sealed class FormatTests
             new(100.0, 200.0, 300.0),
         };
 
-        // Shift by (10, 20, 30) and scale by 2.0 -> transformed should be ((100 - 10) * 2, (200 - 20) * 2, (300 - 30) * 2) = (180, 360, 540)
+        // Shift by (10, 20, 30) and scale by 2.0 -> original global coordinates:
+        // P_global = P_local / scale - shift: (100 / 2 - 10, 200 / 2 - 20, 300 / 2 - 30) = (40, 80, 120)
         byte[] bytes = SyntheticFixtures.CreateSyntheticCcBin(
             samplePoints,
             shiftX: 10.0,
@@ -6417,9 +6418,65 @@ public sealed class FormatTests
 
         // With transform
         var transformed = scan.ReadPoints(new PclReadOptions { ApplyTransform = true }).First();
-        Assert.Equal(180.0, transformed.X, precision: 4);
-        Assert.Equal(360.0, transformed.Y, precision: 4);
-        Assert.Equal(540.0, transformed.Z, precision: 4);
+        Assert.Equal(40.0, transformed.X, precision: 4);
+        Assert.Equal(80.0, transformed.Y, precision: 4);
+        Assert.Equal(120.0, transformed.Z, precision: 4);
+    }
+
+    [Fact]
+    public void Cc_Bin_Opens_Adjacent_Multi_Cloud_Entities()
+    {
+        using var dir = new TempDirectory();
+        var cloud1 = new List<CcBinSamplePoint> { new(1, 2, 3), new(4, 5, 6) };
+        var cloud2 = new List<CcBinSamplePoint> { new(7, 8, 9), new(10, 11, 12) };
+
+        byte[] bytes = SyntheticFixtures.CreateSyntheticCcBinMultiCloud([cloud1, cloud2]);
+        string path = dir.Write("multi.bin", bytes);
+
+        using var doc = CcBinDocument.Open(path);
+        Assert.Equal(2, doc.Scans.Count);
+        Assert.Equal("Cloud_1", doc.Scans[0].Name);
+        Assert.Equal(2, doc.Scans[0].PointCount);
+        Assert.Equal("Cloud_2", doc.Scans[1].Name);
+        Assert.Equal(2, doc.Scans[1].PointCount);
+    }
+
+    [Fact]
+    public void Cc_Bin_Reads_Intensity_Within_Declared_Count_Only()
+    {
+        using var dir = new TempDirectory();
+        var samplePoints = new List<CcBinSamplePoint>
+        {
+            new(1.0, 2.0, 3.0, Intensity: 12f),
+            new(4.0, 5.0, 6.0, Intensity: 0f),
+        };
+
+        // 2 points, but only 1 intensity value declared in the scalar field
+        byte[] bytes = SyntheticFixtures.CreateSyntheticCcBin(
+            samplePoints,
+            declaredIntensityCount: 1);
+
+        string path = dir.Write("partial_intensity.bin", bytes);
+        using var doc = CcBinDocument.Open(path);
+        var scan = doc.Scans[0];
+
+        var points = scan.ReadPoints().ToList();
+        Assert.Equal(2, points.Count);
+        Assert.Equal(12f, points[0].Intensity);
+        Assert.Null(points[1].Intensity);
+    }
+
+    [Fact]
+    public void Cc_Bin_Rejects_Truncated_Color_Block()
+    {
+        using var dir = new TempDirectory();
+        var samplePoints = new List<CcBinSamplePoint> { new(1.0, 2.0, 3.0) };
+
+        // Color flag is 1, but file ends right after the flag
+        byte[] bytes = SyntheticFixtures.CreateSyntheticCcBin(samplePoints, truncateColorBlock: true);
+        string path = dir.Write("cut_color.bin", bytes);
+
+        Assert.Throws<InvalidDataException>(() => CcBinDocument.Open(path));
     }
 
     [Fact]

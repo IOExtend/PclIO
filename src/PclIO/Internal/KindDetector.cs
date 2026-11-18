@@ -85,9 +85,9 @@ internal static class KindDetector
         {
             using (var probeStream = File.OpenRead(path))
             {
-                Span<byte> probeHead = stackalloc byte[4];
-                int probeRead = probeStream.ReadAtLeast(probeHead, 4, throwOnEndOfStream: false);
-                if (probeRead >= 4 && probeHead.StartsWith(CcBinMagic))
+                Span<byte> probeHead = stackalloc byte[24];
+                int probeRead = probeStream.ReadAtLeast(probeHead, 24, throwOnEndOfStream: false);
+                if (probeRead >= 24 && IsCcBinStructure(probeHead))
                     return PclFileKind.CcBin;
             }
 
@@ -132,7 +132,7 @@ internal static class KindDetector
         if (read < 4) return extension is ".c3db" or ".c3ptx" ? PclFileKind.EdgeWise : PclFileKind.Unknown;
         ReadOnlySpan<byte> head = buffer[..read];
 
-        if (head.StartsWith(CcBinMagic))
+        if (head.StartsWith(CcBinMagic) && IsCcBinStructure(head))
             return PclFileKind.CcBin;
 
         if (head.Length >= 8 && head.StartsWith(PtgTag) && BinaryPrimitives.ReadUInt32LittleEndian(head[4..8]) == PtgMagicNumber)
@@ -1317,5 +1317,25 @@ internal static class KindDetector
         {
             stream.Position = origin;
         }
+    }
+
+    private static bool IsCcBinStructure(ReadOnlySpan<byte> head)
+    {
+        if (head.Length < 24 || !head.StartsWith(CcBinMagic))
+            return false;
+
+        uint version = BinaryPrimitives.ReadUInt32LittleEndian(head[4..8]);
+        if (version is < 1 or > 100)
+            return false;
+
+        uint entityType = BinaryPrimitives.ReadUInt32LittleEndian(head[8..12]);
+        if (entityType is < 1 or > 2000)
+            return false;
+
+        uint nameLen = BinaryPrimitives.ReadUInt32BigEndian(head[20..24]);
+        if (nameLen != 0xFFFF_FFFF && (nameLen > 2048 || (nameLen % 2) != 0))
+            return false;
+
+        return true;
     }
 }
