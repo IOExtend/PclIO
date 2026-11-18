@@ -62,4 +62,7 @@ public enum PclFileKind
 
     /// <summary>Cloud Optimized Point Cloud (clustered octree in LAZ, .copc.laz).</summary>
     Copc = 19,
+
+    /// <summary>Entwine Point Tile dataset (ept.json).</summary>
+    Ept = 20,
 }

@@ -62,6 +62,14 @@ public readonly record struct PotreeSamplePoint(
     PclVector3? Normal = null,
     byte? Classification = null);
 
+/// <summary>One point of a synthetic EPT dataset: position, colour, intensity, normal and classification.</summary>
+public readonly record struct EptSamplePoint(
+    double X, double Y, double Z,
+    PclColor? Color = null,
+    float? Intensity = null,
+    PclVector3? Normal = null,
+    byte? Classification = null);
+
 /// <summary>Generates small synthetic scan files for the tests. Every layout is written from what the readers implement;
 /// no byte of any of them comes from a real scan.</summary>
 internal static class SyntheticFixtures
@@ -2624,5 +2632,136 @@ internal static class SyntheticFixtures
 
         string metadataJson = JsonSerializer.Serialize(manifest, new JsonSerializerOptions { WriteIndented = true });
         return (metadataJson, octreeBin);
+    }
+
+    /// <summary>Generates a synthetic EPT dataset (ept.json, hierarchy 0-0-0-0.json, and data tile 0-0-0-0.{ext}).</summary>
+    public static (string manifestJson, string hierarchyJson, byte[] dataBytes, string dataExtension) CreateSyntheticEpt(
+        IReadOnlyList<EptSamplePoint> points,
+        string dataType = "binary",
+        PclBounds? bounds = null,
+        int span = 128)
+    {
+        double minX = double.PositiveInfinity, minY = double.PositiveInfinity, minZ = double.PositiveInfinity;
+        double maxX = double.NegativeInfinity, maxY = double.NegativeInfinity, maxZ = double.NegativeInfinity;
+
+        foreach (var pt in points)
+        {
+            minX = Math.Min(minX, pt.X);
+            minY = Math.Min(minY, pt.Y);
+            minZ = Math.Min(minZ, pt.Z);
+            maxX = Math.Max(maxX, pt.X);
+            maxY = Math.Max(maxY, pt.Y);
+            maxZ = Math.Max(maxZ, pt.Z);
+        }
+
+        if (points.Count == 0 || !double.IsFinite(minX))
+        {
+            minX = minY = minZ = 0;
+            maxX = maxY = maxZ = 100;
+        }
+
+        double cubeMinX = Math.Floor(minX);
+        double cubeMinY = Math.Floor(minY);
+        double cubeMinZ = Math.Floor(minZ);
+        double maxSpan = Math.Max(maxX - cubeMinX, Math.Max(maxY - cubeMinY, maxZ - cubeMinZ));
+        if (maxSpan <= 0) maxSpan = 1.0;
+        double cubeMaxX = cubeMinX + maxSpan;
+        double cubeMaxY = cubeMinY + maxSpan;
+        double cubeMaxZ = cubeMinZ + maxSpan;
+
+        if (bounds.HasValue)
+        {
+            cubeMinX = bounds.Value.Min.X;
+            cubeMinY = bounds.Value.Min.Y;
+            cubeMinZ = bounds.Value.Min.Z;
+            cubeMaxX = bounds.Value.Max.X;
+            cubeMaxY = bounds.Value.Max.Y;
+            cubeMaxZ = bounds.Value.Max.Z;
+        }
+
+        var schemaList = new List<Dictionary<string, object>>
+        {
+            new() { ["name"] = "X", ["type"] = "signed", ["size"] = 4, ["scale"] = 0.001, ["offset"] = 0.0 },
+            new() { ["name"] = "Y", ["type"] = "signed", ["size"] = 4, ["scale"] = 0.001, ["offset"] = 0.0 },
+            new() { ["name"] = "Z", ["type"] = "signed", ["size"] = 4, ["scale"] = 0.001, ["offset"] = 0.0 },
+            new() { ["name"] = "Intensity", ["type"] = "unsigned", ["size"] = 2, ["scale"] = 1.0, ["offset"] = 0.0 },
+            new() { ["name"] = "Red", ["type"] = "unsigned", ["size"] = 2, ["scale"] = 1.0, ["offset"] = 0.0 },
+            new() { ["name"] = "Green", ["type"] = "unsigned", ["size"] = 2, ["scale"] = 1.0, ["offset"] = 0.0 },
+            new() { ["name"] = "Blue", ["type"] = "unsigned", ["size"] = 2, ["scale"] = 1.0, ["offset"] = 0.0 },
+            new() { ["name"] = "Classification", ["type"] = "unsigned", ["size"] = 1, ["scale"] = 1.0, ["offset"] = 0.0 },
+        };
+
+        var manifestObj = new Dictionary<string, object>
+        {
+            ["bounds"] = new double[] { cubeMinX, cubeMinY, cubeMinZ, cubeMaxX, cubeMaxY, cubeMaxZ },
+            ["boundsConforming"] = new double[] { minX, minY, minZ, maxX, maxY, maxZ },
+            ["dataType"] = dataType,
+            ["hierarchyType"] = "json",
+            ["points"] = points.Count,
+            ["schema"] = schemaList,
+            ["span"] = span,
+            ["version"] = "1.0.0"
+        };
+
+        string manifestJson = JsonSerializer.Serialize(manifestObj, new JsonSerializerOptions { WriteIndented = true });
+
+        var hierObj = new Dictionary<string, object>
+        {
+            ["0-0-0-0"] = points.Count
+        };
+        string hierarchyJson = JsonSerializer.Serialize(hierObj, new JsonSerializerOptions { WriteIndented = true });
+
+        int recSize = 4 + 4 + 4 + 2 + 2 + 2 + 2 + 1; // 21 bytes
+        byte[] rawBin = new byte[points.Count * recSize];
+        int offset = 0;
+        foreach (var pt in points)
+        {
+            int ix = (int)Math.Round(pt.X / 0.001);
+            int iy = (int)Math.Round(pt.Y / 0.001);
+            int iz = (int)Math.Round(pt.Z / 0.001);
+            ushort intensity = (ushort)(pt.Intensity.HasValue ? Math.Clamp((int)Math.Round(pt.Intensity.Value * 65535.0), 0, 65535) : 0);
+            ushort r = pt.Color.HasValue ? (ushort)(pt.Color.Value.R * 257) : (ushort)0;
+            ushort g = pt.Color.HasValue ? (ushort)(pt.Color.Value.G * 257) : (ushort)0;
+            ushort b = pt.Color.HasValue ? (ushort)(pt.Color.Value.B * 257) : (ushort)0;
+            byte cls = pt.Classification ?? 0;
+
+            BinaryPrimitives.WriteInt32LittleEndian(rawBin.AsSpan(offset, 4), ix);
+            BinaryPrimitives.WriteInt32LittleEndian(rawBin.AsSpan(offset + 4, 4), iy);
+            BinaryPrimitives.WriteInt32LittleEndian(rawBin.AsSpan(offset + 8, 4), iz);
+            BinaryPrimitives.WriteUInt16LittleEndian(rawBin.AsSpan(offset + 12, 2), intensity);
+            BinaryPrimitives.WriteUInt16LittleEndian(rawBin.AsSpan(offset + 14, 2), r);
+            BinaryPrimitives.WriteUInt16LittleEndian(rawBin.AsSpan(offset + 16, 2), g);
+            BinaryPrimitives.WriteUInt16LittleEndian(rawBin.AsSpan(offset + 18, 2), b);
+            rawBin[offset + 20] = cls;
+            offset += recSize;
+        }
+
+        byte[] tileBytes;
+        string ext;
+        if (dataType == "laszip")
+        {
+            ext = "laz";
+            if (points.Count > 0)
+            {
+                var pt0 = points[0];
+                tileBytes = CreateSyntheticLaz(pt0.X, pt0.Y, pt0.Z, pt0.Intensity ?? 0f, pt0.Color, pt0.Classification ?? 0);
+            }
+            else
+            {
+                tileBytes = CreateSyntheticLaz();
+            }
+        }
+        else if (dataType == "zstandard")
+        {
+            ext = "zst";
+            tileBytes = RawZstdFrame.Wrap(rawBin);
+        }
+        else
+        {
+            ext = "bin";
+            tileBytes = rawBin;
+        }
+
+        return (manifestJson, hierarchyJson, tileBytes, ext);
     }
 }

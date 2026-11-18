@@ -153,6 +153,34 @@ public sealed class RealFileTests
     }
 
     [SkippableFact]
+    public void Read_Real_Ept_Manifest()
+    {
+        string? root = TestFiles.Roots().FirstOrDefault();
+        if (root == null) throw TestFiles.Missing("ept.json");
+        string eptPath = Path.Combine(root, "ept", "lion_takanawa", "ept.json");
+        if (!File.Exists(eptPath))
+            eptPath = Path.Combine(root, "downloads", "ept", "lion_takanawa", "ept.json");
+        if (!File.Exists(eptPath))
+            eptPath = TestFiles.FindByExtension("ept.json");
+
+        Assert.Equal(PclFileKind.Ept, PclFile.DetectKind(eptPath));
+        Assert.Equal(PclFileKind.Ept, PclFile.DetectKind(Path.GetDirectoryName(eptPath)!));
+
+        using var doc = PclFile.Open(eptPath);
+        Assert.Equal(PclFileKind.Ept, doc.Kind);
+        Assert.Single(doc.Scans);
+        Assert.Equal(341989, doc.TotalPointCount);
+
+        var points = doc.ReadAllPoints(new PclReadOptions { MaxPoints = 100 }).ToList();
+        Assert.Equal(100, points.Count);
+        var firstPoint = points[0];
+        Assert.True(double.IsFinite(firstPoint.X));
+        Assert.True(double.IsFinite(firstPoint.Y));
+        Assert.True(double.IsFinite(firstPoint.Z));
+        Assert.NotNull(firstPoint.Color);
+    }
+
+    [SkippableFact]
     public void Export_Real_File_To_Las_Matches_The_Requested_Count()
     {
         // Any one of the available formats is enough; the first one found is used.

@@ -2,6 +2,7 @@ using PclIO.Export;
 using PclIO.Formats.Copc;
 using PclIO.Formats.E57;
 using PclIO.Formats.EdgeWise;
+using PclIO.Formats.Ept;
 using PclIO.Formats.Faro;
 using PclIO.Formats.Las;
 using PclIO.Formats.Laz;
@@ -5757,5 +5758,281 @@ public sealed class FormatTests
         string path = dir.Write("truncated.copc.laz", bytes);
 
         Assert.Throws<InvalidDataException>(() => CopcDocument.Open(path));
+    }
+
+    // ---- Entwine Point Tile (EPT) tests -------------------------------------------------------------------
+
+    [Fact]
+    public void Ept_Opens_Lists_Scans_And_Streams_Points()
+    {
+        using var dir = new TempDirectory();
+        var points = new EptSamplePoint[]
+        {
+            new(10.0, 20.0, 30.0, new PclColor(255, 0, 0), Intensity: 0.5f, Classification: 2),
+            new(11.0, 21.0, 31.0, new PclColor(0, 255, 0), Intensity: 0.8f, Classification: 1),
+            new(12.0, 22.0, 32.0, new PclColor(0, 0, 255), Intensity: 1.0f, Classification: 3),
+        };
+
+        var (manifest, hier, data, ext) = SyntheticFixtures.CreateSyntheticEpt(points, dataType: "binary");
+        string eptPath = dir.WriteText("ept.json", manifest);
+        dir.WriteText("ept-hierarchy/0-0-0-0.json", hier);
+        string dataPath = dir.Write($"ept-data/0-0-0-0.{ext}", data);
+
+        // Open via ept.json
+        using var docFile = EptDocument.Open(eptPath);
+        Assert.Equal(PclFileKind.Ept, docFile.Kind);
+        Assert.Equal("1.0.0", docFile.Version);
+        Assert.Equal("binary", docFile.DataType);
+        Assert.Equal(128, docFile.Span);
+        Assert.Equal(3, docFile.DeclaredPoints);
+        Assert.Single(docFile.Scans);
+        Assert.Single(docFile.Nodes);
+        Assert.Equal(3, docFile.TotalPointCount);
+
+        // Open via directory
+        using var docDir = PclFile.Open(dir.Root);
+        Assert.Equal(PclFileKind.Ept, docDir.Kind);
+        Assert.Equal(3, docDir.TotalPointCount);
+
+        // Open via tile path (ancestor search)
+        using var docTile = EptDocument.Open(dataPath);
+        Assert.Equal(PclFileKind.Ept, docTile.Kind);
+
+        // Read points
+        var readPoints = docFile.ReadAllPoints().ToList();
+        Assert.Equal(3, readPoints.Count);
+
+        Assert.Equal(10.0, readPoints[0].X, Precision);
+        Assert.Equal(20.0, readPoints[0].Y, Precision);
+        Assert.Equal(30.0, readPoints[0].Z, Precision);
+        Assert.Equal(new PclColor(255, 0, 0), readPoints[0].Color);
+        Assert.Equal((byte)2, readPoints[0].Classification);
+
+        Assert.Equal(11.0, readPoints[1].X, Precision);
+        Assert.Equal(21.0, readPoints[1].Y, Precision);
+        Assert.Equal(31.0, readPoints[1].Z, Precision);
+        Assert.Equal(new PclColor(0, 255, 0), readPoints[1].Color);
+        Assert.Equal((byte)1, readPoints[1].Classification);
+    }
+
+    [Fact]
+    public void Ept_Reads_Laszip_Data()
+    {
+        using var dir = new TempDirectory();
+        var points = new EptSamplePoint[]
+        {
+            new(5.0, 10.0, 15.0, new PclColor(128, 64, 32), Intensity: 0.5f, Classification: 1),
+        };
+
+        var (manifest, hier, data, ext) = SyntheticFixtures.CreateSyntheticEpt(points, dataType: "laszip");
+        string eptPath = dir.WriteText("ept.json", manifest);
+        dir.WriteText("ept-hierarchy/0-0-0-0.json", hier);
+        dir.Write($"ept-data/0-0-0-0.{ext}", data);
+
+        using var doc = EptDocument.Open(eptPath);
+        Assert.Equal("laszip", doc.DataType);
+        var readPoints = doc.ReadAllPoints().ToList();
+        Assert.Single(readPoints);
+        Assert.Equal(5.0, readPoints[0].X, 0.01);
+        Assert.Equal(10.0, readPoints[0].Y, 0.01);
+        Assert.Equal(15.0, readPoints[0].Z, 0.01);
+    }
+
+    [Fact]
+    public void Ept_Reads_Zstandard_Data()
+    {
+        using var dir = new TempDirectory();
+        var points = new EptSamplePoint[]
+        {
+            new(100.0, 200.0, 300.0, new PclColor(10, 20, 30), Intensity: 0.75f, Classification: 5),
+            new(105.0, 205.0, 305.0, new PclColor(40, 50, 60), Intensity: 0.25f, Classification: 6),
+        };
+
+        var (manifest, hier, data, ext) = SyntheticFixtures.CreateSyntheticEpt(points, dataType: "zstandard");
+        string eptPath = dir.WriteText("ept.json", manifest);
+        dir.WriteText("ept-hierarchy/0-0-0-0.json", hier);
+        dir.Write($"ept-data/0-0-0-0.{ext}", data);
+
+        using var doc = EptDocument.Open(eptPath);
+        Assert.Equal("zstandard", doc.DataType);
+        var readPoints = doc.ReadAllPoints().ToList();
+        Assert.Equal(2, readPoints.Count);
+        Assert.Equal(100.0, readPoints[0].X, Precision);
+        Assert.Equal(200.0, readPoints[0].Y, Precision);
+        Assert.Equal(300.0, readPoints[0].Z, Precision);
+        Assert.Equal(new PclColor(10, 20, 30), readPoints[0].Color);
+        Assert.Equal((byte)5, readPoints[0].Classification);
+
+        Assert.Equal(105.0, readPoints[1].X, Precision);
+        Assert.Equal(205.0, readPoints[1].Y, Precision);
+        Assert.Equal(305.0, readPoints[1].Z, Precision);
+        Assert.Equal(new PclColor(40, 50, 60), readPoints[1].Color);
+        Assert.Equal((byte)6, readPoints[1].Classification);
+    }
+
+    [Fact]
+    public void Ept_Spatial_Queries_FindNodes_And_ReadPoints()
+    {
+        using var dir = new TempDirectory();
+        var rootBounds = new PclBounds(new PclVector3(0, 0, 0), new PclVector3(100, 100, 100));
+
+        var pts1 = new EptSamplePoint[] { new(10, 10, 10) };
+        var pts2 = new EptSamplePoint[] { new(60, 60, 60) };
+
+        var (manifest, _, data1, ext) = SyntheticFixtures.CreateSyntheticEpt(pts1, dataType: "binary", bounds: rootBounds);
+        string eptPath = dir.WriteText("ept.json", manifest);
+
+        // Two nodes in octree: 1-0-0-0 (voxel [0..50, 0..50, 0..50]) and 1-1-1-1 (voxel [50..100, 50..100, 50..100])
+        string hier = "{\"1-0-0-0\": 1, \"1-1-1-1\": 1}";
+        dir.WriteText("ept-hierarchy/0-0-0-0.json", hier);
+        dir.Write($"ept-data/1-0-0-0.{ext}", data1);
+
+        var (_, _, data2, _) = SyntheticFixtures.CreateSyntheticEpt(pts2, dataType: "binary", bounds: rootBounds);
+        dir.Write($"ept-data/1-1-1-1.{ext}", data2);
+
+        using var doc = EptDocument.Open(eptPath);
+        Assert.Equal(2, doc.Nodes.Count);
+
+        // Query spatial bounds covering only the first voxel [0..20, 0..20, 0..20]
+        var queryBounds = new PclBounds(new PclVector3(5, 5, 5), new PclVector3(25, 25, 25));
+        var matchingNodes = doc.FindNodes(queryBounds);
+        Assert.Single(matchingNodes);
+        Assert.Equal("1-0-0-0", matchingNodes[0].Key.ToString());
+
+        var filteredPoints = doc.ReadPoints(queryBounds).ToList();
+        Assert.Single(filteredPoints);
+        Assert.Equal(10.0, filteredPoints[0].X, Precision);
+
+        // Read specific node directly
+        var nodePoints = doc.ReadPoints(doc.Nodes[1]).ToList();
+        Assert.Single(nodePoints);
+        Assert.Equal(60.0, nodePoints[0].X, Precision);
+    }
+
+    [Fact]
+    public void Ept_Hierarchy_MultiPage_And_Cycle_Detection()
+    {
+        using var dir = new TempDirectory();
+        var pts = new EptSamplePoint[] { new(1, 2, 3) };
+        var (manifest, _, data, ext) = SyntheticFixtures.CreateSyntheticEpt(pts, dataType: "binary");
+        string eptPath = dir.WriteText("ept.json", manifest);
+
+        // 0-0-0-0.json refers to 1-0-0-0 as sub-page (-1)
+        dir.WriteText("ept-hierarchy/0-0-0-0.json", "{\"1-0-0-0\": -1}");
+        // 1-0-0-0.json defines 1-0-0-0 as having 1 point
+        dir.WriteText("ept-hierarchy/1-0-0-0.json", "{\"1-0-0-0\": 1}");
+        dir.Write($"ept-data/1-0-0-0.{ext}", data);
+
+        using (var doc = EptDocument.Open(eptPath))
+        {
+            Assert.Single(doc.Nodes);
+            Assert.Equal("1-0-0-0", doc.Nodes[0].Key.ToString());
+        }
+
+        // Cyclic hierarchy reference should throw InvalidDataException
+        dir.WriteText("ept-hierarchy/1-0-0-0.json", "{\"0-0-0-0\": -1}");
+        Assert.Throws<InvalidDataException>(() => EptDocument.Open(eptPath));
+    }
+
+    [Fact]
+    public void Ept_Applies_ReadOptions()
+    {
+        using var dir = new TempDirectory();
+        var points = Enumerable.Range(0, 10)
+            .Select(i => new EptSamplePoint(i, i * 2, i * 3))
+            .ToArray();
+
+        var (manifest, hier, data, ext) = SyntheticFixtures.CreateSyntheticEpt(points, dataType: "binary");
+        string eptPath = dir.WriteText("ept.json", manifest);
+        dir.WriteText("ept-hierarchy/0-0-0-0.json", hier);
+        dir.Write($"ept-data/0-0-0-0.{ext}", data);
+
+        using var doc = EptDocument.Open(eptPath);
+
+        // MaxPoints
+        var limited = doc.ReadAllPoints(new PclReadOptions { MaxPoints = 4 }).ToList();
+        Assert.Equal(4, limited.Count);
+
+        // SubsampleStep
+        var subsampled = doc.ReadAllPoints(new PclReadOptions { SubsampleStep = 3 }).ToList();
+        Assert.Equal(4, subsampled.Count); // indices 0, 3, 6, 9
+        Assert.Equal(0.0, subsampled[0].X, Precision);
+        Assert.Equal(3.0, subsampled[1].X, Precision);
+        Assert.Equal(6.0, subsampled[2].X, Precision);
+        Assert.Equal(9.0, subsampled[3].X, Precision);
+
+        // ApplyTransform
+        var transform = new PclTransform { Translation = new PclVector3(10, 20, 30) };
+        typeof(PclScan).GetProperty("Transform")!.SetValue(doc.Scans[0], transform);
+        var transformed = doc.ReadAllPoints(new PclReadOptions { MaxPoints = 1, ApplyTransform = true }).First();
+        Assert.Equal(10.0, transformed.X, Precision);
+        Assert.Equal(20.0, transformed.Y, Precision);
+        Assert.Equal(30.0, transformed.Z, Precision);
+    }
+
+    [Fact]
+    public void Ept_Rejects_Corrupt_Manifest_Json()
+    {
+        using var dir = new TempDirectory();
+        string path = dir.WriteText("ept.json", "NOT JSON");
+        Assert.Throws<InvalidDataException>(() => EptDocument.Open(path));
+    }
+
+    [Fact]
+    public void Ept_Rejects_Missing_DataType()
+    {
+        using var dir = new TempDirectory();
+        string json = "{\"bounds\":[0,0,0,1,1,1],\"schema\":[{\"name\":\"X\"},{\"name\":\"Y\"},{\"name\":\"Z\"}]}";
+        string path = dir.WriteText("ept.json", json);
+        Assert.Throws<InvalidDataException>(() => EptDocument.Open(path));
+    }
+
+    [Fact]
+    public void Ept_Rejects_Unsupported_DataType()
+    {
+        using var dir = new TempDirectory();
+        string json = "{\"bounds\":[0,0,0,1,1,1],\"dataType\":\"parquet\",\"schema\":[{\"name\":\"X\"},{\"name\":\"Y\"},{\"name\":\"Z\"}]}";
+        string path = dir.WriteText("ept.json", json);
+        Assert.Throws<NotSupportedException>(() => EptDocument.Open(path));
+    }
+
+    [Fact]
+    public void Ept_Rejects_Missing_Or_NonFinite_Bounds()
+    {
+        using var dir = new TempDirectory();
+        string jsonMissing = "{\"dataType\":\"binary\",\"schema\":[{\"name\":\"X\"},{\"name\":\"Y\"},{\"name\":\"Z\"}]}";
+        string path1 = dir.WriteText("missing_bounds/ept.json", jsonMissing);
+        Assert.Throws<InvalidDataException>(() => EptDocument.Open(path1));
+
+        string jsonNaN = "{\"dataType\":\"binary\",\"bounds\":[0,0,0,\"NaN\",1,1],\"schema\":[{\"name\":\"X\"},{\"name\":\"Y\"},{\"name\":\"Z\"}]}";
+        string path2 = dir.WriteText("nan_bounds/ept.json", jsonNaN);
+        Assert.Throws<InvalidDataException>(() => EptDocument.Open(path2));
+    }
+
+    [Fact]
+    public void Ept_Rejects_Missing_Schema_Or_Dimensions()
+    {
+        using var dir = new TempDirectory();
+        string jsonNoSchema = "{\"dataType\":\"binary\",\"bounds\":[0,0,0,1,1,1]}";
+        string path1 = dir.WriteText("no_schema/ept.json", jsonNoSchema);
+        Assert.Throws<InvalidDataException>(() => EptDocument.Open(path1));
+
+        string jsonNoXYZ = "{\"dataType\":\"binary\",\"bounds\":[0,0,0,1,1,1],\"schema\":[{\"name\":\"Intensity\"}]}";
+        string path2 = dir.WriteText("no_xyz/ept.json", jsonNoXYZ);
+        Assert.Throws<InvalidDataException>(() => EptDocument.Open(path2));
+    }
+
+    [Fact]
+    public void Ept_Rejects_Truncated_Binary_Tile()
+    {
+        using var dir = new TempDirectory();
+        var (manifest, hier, _, ext) = SyntheticFixtures.CreateSyntheticEpt([new(1, 2, 3)], dataType: "binary");
+        string eptPath = dir.WriteText("ept.json", manifest);
+        dir.WriteText("ept-hierarchy/0-0-0-0.json", hier);
+        // Point record size is 21 bytes. Write 10 bytes instead to simulate truncated tile.
+        dir.Write($"ept-data/0-0-0-0.{ext}", new byte[10]);
+
+        using var doc = EptDocument.Open(eptPath);
+        Assert.Throws<InvalidDataException>(() => doc.ReadAllPoints().ToList());
     }
 }

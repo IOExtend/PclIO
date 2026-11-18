@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Entwine Point Tile (EPT) reader supporting dataset manifests (`ept.json`), octree hierarchy traversal (`ept-hierarchy/`) with sub-hierarchy page resolution and cycle detection, and point data tile streaming (`ept-data/`) across `"laszip"`, `"binary"`, and `"zstandard"` compression formats. Added `EptDocument`, `EptScan`, `EptKey`, `EptNode`, and `EptDimension`, with spatial bounding box queries (`FindNodes`, `ReadPoints`) and schema-driven dimension extraction.
+
 ### Changed
 
 - Leica containers that assign their points to their setups now open as one scan per setup, with the id and the name of the
