@@ -56,4 +56,7 @@ public enum PclFileKind
 
     /// <summary>Potree octree point cloud (cloud.js, metadata.json, .hrc, .bin).</summary>
     Potree = 17,
+
+    /// <summary>LASzip compressed ASPRS LAS point cloud (.laz).</summary>
+    Laz = 18,
 }

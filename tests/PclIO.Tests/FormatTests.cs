@@ -3,6 +3,7 @@ using PclIO.Formats.E57;
 using PclIO.Formats.EdgeWise;
 using PclIO.Formats.Faro;
 using PclIO.Formats.Las;
+using PclIO.Formats.Laz;
 using PclIO.Formats.Leica;
 using PclIO.Formats.Pcd;
 using PclIO.Formats.PinPoint;
@@ -5516,5 +5517,87 @@ public sealed class FormatTests
         // Do not create dataDir / r.bin
 
         Assert.Throws<InvalidDataException>(() => PotreeDocument.Open(cloudPath));
+    }
+
+    // ---- LAZ (*.laz) --------------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void Laz_Opens_Lists_Scans_And_Streams_Points()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticLaz(
+            x: 10.0, y: 20.0, z: 30.0,
+            intensity: 0.5f,
+            color: new PclColor(254, 0, 0),
+            classification: 2);
+
+        string path = dir.Write("test.laz", bytes);
+        using var doc = PclFile.Open(path);
+
+        Assert.Equal(PclFileKind.Laz, doc.Kind);
+        var scan = Assert.Single(doc.Scans);
+        Assert.Equal(1, scan.PointCount);
+        Assert.True(scan.HasColors);
+        Assert.True(scan.HasIntensities);
+        Assert.False(scan.HasNormals);
+
+        var pt = Assert.Single(scan.ReadPoints());
+        AssertNear(new PclVector3(10, 20, 30), pt.Position);
+        Assert.NotNull(pt.Intensity);
+        Assert.InRange(pt.Intensity.Value, 0.49f, 0.51f);
+        Assert.Equal((byte)2, pt.Classification);
+        Assert.NotNull(pt.Color);
+        Assert.Equal((byte)254, pt.Color.Value.R);
+        Assert.Equal((byte)0, pt.Color.Value.G);
+        Assert.Equal((byte)0, pt.Color.Value.B);
+    }
+
+    [Fact]
+    public void Laz_Wrong_Content_Throws_InvalidDataException()
+    {
+        using var dir = new TempDirectory();
+        string path = dir.Write("corrupt.laz", new byte[100]);
+        Assert.Throws<NotSupportedException>(() => PclFile.Open(path));
+        Assert.Throws<InvalidDataException>(() => LazDocument.Open(path));
+    }
+
+    [Fact]
+    public void Laz_Rejects_Corrupt_Chunk_Table_With_InvalidDataException()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticLaz(corruptChunkTable: true);
+        string path = dir.Write("bad_table.laz", bytes);
+
+        Assert.Throws<InvalidDataException>(() => LazDocument.Open(path));
+    }
+
+    [Fact]
+    public void Laz_Rejects_Truncated_Data_With_InvalidDataException()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticLaz(truncateData: true);
+        string path = dir.Write("truncated.laz", bytes);
+
+        Assert.Throws<InvalidDataException>(() => LazDocument.Open(path));
+    }
+
+    [Fact]
+    public void Laz_Rejects_Unsupported_Compressor_With_NotSupportedException()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticLaz(compressor: 3);
+        string path = dir.Write("unsupported.laz", bytes);
+
+        Assert.Throws<NotSupportedException>(() => LazDocument.Open(path));
+    }
+
+    [Fact]
+    public void Laz_Rejects_Unsupported_Chunk_Table_Version_With_NotSupportedException()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticLaz(chunkTableVersion: 1);
+        string path = dir.Write("bad_version.laz", bytes);
+
+        Assert.Throws<NotSupportedException>(() => LazDocument.Open(path));
     }
 }

@@ -2,6 +2,7 @@ using PclIO.Formats.E57;
 using PclIO.Formats.EdgeWise;
 using PclIO.Formats.Faro;
 using PclIO.Formats.Las;
+using PclIO.Formats.Laz;
 using PclIO.Formats.Leica;
 using PclIO.Formats.Pcd;
 using PclIO.Formats.PinPoint;
@@ -66,6 +67,7 @@ public static class PclFile
             PclFileKind.Sbf => SbfDocument.Open(path, options),
             PclFileKind.Tiles3d => Tiles3dDocument.Open(path, options),
             PclFileKind.Potree => PotreeDocument.Open(path, options),
+            PclFileKind.Laz => LazDocument.Open(path, options),
             _ => throw new NotSupportedException($"Unsupported or unrecognized point cloud file: '{path}'"),
         };
     }

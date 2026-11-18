@@ -123,9 +123,13 @@ internal static class KindDetector
         if (head.StartsWith(EdgeWiseTextMagic) || head.StartsWith(EdgeWiseTreeMagic))
             return PclFileKind.EdgeWise;
 
-        // LAS files are recognised by content; a compressed LAZ file shares the signature and stays unknown.
+        // LAS and LAZ files share the LASF signature; .laz files with valid LAZ headers are Laz, others Las.
         if (head.StartsWith(LasMagic))
-            return extension == ".laz" ? PclFileKind.Unknown : PclFileKind.Las;
+        {
+            if (extension == ".laz")
+                return IsLazHeader(stream, origin) ? PclFileKind.Laz : PclFileKind.Unknown;
+            return PclFileKind.Las;
+        }
 
         // PCD files have no signature; a strict header structure in any extension decides.
         if (IsPcdHeader(stream, origin))
@@ -172,6 +176,57 @@ internal static class KindDetector
             return PclFileKind.Potree;
 
         return PclFileKind.Unknown;
+    }
+
+    // True when a LAS stream contains compressed point records (LAZ): point format flag or LASzip VLR (22204).
+    private static bool IsLazHeader(Stream stream, long origin)
+    {
+        try
+        {
+            if (stream.Length - origin < 105) return false;
+            stream.Position = origin;
+            Span<byte> header = stackalloc byte[105];
+            stream.ReadExactly(header);
+
+            // Point format record at offset 104; bit 7 is set for LASzip compressed formats.
+            byte pointFormat = header[104];
+            if ((pointFormat & 0x80) != 0) return true;
+
+            // Check VLRs if pointFormat high bit was not set.
+            ushort headerSize = Bytes.ReadUInt16LE(header.Slice(94, 2));
+            uint pointDataOffset = Bytes.ReadUInt32LE(header.Slice(96, 4));
+            uint vlrCount = Bytes.ReadUInt32LE(header.Slice(100, 4));
+            if (headerSize < 227 || headerSize > pointDataOffset || pointDataOffset > stream.Length) return false;
+            if (vlrCount is 0 or > 4096) return false;
+
+            stream.Position = origin + headerSize;
+            long pos = origin + headerSize;
+            byte[] vlrHeader = new byte[54];
+            for (uint i = 0; i < vlrCount && i < 64; i++)
+            {
+                if (pos + 54 > origin + pointDataOffset) break;
+                stream.ReadExactly(vlrHeader);
+                pos += 54;
+                string userId = System.Text.Encoding.ASCII.GetString(vlrHeader.AsSpan(2, 16)).TrimEnd('\0');
+                ushort recordId = Bytes.ReadUInt16LE(vlrHeader.AsSpan(18, 2));
+                ushort dataLen = Bytes.ReadUInt16LE(vlrHeader.AsSpan(20, 2));
+                if (userId.Equals("laszip encoded", StringComparison.Ordinal) && (recordId == 22204 || recordId == 22205))
+                    return true;
+                pos += dataLen;
+                if (pos > origin + pointDataOffset) break;
+                stream.Position = pos;
+            }
+
+            return false;
+        }
+        catch
+        {
+            return false;
+        }
+        finally
+        {
+            stream.Position = origin;
+        }
     }
 
     // True when the stream starts with a PCD header: the documented entries in order, with or without COUNT.

@@ -103,6 +103,9 @@ public sealed class LasDocument : PclDocument
 
         // The low six bits hold the point format; bit 6 flags waveform data packets and bit 7 is reserved. The
         // waveform tail is skipped as extra bytes, so a file that sets bit 6 still reads with its base format.
+        if ((header[104] & 0x80) != 0)
+            throw FormatError.Unsupported("LAS file is compressed (LAZ); compressed point data is not read.");
+
         int pointFormat = header[104] & 0x3F;
         if (pointFormat > 10)
             throw FormatError.Unsupported($"LAS point format {pointFormat} is not supported; point formats 0 to 10 are read.");
@@ -220,14 +223,12 @@ public sealed class LasDocument : PclDocument
 
             string userId = ReadFixedAscii(header.AsSpan(2, 16));
             int recordId = Bytes.ReadUInt16LE(header.AsSpan(18, 2));
-            uint dataLength = Bytes.ReadUInt32LE(header.AsSpan(20, 4));
-            if (dataLength > MaxVlrDataBytes)
-                throw FormatError.Corrupted($"LAS variable length record holds {dataLength} bytes; at most {MaxVlrDataBytes} are accepted.");
+            ushort dataLength = Bytes.ReadUInt16LE(header.AsSpan(20, 2));
             if (position + dataLength > pointDataOffset) throw FormatError.Corrupted("LAS variable length record reaches past the point data.");
 
             // A compressed LAZ file shares the LAS signature and header; its point data is not LAS records, so it
             // is rejected here rather than read as points.
-            if (userId.Equals("laszip encoded", StringComparison.Ordinal) && recordId == 22205)
+            if (userId.Equals("laszip encoded", StringComparison.Ordinal) && (recordId == 22204 || recordId == 22205))
                 throw FormatError.Unsupported("LAS file is compressed (LAZ); compressed point data is not read.");
 
             bool isCoordinateSystem = userId.Equals("LASF_Projection", StringComparison.Ordinal) && (recordId == 34735 || recordId == 2112);

@@ -97,6 +97,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Potree 1.x datasets with `cloud.js` manifest, reading bounding boxes, coordinate scale/offset, point attributes (`POSITION_CARTESIAN`, `COLOR_PACKED`, `RGB`, `INTENSITY`, `CLASSIFICATION`, `NORMAL_SPHEREMAPPED`, `NORMAL_OCT16`, `NORMAL_FLOATS`), node binary files (`.bin`), and hierarchy files (`.hrc`);
   Potree 2.x datasets with `metadata.json` manifest and `octree.bin` binary point streams with custom attribute schemas;
   Opening supported from manifest files (`cloud.js`, `metadata.json`), hierarchy files (`.hrc`), node binary files (`.bin` with companion manifest in parent directories), or dataset directories.
+- LASzip compressed ASPRS LAS point clouds are read (`*.laz`, `PclFileKind.Laz`):
+  Point formats 0 to 3 decoded via clean-room arithmetic decoder and integer decompressor, supporting pointwise chunked compression (compressor 2) and pointwise uncompressed records (compressor 1);
+  Spatial coordinates, intensity, classification, and 8-bit RGB colour; coordinate scale and offset applied;
+  CRS read from GeoTIFF key directory or OGC WKT VLRs;
+  Chunk table offsets and per-chunk point counts validated against file boundaries.
 - Leica scans read a block range with opt-in parallel decoding: the new `PclReadOptions.Blocks` selects the blocks of the
   scan in file order (per scan) and the new `PclReadOptions.MaxDegreeOfParallelism` (default 1, sequential streaming)
   decodes the selected blocks in parallel, keeping file order, consecutive `Index` values and `MaxPoints`/`SubsampleStep`
