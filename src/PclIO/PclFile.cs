@@ -10,6 +10,7 @@ using PclIO.Formats.Pcd;
 using PclIO.Formats.PinPoint;
 using PclIO.Formats.Ply;
 using PclIO.Formats.Potree;
+using PclIO.Formats.Ptg;
 using PclIO.Formats.Pts;
 using PclIO.Formats.Ptx;
 using PclIO.Formats.Recap;
@@ -72,6 +73,7 @@ public static class PclFile
             PclFileKind.Laz => LazDocument.Open(path, options),
             PclFileKind.Copc => CopcDocument.Open(path, options),
             PclFileKind.Ept => EptDocument.Open(path, options),
+            PclFileKind.LeicaPtg => PtgDocument.Open(path, options),
             _ => throw new NotSupportedException($"Unsupported or unrecognized point cloud file: '{path}'"),
         };
     }

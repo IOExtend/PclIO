@@ -25,6 +25,9 @@ internal static class KindDetector
     // 3D Tiles point cloud (.pnts) and glTF binary (.glb) signatures.
     private static readonly byte[] PntsMagic = "pnts"u8.ToArray();
     private static readonly byte[] GlbMagic = "glTF"u8.ToArray();
+    // Leica PTG binary scan signature and magic number.
+    private static readonly byte[] PtgTag = [0x50, 0x54, 0x47, 0x00];
+    private const uint PtgMagicNumber = 0x928FA3C7;
 
     public static PclFileKind Detect(string path)
     {
@@ -118,6 +121,12 @@ internal static class KindDetector
         // The extension rule for the cluster file below needs no content, so it also applies to a very short file.
         if (read < 4) return extension is ".c3db" or ".c3ptx" ? PclFileKind.EdgeWise : PclFileKind.Unknown;
         ReadOnlySpan<byte> head = buffer[..read];
+
+        if (head.Length >= 8 && head.StartsWith(PtgTag) && BinaryPrimitives.ReadUInt32LittleEndian(head[4..8]) == PtgMagicNumber)
+            return PclFileKind.LeicaPtg;
+
+        if (extension == ".ptg")
+            return IsPtgIndexHeader(stream, origin) ? PclFileKind.LeicaPtg : PclFileKind.Unknown;
 
         if (head.StartsWith(E57Magic))
             return PclFileKind.E57;
@@ -1219,6 +1228,73 @@ internal static class KindDetector
                        (text.Contains("\"laszip\"") || text.Contains("\"binary\"") || text.Contains("\"zstandard\"")) &&
                        text.Contains("\"schema\"");
             }
+        }
+        catch
+        {
+            return false;
+        }
+        finally
+        {
+            stream.Position = origin;
+        }
+    }
+
+    // True when a stream with .ptg extension is an ASCII PTG index file.
+    private static bool IsPtgIndexHeader(Stream stream, long origin)
+    {
+        const int maxProbeBytes = 4096;
+        long length = stream.CanSeek ? stream.Length : long.MaxValue;
+        int toRead = (int)Math.Min(maxProbeBytes, Math.Max(0, length - origin));
+        if (toRead < 4) return false;
+
+        byte[] buffer = new byte[toRead];
+        stream.Position = origin;
+        try
+        {
+            int got = 0;
+            while (got < toRead)
+            {
+                int n = stream.Read(buffer, got, toRead - got);
+                if (n == 0) break;
+                got += n;
+            }
+
+            if (got < 4) return false;
+
+            // Reject binary files (containing NUL bytes)
+            ReadOnlySpan<byte> headSpan = buffer.AsSpan(0, got);
+            if (headSpan.Contains((byte)0)) return false;
+
+            using var reader = new StreamReader(new MemoryStream(buffer, 0, got), Encoding.UTF8);
+            string? line;
+            int lineCount = 0;
+            bool hasValidIndicator = false;
+
+            while ((line = reader.ReadLine()) != null && lineCount < 32)
+            {
+                lineCount++;
+                line = line.Trim();
+                if (line.Length == 0) continue;
+
+                if (line.StartsWith("PTG index", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+
+                if (line.StartsWith("---") || line.StartsWith("#") || line.StartsWith("//"))
+                    continue;
+
+                if (line.EndsWith(".ptg", StringComparison.OrdinalIgnoreCase))
+                {
+                    hasValidIndicator = true;
+                }
+                else
+                {
+                    return false;
+                }
+            }
+
+            return hasValidIndicator;
         }
         catch
         {
