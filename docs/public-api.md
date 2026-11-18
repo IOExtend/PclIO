@@ -94,7 +94,7 @@ drop points that fail a plausibility rule (see the README), so a scan can yield 
 | COPC | The header count (the extended 1.4 count when it states one). It is not checked against the chunk data until read. |
 | EPT | The point count declared in the manifest, or the sum of points across discovered octree nodes. |
 | Leica PTG | Total valid returns across all gridded scans, determined by decoding the column validity bitmasks. |
-| CC BIN | The point count declared for the entity. Points with non-finite coordinates are skipped. Packed point normals are decoded in file versions 41, 42 and 50. A stored zero direction is returned as `PclVector3.Zero`. |
+| CC BIN | The point count declared for the entity. The reader rejects files with a truncated XYZ block or a point count that exceeds the available XYZ data. Points with non-finite coordinates are skipped. Packed point normals are decoded in file versions 41, 42 and 50. A stored zero direction is returned as `PclVector3.Zero`. |
 
 `HasColors`, `HasIntensities` and `HasNormals` follow what the file contains, except for the scans of a ReCap project, where all three
 are true when the `.rcs` file was found and false otherwise, without the file being opened. A ReCap scan reads the channels
