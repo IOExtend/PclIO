@@ -44,4 +44,7 @@ public enum PclFileKind
 
     /// <summary>Leica Cyclone gridded point cloud exchange format (.ptx).</summary>
     Ptx = 13,
+
+    /// <summary>Delimited text point cloud (.xyz, .asc, .txt, .csv).</summary>
+    Xyz = 14,
 }

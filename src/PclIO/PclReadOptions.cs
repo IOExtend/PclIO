@@ -108,6 +108,42 @@ public sealed record PclReadOptions
     /// </summary>
     public BlockRange? Blocks { get; init; }
 
+    /// <summary>
+    /// Explicit column names or layout for delimited text point clouds (.xyz, .asc, .txt, .csv),
+    /// e.g. "x,y,z,i" or "x,y,z,r,g,b". When null, the layout is read from the file header or detected from column counts.
+    /// </summary>
+    public string? TextColumns { get; init; }
+
+    /// <summary>
+    /// Explicit delimiter character for delimited text point clouds (e.g. ',', ';', '\t', ' ').
+    /// When null, the delimiter is automatically detected from the file content.
+    /// </summary>
+    public char? TextDelimiter { get; init; }
+
+    /// <summary>
+    /// Line prefix that marks a comment line in delimited text point clouds (default "#"). Lines starting with
+    /// this prefix or "//" are skipped.
+    /// </summary>
+    public string? TextCommentPrefix { get; init; }
+
+    private double _textCoordinateScale = 1.0;
+
+    /// <summary>
+    /// Coordinate scale factor applied to X, Y and Z positions for delimited text point clouds (default 1.0).
+    /// Must be finite and greater than zero.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">The value is not finite or not above zero.</exception>
+    public double TextCoordinateScale
+    {
+        get => _textCoordinateScale;
+        init
+        {
+            if (!double.IsFinite(value) || value <= 0)
+                throw new ArgumentOutOfRangeException(nameof(value), "The text coordinate scale must be finite and above zero.");
+            _textCoordinateScale = value;
+        }
+    }
+
     private int _maxDegreeOfParallelism = 1;
 
     /// <summary>

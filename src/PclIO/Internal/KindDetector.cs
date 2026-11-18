@@ -115,6 +115,10 @@ internal static class KindDetector
         if (IsPtsHeader(stream, origin, extension))
             return PclFileKind.Pts;
 
+        // XYZ / delimited text files (.xyz, .asc, .txt, .csv) with numeric coordinates or an XYZ header.
+        if (IsXyzHeader(stream, origin, extension))
+            return PclFileKind.Xyz;
+
         return PclFileKind.Unknown;
     }
 
@@ -486,5 +490,185 @@ internal static class KindDetector
                 return false;
         }
         return true;
+    }
+
+    // True when the stream starts with an XYZ / delimited text layout:
+    // Files with extension .xyz, .asc, .txt, .csv holding numeric coordinate lines or a header containing XYZ columns,
+    // or an explicit XYZ column header in any extension.
+    // At most the first 64 KiB are inspected; the position is restored.
+    private static bool IsXyzHeader(Stream stream, long origin, string? extension)
+    {
+        const int maxProbeBytes = 64 * 1024;
+        long length = stream.CanSeek ? stream.Length : long.MaxValue;
+        int toRead = (int)Math.Min(maxProbeBytes, Math.Max(0, length - origin));
+        if (toRead < 5) return false;
+
+        byte[] buffer = new byte[toRead];
+        stream.Position = origin;
+        try
+        {
+            int got = 0;
+            while (got < toRead)
+            {
+                int n = stream.Read(buffer, got, toRead - got);
+                if (n == 0) break;
+                got += n;
+            }
+
+            if (got < 5) return false;
+
+            // Reject binary files (files containing NUL bytes in the probe region)
+            ReadOnlySpan<byte> headSpan = buffer.AsSpan(0, got);
+            if (headSpan.Contains((byte)0)) return false;
+
+            var lines = new List<string>(5);
+            int pos = 0;
+            if (headSpan.StartsWith([(byte)0xEF, (byte)0xBB, (byte)0xBF]))
+                pos = 3;
+
+            while (pos < got && lines.Count < 5)
+            {
+                int end = Array.IndexOf(buffer, (byte)'\n', pos, got - pos);
+                if (end < 0) break;
+
+                int lineLen = end - pos;
+                if (lineLen > 0 && buffer[end - 1] == (byte)'\r') lineLen--;
+                if (lineLen > 4096) return false;
+
+                if (lineLen > 0)
+                {
+                    string line = System.Text.Encoding.UTF8.GetString(buffer, pos, lineLen).Trim();
+                    if (line.Length > 0)
+                    {
+                        if (line.StartsWith('#') || line.StartsWith("//", StringComparison.Ordinal))
+                        {
+                            string stripped = line.TrimStart('#', '/', ' ');
+                            if (stripped.Length > 0 && lines.Count == 0)
+                            {
+                                char delim = DetectXyzDelimiter(stripped);
+                                string[] candTokens = SplitXyzLine(stripped, delim);
+                                if (IsXyzHeaderTokens(candTokens, out _, out _, out _))
+                                {
+                                    lines.Add(stripped);
+                                }
+                            }
+                        }
+                        else
+                        {
+                            lines.Add(line);
+                        }
+                    }
+                }
+
+                pos = end + 1;
+            }
+
+            if (lines.Count == 0) return false;
+
+            bool isKnownExt = extension is ".xyz" or ".asc" or ".txt" or ".csv";
+
+            // Check if line 0 is a header line containing X, Y, Z columns
+            char delim0 = DetectXyzDelimiter(lines[0]);
+            string[] tokens0 = SplitXyzLine(lines[0], delim0);
+
+            if (IsXyzHeaderTokens(tokens0, out int xIdx, out int yIdx, out int zIdx))
+            {
+                // Explicit header found! If there is a next line, verify coordinate tokens parse as numbers
+                if (lines.Count > 1)
+                {
+                    char delim1 = delim0;
+                    string[] tokens1 = SplitXyzLine(lines[1], delim1);
+                    if (tokens1.Length < tokens0.Length) return false;
+                    if (!double.TryParse(tokens1[xIdx], NumberStyles.Float, CultureInfo.InvariantCulture, out _) ||
+                        !double.TryParse(tokens1[yIdx], NumberStyles.Float, CultureInfo.InvariantCulture, out _) ||
+                        !double.TryParse(tokens1[zIdx], NumberStyles.Float, CultureInfo.InvariantCulture, out _))
+                    {
+                        return false;
+                    }
+                }
+                return true;
+            }
+
+            // No header line: requires a recognised extension (.xyz, .asc, .txt, .csv)
+            if (!isKnownExt) return false;
+
+            // Line 0 must be purely numeric coordinates with at least 3 values
+            if (tokens0.Length < 3) return false;
+            foreach (var tok in tokens0)
+            {
+                if (!double.TryParse(tok, NumberStyles.Float, CultureInfo.InvariantCulture, out _))
+                    return false;
+            }
+
+            // If there are subsequent lines in the probe buffer, verify they also parse as numbers with matching column count
+            for (int i = 1; i < lines.Count; i++)
+            {
+                string[] tokensI = SplitXyzLine(lines[i], delim0);
+                if (tokensI.Length != tokens0.Length) return false;
+                foreach (var tok in tokensI)
+                {
+                    if (!double.TryParse(tok, NumberStyles.Float, CultureInfo.InvariantCulture, out _))
+                        return false;
+                }
+            }
+
+            return true;
+        }
+        finally
+        {
+            stream.Position = origin;
+        }
+    }
+
+    private static char DetectXyzDelimiter(string line)
+    {
+        int commas = 0, semicolons = 0, tabs = 0;
+        foreach (char c in line)
+        {
+            if (c == ',') commas++;
+            else if (c == ';') semicolons++;
+            else if (c == '\t') tabs++;
+        }
+        if (commas >= 2 && commas >= semicolons && commas >= tabs) return ',';
+        if (semicolons >= 2 && semicolons >= commas && semicolons >= tabs) return ';';
+        if (tabs >= 2 && tabs >= commas && tabs >= semicolons) return '\t';
+        if (commas == 1 && semicolons == 0 && tabs == 0) return ',';
+        if (semicolons == 1 && commas == 0 && tabs == 0) return ';';
+        if (tabs == 1 && commas == 0 && semicolons == 0) return '\t';
+        return ' ';
+    }
+
+    private static string[] SplitXyzLine(string line, char delimiter)
+    {
+        if (delimiter == ' ')
+        {
+            string[] parts = line.Split([' ', '\t'], StringSplitOptions.RemoveEmptyEntries);
+            for (int i = 0; i < parts.Length; i++)
+                parts[i] = parts[i].Trim().Trim('\"', '\'');
+            return parts;
+        }
+
+        string[] tokens = line.Split(delimiter);
+        for (int i = 0; i < tokens.Length; i++)
+            tokens[i] = tokens[i].Trim().Trim('\"', '\'');
+        return tokens;
+    }
+
+    private static bool IsXyzHeaderTokens(string[] tokens, out int xIdx, out int yIdx, out int zIdx)
+    {
+        xIdx = -1;
+        yIdx = -1;
+        zIdx = -1;
+        if (tokens.Length < 3) return false;
+
+        for (int i = 0; i < tokens.Length; i++)
+        {
+            string t = tokens[i].Trim('\"', '\'').ToLowerInvariant();
+            if (t is "x" or "coord_x" or "coordx" or "pos_x" or "posx" or "easting" or "x_coord") xIdx = i;
+            else if (t is "y" or "coord_y" or "coordy" or "pos_y" or "posy" or "northing" or "y_coord") yIdx = i;
+            else if (t is "z" or "coord_z" or "coordz" or "pos_z" or "posz" or "elevation" or "height" or "altitude" or "depth" or "z_coord") zIdx = i;
+        }
+
+        return xIdx >= 0 && yIdx >= 0 && zIdx >= 0;
     }
 }
