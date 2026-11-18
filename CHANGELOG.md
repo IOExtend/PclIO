@@ -49,6 +49,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   integer are decoded; other shapes stay unread.
 - The E57 reader decodes plain bit-packing only and names any other codec of the scan in the rejection message. The point
   prototype limit is the packet header bound of 65535 fields.
+- The EdgeWise cluster position scale is now `PclReadOptions.EdgeWiseCoordinateScale`, so the caller states it; the
+  default keeps the long-standing assumption (32768 units = 0.128 m).
 
 ## [0.1.0] - 2026-11-15
 

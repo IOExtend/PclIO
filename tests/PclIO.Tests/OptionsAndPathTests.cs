@@ -14,6 +14,7 @@ public sealed class OptionsAndPathTests
 
         Assert.Null(options.MaxPoints);
         Assert.Equal(5000.0, options.MaxCoordinateMagnitude);
+        Assert.Equal(0.128 / 32768.0, options.EdgeWiseCoordinateScale);
         Assert.Equal(1, options.SubsampleStep);
         Assert.True(options.ApplyTransform);
         Assert.False(options.Strict);
@@ -64,6 +65,19 @@ public sealed class OptionsAndPathTests
         Assert.Null(new PclReadOptions { MaxCoordinateMagnitude = null }.MaxCoordinateMagnitude);
         Assert.Equal(1e9, new PclReadOptions { MaxCoordinateMagnitude = 1e9 }.MaxCoordinateMagnitude);
     }
+
+    [Theory]
+    [InlineData(0.0)]
+    [InlineData(-1.0)]
+    [InlineData(double.NaN)]
+    [InlineData(double.PositiveInfinity)]
+    [InlineData(double.NegativeInfinity)]
+    public void A_Non_Positive_Or_Non_Finite_EdgeWise_Scale_Is_Rejected(double value) =>
+        Assert.Throws<ArgumentOutOfRangeException>(() => new PclReadOptions { EdgeWiseCoordinateScale = value });
+
+    [Fact]
+    public void A_Positive_Finite_EdgeWise_Scale_Is_Accepted() =>
+        Assert.Equal(0.001, new PclReadOptions { EdgeWiseCoordinateScale = 0.001 }.EdgeWiseCoordinateScale);
 
     [Fact]
     public void A_Limit_Applies_To_The_Total_Across_All_Scans()

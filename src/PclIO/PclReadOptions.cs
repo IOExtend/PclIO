@@ -80,4 +80,24 @@ public sealed record PclReadOptions
     /// that every stored point that passes the other rules of the reader is returned.
     /// </summary>
     public bool ExcludeFilteredPoints { get; init; }
+
+    private double _edgeWiseCoordinateScale = 0.128 / 32768.0;
+
+    /// <summary>
+    /// Fixed-point scale of the 16-bit point offsets in EdgeWise cluster files, in metres per unit: a stored offset
+    /// counts this many metres from the cluster centre. The files do not declare the scale, so the default of
+    /// 0.128 / 32768 keeps the long-standing assumption of the reader; set it explicitly when the files use another
+    /// scale. Other readers ignore this option. Must be finite and above zero.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">The value is not finite or not above zero.</exception>
+    public double EdgeWiseCoordinateScale
+    {
+        get => _edgeWiseCoordinateScale;
+        init
+        {
+            if (!double.IsFinite(value) || value <= 0)
+                throw new ArgumentOutOfRangeException(nameof(value), "The EdgeWise coordinate scale must be finite and above zero.");
+            _edgeWiseCoordinateScale = value;
+        }
+    }
 }

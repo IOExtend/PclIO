@@ -1679,6 +1679,20 @@ public sealed class FormatTests
     }
 
     [Fact]
+    public void An_EdgeWise_Scan_Reads_With_The_Stated_Coordinate_Scale()
+    {
+        using var dir = new TempDirectory();
+        using var doc = EdgeWiseDocument.Open(dir.Write("cluster.c3ptx", SyntheticFixtures.CreateSyntheticC3ptx(Clusters)));
+
+        var scan = Assert.Single(doc.Scans);
+        var points = scan.ReadPoints(new PclReadOptions { EdgeWiseCoordinateScale = 0.001 }).ToList();
+
+        Assert.Equal(3, points.Count);
+        AssertNear(new PclVector3(1, 2, 3), points[0].Position);
+        AssertNear(new PclVector3(2, 1, 3 + (32767 * 0.001)), points[1].Position);
+    }
+
+    [Fact]
     public void Read_Synthetic_EdgeWise_Database_And_Skip_Missing_Cluster_Files()
     {
         using var dir = new TempDirectory();
