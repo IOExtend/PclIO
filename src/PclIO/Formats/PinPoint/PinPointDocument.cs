@@ -168,12 +168,13 @@ public sealed class PinPointDocument : PclDocument
                         string locHash = TryProp(loc, "HashId", out var lh) ? ReadText(lh) : "";
                         var transform = TryProp(loc, "Pose", out var poseElem) ? ParseTransform(poseElem) : PclTransform.Identity;
 
-                        // The share of the data file that belongs to one location is not recorded, so the count stays unknown.
+                        // A location holds the whole data file it refers to; when several locations share one file,
+                        // each of them reports its full count, because their shares are not recorded.
                         if (binPath == null)
                             document._warnings.Add($"Location '{locHash}': point data file not found.");
                         var table = ReadTableOrWarn(document, locHash, binPath);
 
-                        document.AddScan(new PinPointScan(locHash, locHash, 0, transform, binPath, table, document));
+                        document.AddScan(new PinPointScan(locHash, locHash, table?.PointCount ?? 0, transform, binPath, table, document));
                     }
                 }
             }

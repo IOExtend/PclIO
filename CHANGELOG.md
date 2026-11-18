@@ -36,6 +36,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The PinPoint coordinate plausibility rule is now `PclReadOptions.MaxCoordinateMagnitude` (default 5000, null for no
   limit); non-finite coordinates are still never returned. A full read reports how many points it dropped in the warnings
   of the document, and fails instead with `PclReadOptions.Strict`.
+- The point count of a PinPoint location of a manifest with a data object list is taken from the data file the object
+  refers to, as for manifests with a scan position list. Locations that share one file each report its full count.
 
 ## [0.1.0] - 2026-11-15
 
