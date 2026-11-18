@@ -11,7 +11,8 @@ namespace PclIO.Formats.E57;
 /// Supported: the file header, the checksummed page layout, the XML section, scan names, ids, Cartesian bounds and
 /// poses (translation and rotation quaternion), and points stored as uncompressed bit-packed streams where
 /// Cartesian X/Y/Z are single or double precision floats or scaled integers (raw value times scale plus offset),
-/// and colour or intensity are Integer fields in the range 0..255.
+/// or spherical range, azimuth and elevation converted to Cartesian points, and colour or intensity are Integer
+/// fields in the range 0..255.
 /// Not supported (reported with <see cref="NotSupportedException"/> when points are read): integer coordinates,
 /// other codecs, and packets whose streams hold different record counts.
 /// Spherical coordinates, per-point invalid-state flags, images and 2D data are not interpreted.
@@ -275,7 +276,7 @@ internal sealed class E57PointLayout
 
     public int StreamCount { get; }
 
-    /// <summary>Stream index of Cartesian X, Y and Z.</summary>
+    /// <summary>Stream index of Cartesian X, Y and Z, or all -1 when the scan stores spherical coordinates.</summary>
     public int[] Coordinate { get; } = [-1, -1, -1];
 
     /// <summary>Bytes per record of the Cartesian streams: 4 or 8 for floats, 1, 2, 4 or 8 for scaled integers.</summary>
@@ -292,6 +293,27 @@ internal sealed class E57PointLayout
 
     /// <summary>Offset of the scaled axes; 0 for float axes.</summary>
     public double[] CoordinateOffset { get; } = new double[3];
+
+    /// <summary>True when the scan stores spherical coordinates (range, azimuth, elevation) instead of Cartesian ones.</summary>
+    public bool IsSpherical { get; private set; }
+
+    /// <summary>Stream index of spherical range, azimuth and elevation, or all -1 for Cartesian scans.</summary>
+    public int[] Spherical { get; } = [-1, -1, -1];
+
+    /// <summary>Bytes per record of the spherical streams, sized as the Cartesian ones are.</summary>
+    public int[] SphericalSize { get; } = new int[3];
+
+    /// <summary>True for the spherical components stored as scaled integers.</summary>
+    public bool[] SphericalScaled { get; } = new bool[3];
+
+    /// <summary>True for the scaled spherical components whose range is not negative.</summary>
+    public bool[] SphericalUnsigned { get; } = new bool[3];
+
+    /// <summary>Scale of the scaled spherical components; 1 otherwise.</summary>
+    public double[] SphericalScale { get; } = [1, 1, 1];
+
+    /// <summary>Offset of the scaled spherical components; 0 otherwise.</summary>
+    public double[] SphericalOffset { get; } = new double[3];
 
     /// <summary>Stream index of red, green and blue, or all -1 when colour is not decoded.</summary>
     public int[] Color { get; } = [-1, -1, -1];
@@ -339,6 +361,14 @@ internal sealed class E57PointLayout
                 _ => -1,
             };
 
+            int spherical = field.Name.LocalName switch
+            {
+                "sphericalRange" => 0,
+                "sphericalAzimuth" => 1,
+                "sphericalElevation" => 2,
+                _ => -1,
+            };
+
             if (axis >= 0)
             {
                 if (layout.Coordinate[axis] >= 0)
@@ -369,6 +399,36 @@ internal sealed class E57PointLayout
                 layout.CoordinateScale[axis] = scale;
                 layout.CoordinateOffset[axis] = offset;
             }
+            else if (spherical >= 0)
+            {
+                if (layout.Spherical[spherical] >= 0)
+                {
+                    unsupportedReason = "a spherical field is duplicated";
+                    return null;
+                }
+
+                int size = FloatSize(field);
+                if (size != 0)
+                {
+                    layout.Spherical[spherical] = i;
+                    layout.SphericalSize[spherical] = size;
+                    continue;
+                }
+
+                int scaledSize = ScaledIntegerSize(field, out double scale, out double offset, out bool unsigned);
+                if (scaledSize == 0)
+                {
+                    unsupportedReason = "a spherical field is neither a single or double precision float nor a scaled integer with a sized range";
+                    return null;
+                }
+
+                layout.Spherical[spherical] = i;
+                layout.SphericalSize[spherical] = scaledSize;
+                layout.SphericalScaled[spherical] = true;
+                layout.SphericalUnsigned[spherical] = unsigned;
+                layout.SphericalScale[spherical] = scale;
+                layout.SphericalOffset[spherical] = offset;
+            }
             else if (IsByteRange(field))
             {
                 int channel = field.Name.LocalName switch
@@ -383,11 +443,24 @@ internal sealed class E57PointLayout
             }
         }
 
-        if (layout.Coordinate.Any(c => c < 0))
+        bool hasCartesian = layout.Coordinate.All(c => c >= 0);
+        bool hasSpherical = layout.Spherical.All(c => c >= 0);
+        if (hasCartesian && hasSpherical)
         {
-            unsupportedReason = "the point prototype lacks cartesianX, cartesianY or cartesianZ";
+            unsupportedReason = "the point prototype has both cartesian and spherical coordinates";
             return null;
         }
+
+        if (!hasCartesian && !hasSpherical)
+        {
+            bool sawSpherical = layout.Spherical.Any(c => c >= 0);
+            unsupportedReason = sawSpherical
+                ? "the point prototype lacks sphericalRange, sphericalAzimuth or sphericalElevation"
+                : "the point prototype lacks cartesianX, cartesianY or cartesianZ";
+            return null;
+        }
+
+        layout.IsSpherical = hasSpherical;
 
         // Colour is all-or-nothing.
         if (layout.Color.Any(c => c < 0)) Array.Fill(layout.Color, -1);
@@ -574,7 +647,9 @@ public sealed class E57Scan : PclScan
             {
                 if ((consumed + i) % step != 0) continue;
 
-                var coords = new PclVector3(ReadAxis(layout, pkt, starts, 0, i), ReadAxis(layout, pkt, starts, 1, i), ReadAxis(layout, pkt, starts, 2, i));
+                var coords = layout.IsSpherical
+                    ? ReadSpherical(layout, pkt, starts, i)
+                    : new PclVector3(ReadAxis(layout, pkt, starts, 0, i), ReadAxis(layout, pkt, starts, 1, i), ReadAxis(layout, pkt, starts, 2, i));
 
                 PclColor? color = null;
                 if (layout.HasColor)
@@ -604,12 +679,25 @@ public sealed class E57Scan : PclScan
     private static int RecordsInPacket(E57PointLayout layout, int[] lengths)
     {
         int records = -1;
-        for (int axis = 0; axis < 3; axis++)
+        if (layout.IsSpherical)
         {
-            int size = layout.CoordinateSize[axis];
-            int length = lengths[layout.Coordinate[axis]];
-            if (length % size != 0) throw FormatError.Corrupted("E57 coordinate stream holds a partial record.");
-            Agree(ref records, length / size);
+            for (int component = 0; component < 3; component++)
+            {
+                int size = layout.SphericalSize[component];
+                int length = lengths[layout.Spherical[component]];
+                if (length % size != 0) throw FormatError.Corrupted("E57 spherical stream holds a partial record.");
+                Agree(ref records, length / size);
+            }
+        }
+        else
+        {
+            for (int axis = 0; axis < 3; axis++)
+            {
+                int size = layout.CoordinateSize[axis];
+                int length = lengths[layout.Coordinate[axis]];
+                if (length % size != 0) throw FormatError.Corrupted("E57 coordinate stream holds a partial record.");
+                Agree(ref records, length / size);
+            }
         }
 
         if (layout.HasColor)
@@ -628,16 +716,33 @@ public sealed class E57Scan : PclScan
         records = count;
     }
 
-    private static double ReadAxis(E57PointLayout layout, byte[] packet, int[] starts, int axis, int index)
-    {
-        int stream = layout.Coordinate[axis];
-        int size = layout.CoordinateSize[axis];
-        if (!layout.CoordinateScaled[axis])
-            return ReadCoordinate(packet, starts[stream], size, index);
+    private static double ReadAxis(E57PointLayout layout, byte[] packet, int[] starts, int axis, int index) =>
+        ReadNumber(packet, starts[layout.Coordinate[axis]], layout.CoordinateSize[axis], index,
+            layout.CoordinateScaled[axis], layout.CoordinateUnsigned[axis], layout.CoordinateScale[axis], layout.CoordinateOffset[axis]);
 
-        return ReadScaledInteger(packet, starts[stream], size, index,
-            layout.CoordinateUnsigned[axis], layout.CoordinateScale[axis], layout.CoordinateOffset[axis]);
+    // Spherical coordinates as the E57 standard defines them: range in the file's unit, azimuth and elevation in
+    // radians. The azimuth is the counterclockwise rotation of the positive X axis about the positive Z axis, and
+    // the elevation is measured up from the XY plane, so x = r cos(el) cos(az), y = r cos(el) sin(az), z = r sin(el).
+    private static PclVector3 ReadSpherical(E57PointLayout layout, byte[] packet, int[] starts, int index)
+    {
+        double range = ReadNumber(packet, starts[layout.Spherical[0]], layout.SphericalSize[0], index,
+            layout.SphericalScaled[0], layout.SphericalUnsigned[0], layout.SphericalScale[0], layout.SphericalOffset[0]);
+        double azimuth = ReadNumber(packet, starts[layout.Spherical[1]], layout.SphericalSize[1], index,
+            layout.SphericalScaled[1], layout.SphericalUnsigned[1], layout.SphericalScale[1], layout.SphericalOffset[1]);
+        double elevation = ReadNumber(packet, starts[layout.Spherical[2]], layout.SphericalSize[2], index,
+            layout.SphericalScaled[2], layout.SphericalUnsigned[2], layout.SphericalScale[2], layout.SphericalOffset[2]);
+
+        double cosElevation = Math.Cos(elevation);
+        return new PclVector3(
+            range * cosElevation * Math.Cos(azimuth),
+            range * cosElevation * Math.Sin(azimuth),
+            range * Math.Sin(elevation));
     }
+
+    private static double ReadNumber(byte[] packet, int start, int size, int index, bool scaled, bool unsigned, double scale, double offset) =>
+        scaled
+            ? ReadScaledInteger(packet, start, size, index, unsigned, scale, offset)
+            : ReadCoordinate(packet, start, size, index);
 
     private static double ReadCoordinate(byte[] packet, int start, int size, int index) =>
         size == 4

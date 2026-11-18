@@ -42,6 +42,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a fixed 1 MiB, so streams with copies further back decode within bounded memory.
 - Scaled-integer Cartesian coordinates of E57 scans are decoded (raw value times scale plus offset, with the binary width
   from the range of the field).
+- Spherical coordinates of E57 scans are converted to Cartesian points as the standard defines; scaled integers work for
+  the spherical components too.
 
 ## [0.1.0] - 2026-11-15
 

@@ -593,6 +593,116 @@ public sealed class FormatTests
         Assert.Throws<InvalidDataException>(() => doc.Scans[0].ReadPoints().ToList());
     }
 
+    [Fact]
+    public void E57_With_Spherical_Coordinates_Is_Decoded()
+    {
+        const string prototype = """
+            <prototype type="Structure">
+              <sphericalRange type="Float" precision="single"/>
+              <sphericalAzimuth type="Float" precision="double"/>
+              <sphericalElevation type="Float" precision="double"/>
+            </prototype>
+            """;
+        byte[] rs = [.. BitConverter.GetBytes(2.0f), .. BitConverter.GetBytes(1.0f), .. BitConverter.GetBytes(2.0f)];
+        byte[] azs = [.. BitConverter.GetBytes(0.0), .. BitConverter.GetBytes(Math.PI / 2), .. BitConverter.GetBytes(Math.PI)];
+        byte[] els = [.. BitConverter.GetBytes(0.0), .. BitConverter.GetBytes(0.0), .. BitConverter.GetBytes(Math.PI / 6)];
+        var spec = new E57Spec { PrototypeXml = prototype, Points = [], RecordCount = 3, RawPackets = E57Spec.DataPacket([rs, azs, els]) };
+        using var dir = new TempDirectory();
+        using var doc = E57Document.Open(dir.Write("spherical.e57", spec.Build()));
+
+        var scan = Assert.Single(doc.Scans);
+        Assert.False(scan.HasColors);
+        Assert.False(scan.HasIntensities);
+
+        var plain = scan.ReadPoints(NoTransform).ToList();
+        Assert.Equal(3, plain.Count);
+        // Azimuth is measured from the positive X axis: az=0 lies on +X, az=pi/2 on +Y.
+        AssertNear(new PclVector3(2, 0, 0), plain[0].Position);
+        AssertNear(new PclVector3(0, 1, 0), plain[1].Position);
+        AssertNear(new PclVector3(-Math.Sqrt(3), 0, 1), plain[2].Position);
+
+        // The pose of the scan moves the converted points as it moves Cartesian ones.
+        var moved = scan.ReadPoints().ToList();
+        AssertNear(new PclVector3(3.5, 2.5, 3.5), moved[0].Position);
+    }
+
+    [Fact]
+    public void E57_With_Spherical_Coordinates_As_Scaled_Integers_Is_Decoded()
+    {
+        const string prototype = """
+            <prototype type="Structure">
+              <sphericalRange type="ScaledInteger" minimum="0" maximum="2000" scale="0.001"/>
+              <sphericalAzimuth type="Float" precision="single"/>
+              <sphericalElevation type="ScaledInteger" minimum="-180" maximum="180" scale="0.01"/>
+            </prototype>
+            """;
+        byte[] rs = [.. BitConverter.GetBytes((ushort)2000)];
+        byte[] azs = [.. BitConverter.GetBytes(0.0f)];
+        byte[] els = [.. BitConverter.GetBytes((short)0)];
+        var spec = new E57Spec { PrototypeXml = prototype, Points = [], RecordCount = 1, RawPackets = E57Spec.DataPacket([rs, azs, els]) };
+        using var dir = new TempDirectory();
+        using var doc = E57Document.Open(dir.Write("scaled-spherical.e57", spec.Build()));
+
+        var point = Assert.Single(doc.Scans[0].ReadPoints(NoTransform));
+        AssertNear(new PclVector3(2, 0, 0), point.Position);
+    }
+
+    [Fact]
+    public void E57_With_A_Partial_Spherical_Triple_Lists_But_Is_Not_Decoded()
+    {
+        const string prototype = """
+            <prototype type="Structure">
+              <sphericalRange type="Float" precision="single"/>
+              <sphericalAzimuth type="Float" precision="single"/>
+            </prototype>
+            """;
+        using var dir = new TempDirectory();
+        using var doc = E57Document.Open(dir.Write("spherical.e57", new E57Spec { PrototypeXml = prototype }.Build()));
+
+        Assert.Single(doc.Scans);
+        Assert.Throws<NotSupportedException>(() => doc.Scans[0].ReadPoints().ToList());
+    }
+
+    [Fact]
+    public void E57_With_Both_Cartesian_And_Spherical_Coordinates_Lists_But_Is_Not_Decoded()
+    {
+        const string prototype = """
+            <prototype type="Structure">
+              <cartesianX type="Float" precision="single"/>
+              <cartesianY type="Float" precision="single"/>
+              <cartesianZ type="Float" precision="single"/>
+              <sphericalRange type="Float" precision="single"/>
+              <sphericalAzimuth type="Float" precision="single"/>
+              <sphericalElevation type="Float" precision="single"/>
+            </prototype>
+            """;
+        using var dir = new TempDirectory();
+        using var doc = E57Document.Open(dir.Write("both.e57", new E57Spec { PrototypeXml = prototype }.Build()));
+
+        Assert.Single(doc.Scans);
+        Assert.Throws<NotSupportedException>(() => doc.Scans[0].ReadPoints().ToList());
+    }
+
+    [Fact]
+    public void E57_With_A_Partial_Spherical_Record_Is_Rejected()
+    {
+        const string prototype = """
+            <prototype type="Structure">
+              <sphericalRange type="Float" precision="single"/>
+              <sphericalAzimuth type="Float" precision="single"/>
+              <sphericalElevation type="Float" precision="single"/>
+            </prototype>
+            """;
+        byte[] rs = [.. BitConverter.GetBytes(2.0f), .. BitConverter.GetBytes(1.0f)];
+        byte[] azs = [.. BitConverter.GetBytes(0.0f), 0x00, 0x00];
+        byte[] els = [.. BitConverter.GetBytes(0.0f), .. BitConverter.GetBytes(0.0f)];
+        var spec = new E57Spec { PrototypeXml = prototype, Points = [], RecordCount = 2, RawPackets = E57Spec.DataPacket([rs, azs, els]) };
+        using var dir = new TempDirectory();
+        using var doc = E57Document.Open(dir.Write("partial.e57", spec.Build()));
+
+        Assert.Throws<InvalidDataException>(() => doc.Scans[0].ReadPoints().ToList());
+    }
+
     // ---- Leica -----------------------------------------------------------------------------------------------
 
     [Fact]
