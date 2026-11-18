@@ -650,8 +650,9 @@ public sealed class CliTests
     [InlineData("scans")]
     public void A_Count_That_Fails_On_Its_First_Access_Writes_No_Partial_Output(params string[] command)
     {
-        // The Leica point count is decoded on first access; the failure must come before the first line of output.
-        byte[] bytes = SyntheticFixtures.CreateSyntheticLgsx();
+        // The Leica point count is decoded on first access when the container does not state it; the failure must come
+        // before the first line of output.
+        byte[] bytes = SyntheticFixtures.CreateSyntheticLgsx(withPointCount: false);
         int block = System.Text.Encoding.Latin1.GetString(bytes).IndexOf("APRN", StringComparison.Ordinal);
         Array.Fill(bytes, (byte)0xA5, block + 0x40, Math.Min(32, bytes.Length - block - 0x40));
         using var dir = new TempDirectory();

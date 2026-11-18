@@ -468,6 +468,42 @@ public sealed class FormatTests
     }
 
     [Fact]
+    public void The_Point_Count_Of_A_Lgsx_Container_Is_The_One_The_Container_States()
+    {
+        using var dir = new TempDirectory();
+        using var doc = LgsxDocument.Open(dir.Write("site.lgsx", SyntheticFixtures.CreateSyntheticLgsx()));
+
+        // The count of the container and the count of the decoded points are the same.
+        var scan = Assert.Single(doc.Scans);
+        Assert.Equal(5, scan.PointCount);
+        Assert.Equal(scan.PointCount, scan.ReadPoints().LongCount());
+    }
+
+    [Fact]
+    public void The_Point_Count_Of_The_Setups_Of_A_Lgsx_Container_Is_The_One_The_Container_States()
+    {
+        using var dir = new TempDirectory();
+        using var doc = LgsxDocument.Open(dir.Write("site.lgsx",
+            SyntheticFixtures.CreateSyntheticLgsx(setupCount: 3, assignPointsToSetups: true)));
+
+        Assert.Equal([2L, 2L, 1L], doc.Scans.Select(s => s.PointCount));
+        Assert.Equal([2L, 2L, 1L], doc.Scans.Select(s => s.ReadPoints().LongCount()));
+    }
+
+    [Fact]
+    public void The_Point_Count_Of_A_Lgsx_Scan_Does_Not_Decode_The_Points()
+    {
+        using var dir = new TempDirectory();
+        using var doc = LgsxDocument.Open(dir.Write("site.lgsx", SyntheticFixtures.CreateSyntheticLgsx(damagedPointData: true)));
+
+        var scan = Assert.Single(doc.Scans);
+
+        // The count comes from the container, so the damaged point data is not decoded to find it.
+        Assert.Equal(5, scan.PointCount);
+        Assert.Throws<InvalidDataException>(() => scan.ReadPoints().ToList());
+    }
+
+    [Fact]
     public void A_Lgsx_Block_Is_Not_Cut_At_65536_Points()
     {
         // Codes are never zero, because a point at the block origin is dropped as padding.

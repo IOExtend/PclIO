@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   setup. A container that does not assign its points to its setups still opens as one scan, with a warning.
 - The pose and the bounds of a Leica setup are read from the record of the setup and applied to its points, unless
   `ApplyTransform` is false. A record that does not hold usable values is left unread, and the setup keeps an unknown pose.
+- The point count of a Leica scan is taken from the container when it states one, so that reading it does not decode the
+  point data. Only a container without that number still needs the decoding.
 
 ## [0.1.0] - 2026-11-15
 
