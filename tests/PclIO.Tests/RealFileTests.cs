@@ -99,6 +99,30 @@ public sealed class RealFileTests
     public void Read_Real_Sbf_Points() => AssertReadsPoints(".sbf", PclFileKind.Sbf);
 
     [SkippableFact]
+    public void Read_Real_Pnts_Points() => AssertReadsPoints(".pnts", PclFileKind.Tiles3d);
+
+    [SkippableFact]
+    public void Read_Real_Tileset_Json()
+    {
+        string? root = TestFiles.Roots().FirstOrDefault();
+        if (root == null) throw TestFiles.Missing(".json");
+        string tilesetPath = Path.Combine(root, "3dtiles", "TilesetWithRequestVolume", "tileset.json");
+        if (!File.Exists(tilesetPath)) throw new SkipException("TilesetWithRequestVolume/tileset.json not found.");
+
+        Assert.Equal(PclFileKind.Tiles3d, PclFile.DetectKind(tilesetPath));
+        using var doc = PclFile.Open(tilesetPath);
+        Assert.Equal(PclFileKind.Tiles3d, doc.Kind);
+        Assert.Single(doc.Scans);
+        Assert.Equal(125000, doc.TotalPointCount);
+
+        var firstPoint = doc.ReadAllPoints(new PclReadOptions { MaxPoints = 1 }).First();
+        Assert.True(double.IsFinite(firstPoint.X));
+        Assert.True(double.IsFinite(firstPoint.Y));
+        Assert.True(double.IsFinite(firstPoint.Z));
+        Assert.NotNull(firstPoint.Color);
+    }
+
+    [SkippableFact]
     public void Export_Real_File_To_Las_Matches_The_Requested_Count()
     {
         // Any one of the available formats is enough; the first one found is used.

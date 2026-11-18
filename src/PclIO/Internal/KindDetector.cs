@@ -1,4 +1,6 @@
+using System.Buffers.Binary;
 using System.Globalization;
+using System.Text.Json;
 
 namespace PclIO.Internal;
 
@@ -19,6 +21,9 @@ internal static class KindDetector
     // First bytes of an ASPRS LAS file. LAZ files share the signature but need their own reader, so the .laz
     // extension below stays unknown until that reader exists.
     private static readonly byte[] LasMagic = "LASF"u8.ToArray();
+    // 3D Tiles point cloud (.pnts) and glTF binary (.glb) signatures.
+    private static readonly byte[] PntsMagic = "pnts"u8.ToArray();
+    private static readonly byte[] GlbMagic = "glTF"u8.ToArray();
 
     public static PclFileKind Detect(string path)
     {
@@ -33,6 +38,11 @@ internal static class KindDetector
                 Directory.EnumerateFiles(path, "*.srf").Any())
             {
                 return PclFileKind.PinPoint;
+            }
+
+            if (File.Exists(Path.Combine(path, "tileset.json")))
+            {
+                return PclFileKind.Tiles3d;
             }
 
             return PclFileKind.Unknown;
@@ -122,6 +132,18 @@ internal static class KindDetector
         // XYZ / delimited text files (.xyz, .asc, .txt, .csv) with numeric coordinates or an XYZ header.
         if (IsXyzHeader(stream, origin, extension))
             return PclFileKind.Xyz;
+
+        // 3D Tiles point cloud tiles (.pnts).
+        if (head.StartsWith(PntsMagic))
+            return IsPntsHeader(stream, origin) ? PclFileKind.Tiles3d : PclFileKind.Unknown;
+
+        // glTF binary point clouds (.glb).
+        if (head.StartsWith(GlbMagic))
+            return IsGlbPointHeader(stream, origin) ? PclFileKind.Tiles3d : PclFileKind.Unknown;
+
+        // 3D Tiles tileset manifest (tileset.json).
+        if (IsTilesetJsonHeader(stream, origin, extension))
+            return PclFileKind.Tiles3d;
 
         return PclFileKind.Unknown;
     }
@@ -736,6 +758,155 @@ internal static class KindDetector
                 }
             }
 
+            return false;
+        }
+        finally
+        {
+            stream.Position = origin;
+        }
+    }
+
+    // 3D Tiles point cloud (.pnts): 28-byte header starting with "pnts", version 1, and consistent byte lengths.
+    private static bool IsPntsHeader(Stream stream, long origin)
+    {
+        long length = stream.CanSeek ? stream.Length : long.MaxValue;
+        if (length - origin < 28) return false;
+
+        Span<byte> header = stackalloc byte[28];
+        stream.Position = origin;
+        try
+        {
+            int got = stream.ReadAtLeast(header, 28, throwOnEndOfStream: false);
+            if (got < 28) return false;
+
+            if (!header[..4].SequenceEqual(PntsMagic)) return false;
+
+            uint version = BinaryPrimitives.ReadUInt32LittleEndian(header[4..8]);
+            if (version != 1) return false;
+
+            uint byteLength = BinaryPrimitives.ReadUInt32LittleEndian(header[8..12]);
+            uint ftJsonLen = BinaryPrimitives.ReadUInt32LittleEndian(header[12..16]);
+            uint ftBinLen = BinaryPrimitives.ReadUInt32LittleEndian(header[16..20]);
+            uint btJsonLen = BinaryPrimitives.ReadUInt32LittleEndian(header[20..24]);
+            uint btBinLen = BinaryPrimitives.ReadUInt32LittleEndian(header[24..28]);
+
+            if (byteLength < 28) return false;
+
+            ulong totalCalculated = 28UL + ftJsonLen + ftBinLen + btJsonLen + btBinLen;
+            if (totalCalculated != byteLength) return false;
+
+            if (stream.CanSeek && (ulong)(length - origin) < byteLength) return false;
+
+            return true;
+        }
+        finally
+        {
+            stream.Position = origin;
+        }
+    }
+
+    // glTF 2.0 binary (.glb) containing point primitives (mesh primitive mode 0).
+    private static bool IsGlbPointHeader(Stream stream, long origin)
+    {
+        long length = stream.CanSeek ? stream.Length : long.MaxValue;
+        if (length - origin < 20) return false;
+
+        Span<byte> header = stackalloc byte[12];
+        stream.Position = origin;
+        try
+        {
+            int got = stream.ReadAtLeast(header, 12, throwOnEndOfStream: false);
+            if (got < 12) return false;
+
+            if (!header[..4].SequenceEqual(GlbMagic)) return false;
+
+            uint version = BinaryPrimitives.ReadUInt32LittleEndian(header[4..8]);
+            if (version != 2) return false;
+
+            uint totalLength = BinaryPrimitives.ReadUInt32LittleEndian(header[8..12]);
+            if (totalLength < 20) return false;
+            if (stream.CanSeek && (ulong)(length - origin) < totalLength) return false;
+
+            Span<byte> chunkHeader = stackalloc byte[8];
+            got = stream.ReadAtLeast(chunkHeader, 8, throwOnEndOfStream: false);
+            if (got < 8) return false;
+
+            uint chunkLength = BinaryPrimitives.ReadUInt32LittleEndian(chunkHeader[0..4]);
+            uint chunkType = BinaryPrimitives.ReadUInt32LittleEndian(chunkHeader[4..8]);
+            // 0x4E4F534A is "JSON" in ASCII
+            if (chunkType != 0x4E4F534A) return false;
+            if (chunkLength == 0 || chunkLength > 64 * 1024 * 1024) return false;
+
+            int toRead = (int)chunkLength;
+            byte[] jsonBytes = new byte[toRead];
+            got = stream.ReadAtLeast(jsonBytes, toRead, throwOnEndOfStream: false);
+            if (got < toRead) return false;
+
+            using var doc = JsonDocument.Parse(jsonBytes);
+            var root = doc.RootElement;
+            if (!root.TryGetProperty("meshes", out var meshes) || meshes.ValueKind != JsonValueKind.Array)
+                return false;
+
+            foreach (var mesh in meshes.EnumerateArray())
+            {
+                if (mesh.TryGetProperty("primitives", out var prims) && prims.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var prim in prims.EnumerateArray())
+                    {
+                        if (prim.TryGetProperty("mode", out var modeElem) && modeElem.GetInt32() == 0)
+                        {
+                            if (prim.TryGetProperty("attributes", out var attrs) && attrs.TryGetProperty("POSITION", out _))
+                                return true;
+                        }
+                    }
+                }
+            }
+
+            return false;
+        }
+        catch
+        {
+            return false;
+        }
+        finally
+        {
+            stream.Position = origin;
+        }
+    }
+
+    // 3D Tiles tileset manifest (JSON containing asset and root objects).
+    private static bool IsTilesetJsonHeader(Stream stream, long origin, string? extension)
+    {
+        if (extension != null && extension != ".json") return false;
+
+        long length = stream.CanSeek ? stream.Length : long.MaxValue;
+        if (length - origin < 10) return false;
+
+        int toRead = (int)Math.Min(8192, length - origin);
+        byte[] buf = new byte[toRead];
+        stream.Position = origin;
+        try
+        {
+            int got = stream.ReadAtLeast(buf, toRead, throwOnEndOfStream: false);
+            if (got < 10) return false;
+
+            int start = 0;
+            if (got >= 3 && buf[0] == 0xEF && buf[1] == 0xBB && buf[2] == 0xBF)
+                start = 3;
+            while (start < got && char.IsWhiteSpace((char)buf[start]))
+                start++;
+
+            if (start >= got || buf[start] != (byte)'{')
+                return false;
+
+            using var doc = JsonDocument.Parse(buf.AsMemory(start, got - start));
+            var root = doc.RootElement;
+            return root.ValueKind == JsonValueKind.Object &&
+                   root.TryGetProperty("asset", out _) &&
+                   root.TryGetProperty("root", out _);
+        }
+        catch
+        {
             return false;
         }
         finally
