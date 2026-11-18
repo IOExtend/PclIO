@@ -123,6 +123,30 @@ public sealed class RealFileTests
     }
 
     [SkippableFact]
+    public void Read_Real_Potree_CloudJs()
+    {
+        string? root = TestFiles.Roots().FirstOrDefault();
+        if (root == null) throw TestFiles.Missing(".js");
+        string cloudPath = Path.Combine(root, "potree", "lion_takanawa", "cloud.js");
+        if (!File.Exists(cloudPath))
+            cloudPath = Path.Combine(root, "downloads", "potree", "lion_takanawa", "cloud.js");
+        if (!File.Exists(cloudPath)) throw new SkipException("Potree lion_takanawa sample not found.");
+
+        Assert.Equal(PclFileKind.Potree, PclFile.DetectKind(cloudPath));
+        using var doc = PclFile.Open(cloudPath);
+        Assert.Equal(PclFileKind.Potree, doc.Kind);
+        Assert.Single(doc.Scans);
+        Assert.Equal(3751, doc.TotalPointCount);
+
+        var firstPoint = doc.ReadAllPoints(new PclReadOptions { MaxPoints = 1 }).First();
+        Assert.True(double.IsFinite(firstPoint.X));
+        Assert.True(double.IsFinite(firstPoint.Y));
+        Assert.True(double.IsFinite(firstPoint.Z));
+        Assert.NotNull(firstPoint.Color);
+        Assert.NotNull(firstPoint.Normal);
+    }
+
+    [SkippableFact]
     public void Export_Real_File_To_Las_Matches_The_Requested_Count()
     {
         // Any one of the available formats is enough; the first one found is used.

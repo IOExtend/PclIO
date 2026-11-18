@@ -93,6 +93,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `NORMAL`, and `INTENSITY` accessors with standard component types and node transforms;
   3D Tiles tilesets (`tileset.json`) or directories containing them, traversing hierarchical tile trees
   and composing 4x4 transformation matrices for referenced point cloud tiles.
+- Potree octree point cloud datasets are read (`PclFileKind.Potree`):
+  Potree 1.x datasets with `cloud.js` manifest, reading bounding boxes, coordinate scale/offset, point attributes (`POSITION_CARTESIAN`, `COLOR_PACKED`, `RGB`, `INTENSITY`, `CLASSIFICATION`, `NORMAL_SPHEREMAPPED`, `NORMAL_OCT16`, `NORMAL_FLOATS`), node binary files (`.bin`), and hierarchy files (`.hrc`);
+  Potree 2.x datasets with `metadata.json` manifest and `octree.bin` binary point streams with custom attribute schemas;
+  Opening supported from manifest files (`cloud.js`, `metadata.json`), hierarchy files (`.hrc`), node binary files (`.bin` with companion manifest in parent directories), or dataset directories.
 - Leica scans read a block range with opt-in parallel decoding: the new `PclReadOptions.Blocks` selects the blocks of the
   scan in file order (per scan) and the new `PclReadOptions.MaxDegreeOfParallelism` (default 1, sequential streaming)
   decodes the selected blocks in parallel, keeping file order, consecutive `Index` values and `MaxPoints`/`SubsampleStep`

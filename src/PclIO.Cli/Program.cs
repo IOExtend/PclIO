@@ -89,6 +89,7 @@ public static class Program
           XYZ / text    delimited text point clouds with numeric coordinate lines or a column header (.xyz, .asc, .txt, .csv)
           SBF           Simple Binary Format with a companion header (.sbf, .sbf.data)
           3D Tiles      OGC 3D Tiles point clouds and glTF point primitives (.pnts, .glb, tileset.json)
+          Potree        Potree octree point clouds (cloud.js, metadata.json, .hrc, .bin)
 
         Output formats (--format, or the output extension; any other extension needs --format):
           las    ASPRS LAS 1.2, point data record format 2 (XYZ, intensity, RGB)
