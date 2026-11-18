@@ -326,6 +326,7 @@ public sealed class PinPointDocument : PclDocument
         public long ColorsOffset, ColorsLength;
         public long NormalsOffset, NormalsLength;
         public long IntensitiesOffset, IntensitiesLength;
+        public long FilterOffset, FilterLength;
 
         /// <summary>True when the channels are Snappy streams, with the point count stored in <see cref="PackedPoints"/>.</summary>
         public bool Packed;
@@ -344,6 +345,9 @@ public sealed class PinPointDocument : PclDocument
         public bool HasIntensities => Packed ? PackedPoints > 0 && IntensitiesLength > 0 : IntensitiesLength >= 1;
 
         public bool HasNormals => NormalsLength >= 12;
+
+        /// <summary>True when the file holds a per-point flags channel (one byte per stored point).</summary>
+        public bool HasFilterBits => Packed ? PackedPoints > 0 && FilterLength > 0 : false;
 
         /// <summary>Reads the table, or returns null when the file has neither layout.</summary>
         public static ChannelTable? TryRead(FileStream fs)
@@ -431,6 +435,9 @@ public sealed class PinPointScan : PclScan
     /// <summary>True only when the point data file has a normals channel.</summary>
     public override bool HasNormals => _table is { HasNormals: true };
 
+    /// <summary>True when the point data file holds a per-point flags channel ("FilterBits", one byte per stored point).</summary>
+    public bool HasFilterBits => _table is { HasFilterBits: true };
+
     internal PinPointScan(string id, string name, long pointCount, PclTransform transform, string? binFilePath,
         PinPointDocument.ChannelTable? table)
     {
@@ -455,8 +462,15 @@ public sealed class PinPointScan : PclScan
     /// <para>
     /// A point data file whose layout is neither a table of named channels nor a list of sections with a property table is
     /// not decoded, because the file does not describe its layout. Of the channels of the sectioned layout the positions
-    /// ("Points"), colours ("RGB8", three bytes per point) and intensities ("Intensities8") are read; the per-point flags
-    /// and the grid indices stored next to them are not interpreted, so every stored point is returned.
+    /// ("Points"), colours ("RGB8", three bytes per point), intensities ("Intensities8") and per-point flags
+    /// ("FilterBits", one byte per point) are read; a non-zero flag marks the point as filtered. The grid indices stored
+    /// beside them ("RowColIndex") are not interpreted.
+    /// </para>
+    /// <para>
+    /// By default every stored point that passes the plausibility rule above is returned. With
+    /// <see cref="PclReadOptions.ExcludeFilteredPoints"/> the points that the flags mark as filtered are not returned
+    /// and are not counted in the running <see cref="PclPoint.Index"/> values. The exact meaning of the individual flag
+    /// bits is not confirmed by test files, so any non-zero value counts as filtered.
     /// </para>
     /// </remarks>
     /// <exception cref="InvalidDataException">The point data file is damaged.</exception>
@@ -475,15 +489,19 @@ public sealed class PinPointScan : PclScan
 
         if (table == null) throw FormatError.Unsupported("point data file without a recognised channel layout");
 
-        foreach (var pt in ReadChannels(table, targetCount, step, options.ApplyTransform)) yield return pt;
+        foreach (var pt in ReadChannels(table, targetCount, step, options)) yield return pt;
     }
 
     // Points are decoded in batches, so that reading cost does not depend on the number of calls into the streams.
     private const int Batch = 4096;
 
-    private IEnumerable<PclPoint> ReadChannels(PinPointDocument.ChannelTable table, long targetCount, int step, bool applyTransform)
+    private IEnumerable<PclPoint> ReadChannels(PinPointDocument.ChannelTable table, long targetCount, int step, PclReadOptions options)
     {
         if (targetCount <= 0) yield break;
+        bool applyTransform = options.ApplyTransform;
+
+        // A point whose flag byte is not zero is marked as filtered; it is only skipped when the caller asks for it.
+        bool skipFiltered = options.ExcludeFilteredPoints && table.HasFilterBits;
 
         int colorSize = table.ColorSize;
         long pointTotal = table.PointCount;
@@ -495,11 +513,13 @@ public sealed class PinPointScan : PclScan
         using var colors = OpenChannel(table, table.ColorsOffset, table.ColorsLength, colorTotal > 0);
         using var normals = OpenChannel(table, table.NormalsOffset, table.NormalsLength, normalTotal > 0);
         using var intensities = OpenChannel(table, table.IntensitiesOffset, table.IntensitiesLength, intensityTotal > 0);
+        using var filters = OpenChannel(table, table.FilterOffset, table.FilterLength, skipFiltered);
 
         byte[] pointBytes = new byte[Batch * 12];
         byte[] colorBytes = new byte[Batch * colorSize];
         byte[] normalBytes = new byte[Batch * 12];
         byte[] intensityBytes = new byte[Batch];
+        byte[] filterBytes = new byte[Batch];
 
         long yielded = 0;
         long start = 0;
@@ -515,10 +535,12 @@ public sealed class PinPointScan : PclScan
             if (normalCount > 0) normals!.ReadExactly(normalBytes, 0, normalCount * 12);
             int intensityCount = intensities == null ? 0 : (int)Math.Clamp(intensityTotal - start, 0, count);
             if (intensityCount > 0) intensities!.ReadExactly(intensityBytes, 0, intensityCount);
+            if (filters != null) filters.ReadExactly(filterBytes, 0, count);
 
             for (int j = 0; j < count && yielded < targetCount; j++)
             {
                 if ((start + j) % step != 0) continue;
+                if (filters != null && filterBytes[j] != 0) continue;
 
                 var record = pointBytes.AsSpan(j * 12, 12);
                 float x = Bytes.ReadSingleLE(record[..4]);
@@ -568,7 +590,7 @@ public sealed class PinPointScan : PclScan
         // Once every point has been read, a compressed stream must end there: bytes after its last element are an error.
         if (table.Packed && start >= pointTotal)
         {
-            foreach (var stream in new[] { points, colors, intensities })
+            foreach (var stream in new[] { points, colors, intensities, filters })
                 if (stream != null && stream.ReadByte() >= 0) throw FormatError.Corrupted("a compressed channel holds more data than it declares");
         }
     }
