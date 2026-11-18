@@ -207,7 +207,8 @@ public sealed class CcBinDocument : PclDocument
         double sy = BinaryPrimitives.ReadDoubleLittleEndian(ccHead.AsSpan(16, 8));
         double sz = BinaryPrimitives.ReadDoubleLittleEndian(ccHead.AsSpan(24, 8));
         double scale = BinaryPrimitives.ReadDoubleLittleEndian(ccHead.AsSpan(32, 8));
-        if (scale == 0 || !double.IsFinite(scale)) scale = 1.0;
+        if (scale == 0 || !double.IsFinite(scale) || !double.IsFinite(sx) || !double.IsFinite(sy) || !double.IsFinite(sz))
+            throw FormatError.Corrupted("CC BIN has an invalid global shift or scale.");
 
         byte[] countBuf = new byte[4];
         if (fs.Read(countBuf) < 4) return false;
@@ -273,6 +274,8 @@ public sealed class CcBinDocument : PclDocument
             for (int m = 0; m < 16; m++)
             {
                 float val = BinaryPrimitives.ReadSingleLittleEndian(matH.AsSpan(8 + m * 4, 4));
+                if (!float.IsFinite(val))
+                    throw FormatError.Corrupted("CC BIN has a non-finite coordinate matrix.");
                 matrix16[m] = val;
                 int row = m / 4;
                 int col = m % 4;
@@ -285,105 +288,34 @@ public sealed class CcBinDocument : PclDocument
         }
 
         // Scalar fields (probe for Intensity)
-        bool hasIntensity = false;
         long intensityOffset = -1;
         uint intensityCount = 0;
-        int sfFlag = fs.ReadByte();
-        if (sfFlag >= 0)
+        if (fs.ReadByte() >= 0)
         {
-            byte[] sfCountBuf = new byte[4];
-            if (fs.Read(sfCountBuf) == 4)
+            Span<byte> countBytes = stackalloc byte[4];
+            ReadScalarBytes(fs, countBytes);
+            uint fieldCount = BinaryPrimitives.ReadUInt32LittleEndian(countBytes);
+            if (fieldCount >= 100)
+                throw FormatError.Unsupported("CC BIN has 100 or more scalar fields.");
+
+            Span<byte> fieldHeader = stackalloc byte[261];
+            for (uint field = 0; field < fieldCount; field++)
             {
-                uint sfCount = BinaryPrimitives.ReadUInt32LittleEndian(sfCountBuf);
-                if (sfCount is > 0 and < 100)
+                ReadScalarBytes(fs, fieldHeader);
+                uint valueCount = BinaryPrimitives.ReadUInt32LittleEndian(fieldHeader[257..]);
+                long dataOffset = fs.Position;
+                SkipScalarBytes(fs, (long)valueCount * sizeof(float));
+
+                if (intensityOffset < 0 &&
+                    Encoding.ASCII.GetString(fieldHeader[..256]).TrimEnd('\0').Equals("Intensity", StringComparison.OrdinalIgnoreCase))
                 {
-                    byte[] sfNameBuf = new byte[256];
-                    byte[] sCountBuf = new byte[4];
-                    for (int s = 0; s < sfCount; s++)
-                    {
-                        if (fs.Position + 256 + 5 > fileLength)
-                            throw new InvalidDataException("CC BIN scalar field header is truncated.");
-                        if (fs.Read(sfNameBuf) < 256)
-                            throw new InvalidDataException("CC BIN scalar field header is truncated.");
-                        string sfName = Encoding.ASCII.GetString(sfNameBuf).TrimEnd('\0');
-                        int sFlag = fs.ReadByte();
-                        if (sFlag < 0 || fs.Read(sCountBuf) < 4)
-                            throw new InvalidDataException($"CC BIN scalar field '{sfName}' count is truncated.");
-                        uint sCount = BinaryPrimitives.ReadUInt32LittleEndian(sCountBuf);
-                        long dataOffset = fs.Position;
-                        long sBytes = (long)sCount * 4;
-                        if (dataOffset + sBytes > fileLength)
-                            throw new InvalidDataException($"CC BIN scalar field '{sfName}' data is truncated.");
-
-                        if (!hasIntensity && sfName.Equals("Intensity", StringComparison.OrdinalIgnoreCase))
-                        {
-                            hasIntensity = true;
-                            intensityOffset = dataOffset;
-                            intensityCount = sCount;
-                        }
-
-                        fs.Position += sBytes;
-                        if (s + 1 < sfCount)
-                        {
-                            fs.Position += 219; // Skip color scale / metadata
-                        }
-                    }
+                    intensityOffset = dataOffset;
+                    intensityCount = valueCount;
                 }
+
+                if (field + 1 < fieldCount)
+                    SkipScalarMetadata(fs);
             }
-        }
-
-        // Construct transform:
-        // According to Global Shift and Scale mathematics:
-        // P_shifted = (P_original + Shift) * Scale
-        // Therefore, to recover the original (global) coordinate from stored local coordinate:
-        // P_original = P_local / Scale - Shift
-        // In PclTransform: P_transformed = P_local * Transform.Scale + Transform.Translation
-        double invScale = (scale != 0.0 && !double.IsNaN(scale) && !double.IsInfinity(scale))
-            ? (1.0 / scale)
-            : 1.0;
-
-        PclTransform transform;
-        if (!isIdentity)
-        {
-            // When a 4x4 matrix M is present, it must be composed with the global shift and scale:
-            // P_world = (M * P_local) * invScale - Shift
-            // Row i: combined[i, j] = invScale * M[i, j], and combined[i, 3] = invScale * M[i, 3] - Shift[i]
-            var combined = new double[16];
-            combined[0] = invScale * matrix16[0];
-            combined[1] = invScale * matrix16[1];
-            combined[2] = invScale * matrix16[2];
-            combined[3] = invScale * matrix16[3] - sx;
-
-            combined[4] = invScale * matrix16[4];
-            combined[5] = invScale * matrix16[5];
-            combined[6] = invScale * matrix16[6];
-            combined[7] = invScale * matrix16[7] - sy;
-
-            combined[8] = invScale * matrix16[8];
-            combined[9] = invScale * matrix16[9];
-            combined[10] = invScale * matrix16[10];
-            combined[11] = invScale * matrix16[11] - sz;
-
-            combined[12] = 0.0;
-            combined[13] = 0.0;
-            combined[14] = 0.0;
-            combined[15] = 1.0;
-
-            transform = new PclTransform
-            {
-                Scale = new PclVector3(invScale, invScale, invScale),
-                Translation = new PclVector3(-sx, -sy, -sz),
-                Matrix4x4 = combined,
-            };
-        }
-        else
-        {
-            transform = new PclTransform
-            {
-                Scale = new PclVector3(invScale, invScale, invScale),
-                Translation = new PclVector3(-sx, -sy, -sz),
-                Matrix4x4 = null,
-            };
         }
 
         string scanId = scanIndex.ToString(CultureInfo.InvariantCulture);
@@ -396,17 +328,90 @@ public sealed class CcBinDocument : PclDocument
             hasColors: hasColors,
             colorOffset: colorOffset,
             colorChannels: channels,
-            hasIntensity: hasIntensity,
             intensityOffset: intensityOffset,
             intensityCount: intensityCount,
             shiftX: sx,
             shiftY: sy,
             shiftZ: sz,
             scale: scale,
-            transform: transform,
+            transform: CreateTransform(scale, new PclVector3(-sx, -sy, -sz), isIdentity ? null : matrix16),
             properties: props);
 
         pointsEndOffset = Math.Max(pointsEndOffset, fs.Position);
         return true;
+    }
+
+    private static void SkipScalarMetadata(FileStream fs)
+    {
+        SkipScalarBytes(fs, 52); // Display ranges and flags before the optional palette.
+        int hasPalette = fs.ReadByte();
+        if (hasPalette < 0)
+            throw FormatError.Truncated("CC BIN scalar field metadata");
+        if (hasPalette > 1)
+            throw FormatError.Corrupted("CC BIN scalar field palette flag is invalid.");
+
+        if (hasPalette == 1)
+        {
+            Span<byte> word = stackalloc byte[4];
+            for (int i = 0; i < 2; i++)
+            {
+                ReadScalarBytes(fs, word);
+                uint byteLength = BinaryPrimitives.ReadUInt32BigEndian(word);
+                if (byteLength == uint.MaxValue) continue;
+                if (byteLength > 4096 || (byteLength & 1) != 0)
+                    throw FormatError.Corrupted("CC BIN scalar field palette string has an invalid byte length.");
+                SkipScalarBytes(fs, byteLength);
+            }
+
+            SkipScalarBytes(fs, 18); // Palette settings before the step count.
+            ReadScalarBytes(fs, word);
+            uint steps = BinaryPrimitives.ReadUInt32LittleEndian(word);
+            if (steps > 4096)
+                throw FormatError.Unsupported("CC BIN scalar field palette exceeds 4096 steps.");
+            SkipScalarBytes(fs, steps * 19L); // Position and colour for each palette step.
+        }
+
+        SkipScalarBytes(fs, 16);
+    }
+
+    private static void ReadScalarBytes(FileStream fs, Span<byte> buffer)
+    {
+        if (fs.ReadAtLeast(buffer, buffer.Length, throwOnEndOfStream: false) != buffer.Length)
+            throw FormatError.Truncated("CC BIN scalar field header or metadata");
+    }
+
+    private static void SkipScalarBytes(FileStream fs, long bytes)
+    {
+        if (bytes > fs.Length - fs.Position)
+            throw FormatError.Truncated("CC BIN scalar field data or metadata");
+        fs.Position += bytes;
+    }
+
+    private static PclTransform CreateTransform(double scale, PclVector3 translation, double[]? matrix)
+    {
+        // Divide the local coordinates before shifting them back to the original coordinate system.
+        double inverse = 1.0 / scale;
+        double[]? combined = null;
+        if (matrix != null && double.IsFinite(inverse))
+        {
+            combined = new double[16];
+            for (int i = 0; i < 12; i++)
+                combined[i] = inverse * matrix[i];
+            combined[3] += translation.X;
+            combined[7] += translation.Y;
+            combined[11] += translation.Z;
+            combined[15] = 1.0;
+        }
+
+        // The point divided by scale can be finite even when a composed coefficient overflows.
+        if (!double.IsFinite(inverse) || (combined != null && combined.Any(static x => !double.IsFinite(x))))
+            return new PclTransform { UniformScaleDivisor = scale, Translation = translation, Matrix4x4 = matrix };
+
+        return new PclTransform
+        {
+            Scale = new PclVector3(inverse, inverse, inverse),
+            Translation = translation,
+            Matrix4x4 = combined,
+        };
     }
 }

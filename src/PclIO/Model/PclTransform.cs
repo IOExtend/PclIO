@@ -10,7 +10,11 @@ public sealed record PclTransform
     public static PclTransform Identity { get; } = new();
 
     /// <summary>True when translation and rotation are zero, scale is one and no matrix is set.</summary>
-    public bool IsIdentity => Translation.IsZero && Rotation.IsZero && Scale == PclVector3.One && Matrix4x4 == null;
+    public bool IsIdentity => Translation.IsZero && Rotation.IsZero && Scale == PclVector3.One &&
+        UniformScaleDivisor == 1 && Matrix4x4 == null;
+
+    // Keep an otherwise unrepresentable reciprocal out of the stored scale or matrix.
+    internal double UniformScaleDivisor { get; init; } = 1;
 
     /// <summary>Translation added after scaling; applied by <see cref="TransformPoint"/> when no matrix is set.</summary>
     public PclVector3 Translation { get; init; } = PclVector3.Zero;
@@ -23,7 +27,7 @@ public sealed record PclTransform
 
     /// <summary>
     /// Optional 4x4 row-major matrix (16 elements, translation in elements 3, 7 and 11), if the format stores one.
-    /// When it has exactly 16 elements it replaces <see cref="Scale"/> and <see cref="Translation"/>.
+    /// When it has exactly 16 elements it normally replaces <see cref="Scale"/> and <see cref="Translation"/>.
     /// </summary>
     public double[]? Matrix4x4 { get; init; }
 
@@ -36,14 +40,22 @@ public sealed record PclTransform
             double x = local.X * m[0] + local.Y * m[1] + local.Z * m[2] + m[3];
             double y = local.X * m[4] + local.Y * m[5] + local.Z * m[6] + m[7];
             double z = local.X * m[8] + local.Y * m[9] + local.Z * m[10] + m[11];
-            return new PclVector3(x, y, z);
+            return UniformScaleDivisor == 1 ? new PclVector3(x, y, z) : DivideAndTranslate(x, y, z);
         }
+
+        if (UniformScaleDivisor != 1)
+            return DivideAndTranslate(local.X, local.Y, local.Z);
 
         double sx = local.X * Scale.X + Translation.X;
         double sy = local.Y * Scale.Y + Translation.Y;
         double sz = local.Z * Scale.Z + Translation.Z;
         return new PclVector3(sx, sy, sz);
     }
+
+    private PclVector3 DivideAndTranslate(double x, double y, double z) => new(
+        x / UniformScaleDivisor + Translation.X,
+        y / UniformScaleDivisor + Translation.Y,
+        z / UniformScaleDivisor + Translation.Z);
 
     /// <summary>
     /// Transforms a direction or normal without translation (matrix 3x3 part, otherwise per-axis scale; rotation is not applied)
@@ -52,19 +64,20 @@ public sealed record PclTransform
     /// <param name="vector">Direction in the scan's local space.</param>
     public PclVector3 TransformVector(PclVector3 vector)
     {
+        int sign = UniformScaleDivisor < 0 ? -1 : 1;
         if (Matrix4x4 is { Length: 16 } m)
         {
             double x = vector.X * m[0] + vector.Y * m[1] + vector.Z * m[2];
             double y = vector.X * m[4] + vector.Y * m[5] + vector.Z * m[6];
             double z = vector.X * m[8] + vector.Y * m[9] + vector.Z * m[10];
             double len = Math.Sqrt(x * x + y * y + z * z);
-            return len > 0 ? new PclVector3(x / len, y / len, z / len) : vector;
+            return len > 0 ? new PclVector3(x / len, y / len, z / len) * sign : vector;
         }
 
         double sx = vector.X * Scale.X;
         double sy = vector.Y * Scale.Y;
         double sz = vector.Z * Scale.Z;
         double slen = Math.Sqrt(sx * sx + sy * sy + sz * sz);
-        return slen > 0 ? new PclVector3(sx / slen, sy / slen, sz / slen) : vector;
+        return slen > 0 ? new PclVector3(sx / slen, sy / slen, sz / slen) * sign : vector;
     }
 }

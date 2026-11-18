@@ -11,6 +11,8 @@ namespace PclIO.Internal;
 /// </summary>
 internal static class KindDetector
 {
+    internal const int MaxPotreeManifestBytes = 16 * 1024 * 1024;
+
     private static readonly byte[] E57Magic = "ASTM-E57"u8.ToArray();
     // Container signatures at the start of the files the readers accept.
     private static readonly byte[] LeicaMagic = "wild::geosystems"u8.ToArray();
@@ -86,19 +88,11 @@ internal static class KindDetector
             string? dir = Path.GetDirectoryName(Path.GetFullPath(path));
             for (int depth = 0; depth < 5 && dir != null; depth++)
             {
-                if (File.Exists(Path.Combine(dir, "cloud.js")) || File.Exists(Path.Combine(dir, "metadata.json")))
+                if (IsPotreeManifest(Path.Combine(dir, "cloud.js")) || IsPotreeManifest(Path.Combine(dir, "metadata.json")))
                     return PclFileKind.Potree;
                 string? parent = Path.GetDirectoryName(dir);
                 if (parent == dir) break;
                 dir = parent;
-            }
-
-            using (var probeStream = File.OpenRead(path))
-            {
-                Span<byte> probeHead = stackalloc byte[24];
-                int probeRead = probeStream.ReadAtLeast(probeHead, 24, throwOnEndOfStream: false);
-                if (probeRead >= 24 && IsCcBinStructure(probeHead))
-                    return PclFileKind.CcBin;
             }
         }
 
@@ -1103,8 +1097,16 @@ internal static class KindDetector
         }
     }
 
+    internal static bool IsPotreeManifest(string path)
+    {
+        if (!File.Exists(path)) return false;
+        using var stream = File.OpenRead(path);
+        return stream.Length <= MaxPotreeManifestBytes &&
+            IsPotreeJsonHeader(stream, 0, Path.GetExtension(path), MaxPotreeManifestBytes);
+    }
+
     // Potree manifest: cloud.js (1.x) or metadata.json (2.x)
-    private static bool IsPotreeJsonHeader(Stream stream, long origin, string? extension)
+    private static bool IsPotreeJsonHeader(Stream stream, long origin, string? extension, int maxProbeBytes = 8192)
     {
         if (extension != null && extension != ".js" && extension != ".json")
             return false;
@@ -1112,7 +1114,7 @@ internal static class KindDetector
         long length = stream.CanSeek ? stream.Length : long.MaxValue;
         if (length - origin < 10) return false;
 
-        int toRead = (int)Math.Min(8192, length - origin);
+        int toRead = (int)Math.Min(maxProbeBytes, length - origin);
         byte[] buf = new byte[toRead];
         stream.Position = origin;
         try
@@ -1142,7 +1144,7 @@ internal static class KindDetector
             }
 
             // Potree 2.x (metadata.json)
-            if (root.TryGetProperty("version", out var verElem) &&
+            if (root.TryGetProperty("version", out var verElem) && verElem.ValueKind == JsonValueKind.String &&
                 verElem.GetString() is { } v && v.StartsWith("2.") &&
                 root.TryGetProperty("points", out _) &&
                 (root.TryGetProperty("hierarchy", out _) || root.TryGetProperty("attributes", out _)))
@@ -1152,7 +1154,7 @@ internal static class KindDetector
 
             return false;
         }
-        catch
+        catch (JsonException)
         {
             return false;
         }

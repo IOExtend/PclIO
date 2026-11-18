@@ -6493,6 +6493,80 @@ public sealed class FormatTests
     }
 
     [Fact]
+    public void Cc_Bin_Rejects_Truncated_Scalar_Field_Count()
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticCcBin([new(1, 2, 3)], withIntensity: false);
+        string path = dir.Write("cut_scalar_count.bin", bytes[..^2]);
+
+        Assert.Throws<InvalidDataException>(() => CcBinDocument.Open(path));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Cc_Bin_Reads_Intensity_After_Scalar_Display_Metadata(bool withPalette)
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticCcBin([new(1, 2, 3, Intensity: 42)]);
+        int fieldStart = bytes.AsSpan().IndexOf("Intensity"u8);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(fieldStart - 4, 4), 2);
+        byte[] firstField = bytes[fieldStart..(fieldStart + 261 + sizeof(float))];
+        firstField.AsSpan(0, 256).Clear();
+        "Time"u8.CopyTo(firstField);
+
+        byte[] display = new byte[53];
+        byte[] palette = [];
+        if (withPalette)
+        {
+            display[^1] = 1;
+            byte[] nameAndId =
+            [
+                0, 0, 0, 8, 0, (byte)'G', 0, (byte)'r', 0, (byte)'e', 0, (byte)'y',
+                0, 0, 0, 2, 0, (byte)'1',
+            ];
+            byte[] paletteSteps = new byte[18 + 4 + 2 * 19];
+            paletteSteps[18] = 2;
+            palette = [..nameAndId, ..paletteSteps];
+        }
+
+        string path = dir.Write("two_scalars.bin", [..bytes.AsSpan(0, fieldStart), ..firstField, ..display,
+            ..palette, ..new byte[16], ..bytes.AsSpan(fieldStart)]);
+
+        using var doc = PclFile.Open(path);
+        Assert.Equal(42f, Assert.Single(doc.ReadAllPoints()).Intensity);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Cc_Bin_Transforms_Finite_Points_With_Subnormal_Scale(bool withMatrix)
+    {
+        using var dir = new TempDirectory();
+        const float x = 1e-30f;
+        double[]? matrix = withMatrix ? [1, 0, 0, 0, 0, -1, 0, 0, 0, 0, -1, 0, 0, 0, 0, 1] : null;
+        byte[] bytes = SyntheticFixtures.CreateSyntheticCcBin([new(x, 0, 0), new(1, 0, 0)],
+            scale: double.Epsilon, matrix16: matrix);
+
+        using var doc = PclFile.Open(dir.Write("subnormal.bin", bytes));
+        var point = Assert.Single(doc.ReadAllPoints());
+        Assert.Equal(new PclVector3(x / double.Epsilon, 0, 0), point.Position);
+        Assert.Equal(point.Position, doc.Scans[0].Transform.TransformPoint(new PclVector3(x, 0, 0)));
+        Assert.Equal(2, doc.ReadAllPoints(new PclReadOptions { ApplyTransform = false }).Count());
+    }
+
+    [Theory]
+    [InlineData(0.0)]
+    [InlineData(double.NaN)]
+    [InlineData(double.PositiveInfinity)]
+    public void Cc_Bin_Rejects_Invalid_Global_Scale(double scale)
+    {
+        using var dir = new TempDirectory();
+        var path = dir.Write("bad_scale.bin", SyntheticFixtures.CreateSyntheticCcBin([new(1, 2, 3)], scale: scale));
+        Assert.Throws<InvalidDataException>(() => CcBinDocument.Open(path));
+    }
+
+    [Fact]
     public void Cc_Bin_Transforms_With_Tiny_Scale()
     {
         using var dir = new TempDirectory();

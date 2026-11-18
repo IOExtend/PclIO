@@ -573,21 +573,34 @@ public sealed class KindDetectionTests
     public void Potree_Node_With_Cc_Magic_Coordinates_Is_Detected_As_Potree_Near_Manifest()
     {
         using var tempDir = new TempDirectory();
-        // Write cloud.js manifest
-        tempDir.Write("cloud.js", "{ \"version\": \"1.7\", \"octreeDir\": \"data\", \"points\": 2 }"u8.ToArray());
+        const double scale = 0.001;
+        var (manifest, data, hierarchy) = SyntheticFixtures.CreateSyntheticPotree1x(
+            [new(0x32424343 * scale, 47 * scale, 257 * scale), new(0, 100 * scale, 0)],
+            new PclVector3(scale, scale, scale), PclVector3.Zero, hasColors: false, normalType: "",
+            hasIntensity: false, hasClassification: false);
+        tempDir.WriteText("cloud.js", manifest);
+        tempDir.WriteText("data/r/metadata.json", "{}");
+        tempDir.Write("data/r/r.hrc", hierarchy);
+        string rBinPath = tempDir.Write("data/r/r.bin", data);
 
-        // Create an r.bin of 2 points whose raw bytes happen to match CC BIN header structure
-        // (CCB2, version=1, entityType=1, f2=0, flags=0, nameLen=0).
-        byte[] potreeNode = new byte[32];
-        "CCB2"u8.CopyTo(potreeNode.AsSpan(0, 4));
-        BinaryPrimitives.WriteUInt32LittleEndian(potreeNode.AsSpan(4, 4), 1);
-        BinaryPrimitives.WriteUInt32LittleEndian(potreeNode.AsSpan(8, 4), 1);
-        BinaryPrimitives.WriteUInt32LittleEndian(potreeNode.AsSpan(12, 4), 0);
-        BinaryPrimitives.WriteUInt32LittleEndian(potreeNode.AsSpan(16, 4), 0);
-        BinaryPrimitives.WriteUInt32LittleEndian(potreeNode.AsSpan(20, 4), 0);
-        string rBinPath = tempDir.Write("data/r/r.bin", potreeNode);
-
+        Assert.Equal(PclFileKind.CcBin, Detect(data, "r.bin"));
         Assert.Equal(PclFileKind.Potree, PclFile.DetectKind(rBinPath));
+        using var doc = PclFile.Open(rBinPath);
+        Assert.Equal(2, doc.ReadAllPoints().Count());
+    }
+
+    [Theory]
+    [InlineData("metadata.json")]
+    [InlineData("cloud.js")]
+    public void Unrelated_Manifest_Does_Not_Hide_Cc_Bin(string manifestName)
+    {
+        using var dir = new TempDirectory();
+        dir.WriteText(manifestName, "{}");
+        string path = dir.Write("cloud.bin", SyntheticFixtures.CreateSyntheticCcBin([new(1, 2, 3)]));
+
+        using var doc = PclFile.Open(path);
+        Assert.Equal(PclFileKind.CcBin, doc.Kind);
+        Assert.Single(doc.ReadAllPoints());
     }
 
     private sealed class NonSeekableStream(byte[] bytes) : MemoryStream(bytes)

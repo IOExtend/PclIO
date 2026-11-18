@@ -15,7 +15,6 @@ public sealed class CcBinScan : PclScan
     private readonly bool _hasColors;
     private readonly long _colorOffset;
     private readonly byte _colorChannels;
-    private readonly bool _hasIntensity;
     private readonly long _intensityOffset;
     private readonly long _intensityCount;
     private readonly double _shiftX;
@@ -36,12 +35,7 @@ public sealed class CcBinScan : PclScan
     public override bool HasColors => _hasColors;
 
     /// <inheritdoc />
-    public override bool HasIntensities => _hasIntensity && _intensityCount > 0;
-
-    /// <inheritdoc />
-    /// <remarks>Modern CC entity files store normals using quantized spherical sector indices (ccNormalCompressor)
-    /// which lacks a published open specification; under clean-room rules, normals are not decoded.</remarks>
-    public override bool HasNormals => false;
+    public override bool HasIntensities => _intensityCount > 0;
 
     /// <summary>Global shift vector stored with the cloud entity.</summary>
     public PclVector3 GlobalShift => new(_shiftX, _shiftY, _shiftZ);
@@ -58,7 +52,6 @@ public sealed class CcBinScan : PclScan
         bool hasColors,
         long colorOffset,
         byte colorChannels,
-        bool hasIntensity,
         long intensityOffset,
         long intensityCount,
         double shiftX,
@@ -76,7 +69,6 @@ public sealed class CcBinScan : PclScan
         _hasColors = hasColors;
         _colorOffset = colorOffset;
         _colorChannels = colorChannels;
-        _hasIntensity = hasIntensity && intensityCount > 0;
         _intensityOffset = intensityOffset;
         _intensityCount = intensityCount;
         _shiftX = shiftX;
@@ -87,7 +79,7 @@ public sealed class CcBinScan : PclScan
 
         _properties["TotalPoints"] = pointCount.ToString(CultureInfo.InvariantCulture);
         _properties["HasColors"] = hasColors ? "true" : "false";
-        _properties["HasIntensity"] = hasIntensity ? "true" : "false";
+        _properties["HasIntensity"] = HasIntensities ? "true" : "false";
         _properties["GlobalShift"] = string.Create(CultureInfo.InvariantCulture, $"{shiftX:F6}, {shiftY:F6}, {shiftZ:F6}");
         _properties["GlobalScale"] = scale.ToString(CultureInfo.InvariantCulture);
 
@@ -113,7 +105,7 @@ public sealed class CcBinScan : PclScan
 
         byte[] ptBuf = new byte[BatchRecords * 12];
         byte[]? colBuf = _hasColors ? new byte[BatchRecords * _colorChannels] : null;
-        byte[]? intBuf = _hasIntensity ? new byte[BatchRecords * 4] : null;
+        byte[]? intBuf = HasIntensities ? new byte[BatchRecords * 4] : null;
 
         long yielded = 0;
         long pointIndex = 0;
@@ -138,7 +130,7 @@ public sealed class CcBinScan : PclScan
                     throw FormatError.Truncated($"CC BIN file ended prematurely while reading colors at index {pointIndex}.");
             }
 
-            if (_hasIntensity && intBuf != null)
+            if (intBuf != null)
             {
                 long intAvailable = Math.Max(0, Math.Min(_intensityCount - pointIndex, toRead));
                 if (intAvailable > 0)
@@ -176,7 +168,7 @@ public sealed class CcBinScan : PclScan
                 }
 
                 float? intensity = null;
-                if (_hasIntensity && intBuf != null && currentIdx < _intensityCount)
+                if (intBuf != null && currentIdx < _intensityCount)
                 {
                     int intByteOffset = p * 4;
                     float iVal = BinaryPrimitives.ReadSingleLittleEndian(intBuf.AsSpan(intByteOffset, 4));
@@ -190,6 +182,8 @@ public sealed class CcBinScan : PclScan
                 if (options.ApplyTransform && !Transform.IsIdentity)
                 {
                     pos = Transform.TransformPoint(pos);
+                    if (!double.IsFinite(pos.X) || !double.IsFinite(pos.Y) || !double.IsFinite(pos.Z))
+                        continue;
                 }
 
                 yield return new PclPoint(pos, Color: color, Intensity: intensity, Index: (ulong)yielded);
