@@ -1,3 +1,4 @@
+using PclIO.Formats.CcBin;
 using PclIO.Formats.Copc;
 using PclIO.Formats.E57;
 using PclIO.Formats.EdgeWise;
@@ -74,6 +75,7 @@ public static class PclFile
             PclFileKind.Copc => CopcDocument.Open(path, options),
             PclFileKind.Ept => EptDocument.Open(path, options),
             PclFileKind.LeicaPtg => PtgDocument.Open(path, options),
+            PclFileKind.CcBin => CcBinDocument.Open(path, options),
             _ => throw new NotSupportedException($"Unsupported or unrecognized point cloud file: '{path}'"),
         };
     }

@@ -14,7 +14,7 @@ format-specific members can change when the support for that format changes.
 | Type | Use |
 |---|---|
 | `PclFile` | Static entry point. `DetectKind(path)` and `DetectKind(stream, extension)` return a `PclFileKind`; `Open(path, options)` detects the format and returns a `PclDocument`. |
-| `PclFileKind` | `Unknown`, `E57`, `RecapProject`, `RecapScan`, `LeicaLgsx`, `LeicaLgs`, `FaroFls`, `PinPoint`, `EdgeWise`, `Las`, `Pcd`, `Ply`, `Pts`, `Ptx`, `Xyz`, `Sbf`, `Tiles3d`, `Potree`, `Laz`, `Copc`, `Ept` and `LeicaPtg`. |
+| `PclFileKind` | `Unknown`, `E57`, `RecapProject`, `RecapScan`, `LeicaLgsx`, `LeicaLgs`, `FaroFls`, `PinPoint`, `EdgeWise`, `Las`, `Pcd`, `Ply`, `Pts`, `Ptx`, `Xyz`, `Sbf`, `Tiles3d`, `Potree`, `Laz`, `Copc`, `Ept`, `LeicaPtg` and `CcBin`. |
 | `PclReadOptions` | `MaxPoints` (limit of one read call, null for all, 0 for none), `MaxCoordinateMagnitude` (default 5000, null for no limit; NaN and infinite coordinates are never returned; currently only PinPoint applies it), `EdgeWiseCoordinateScale` (default 0.128 / 32768 metres per unit; the files do not declare it), `SubsampleStep` (1 keeps every point, N keeps about one in N), `Blocks` (range of the scan's blocks in file order, null for all; currently only Leica honours it), `MaxDegreeOfParallelism` (default 1: sequential; above 1 decodes the selected Leica blocks in parallel, keeping file order), `ApplyTransform` (default true), `Strict` (default false: a reader that finds incomplete data fails with `InvalidDataException` instead of adding a warning), `ExcludeFilteredPoints` (default false: points the file marks as filtered are excluded; currently the `FilterBits` channel of the PinPoint sectioned layout), `TextColumns` (explicit column names or layout for delimited text point clouds), `TextDelimiter` (explicit delimiter character for delimited text), `TextCommentPrefix` (prefix for comment lines in delimited text, default `#`) and `TextCoordinateScale` (coordinate scale factor for delimited text, default 1.0). Negative `MaxPoints`, a negative magnitude limit, a negative block start or count, a non-positive or non-finite EdgeWise scale or text coordinate scale, and a step or parallelism below 1 throw `ArgumentOutOfRangeException`. `PclReadOptions.Default` has no limit. |
 | `BlockRange` | `StartBlock` (zero-based index of the first block to read) and `BlockCount` (how many blocks at most, null for all from the start on; a range past the last block yields no points, 0 yields none). |
 
@@ -45,6 +45,7 @@ is the argument, which may also be a file name.
   `Potree` is recognised by `cloud.js` (with `octreeDir` and attribute descriptors) or `metadata.json` (version 2.x and point attributes) in `.js` or `.json`, by `.hrc` hierarchy files with 5-byte node records, or by ancestor `cloud.js`/`metadata.json` next to a `.bin` file.
   `Ept` is recognised by `ept.json` manifest structure (bounds, dataType, schema) or by companion `ept.json` next to octree tiles.
   `LeicaPtg` is recognised by the `PTG\0` tag and magic number `0x928FA3C7` with any extension, or by the `PTG index` header with the `.ptg` extension.
+  `CcBin` is recognised by the `CCB2` signature with any extension; a `.bin` file without this signature is reported as `Potree` when inside an octree folder or `Unknown`.
 - `FaroFls` needs an OLE2 compound file with the extension `.fls`, `RecapProject` a ZIP archive with the extension `.rcp`, and
   `PinPoint` a JSON text file with the extension `.smf` or `.srf`.
 - The extensions `.c3db` and `.c3ptx` select `EdgeWise` without a content check, so a damaged file with one of these extensions is
@@ -93,6 +94,7 @@ drop points that fail a plausibility rule (see the README), so a scan can yield 
 | COPC | The header count (the extended 1.4 count when it states one). It is not checked against the chunk data until read. |
 | EPT | The point count declared in the manifest, or the sum of points across discovered octree nodes. |
 | Leica PTG | Total valid returns across all gridded scans, determined by decoding the column validity bitmasks. |
+| CC BIN | The point count declared for the entity. Points with non-finite coordinates are skipped. |
 
 `HasColors`, `HasIntensities` and `HasNormals` follow what the file contains, except for the scans of a ReCap project, where all three
 are true when the `.rcs` file was found and false otherwise, without the file being opened. A ReCap scan reads the channels
@@ -102,7 +104,7 @@ no colour.
 ## Format documents
 
 `E57Document`/`E57Scan`, `RcsScanDocument`/`RcsScan`, `RcpProjectDocument`/`RcpScan`, `LgsxDocument`/`LgsxScan`/`LgsxEntry`/`LgsxSetup`,
-`FaroFlsDocument`/`FaroScan`, `PinPointDocument`/`PinPointScan`, `EdgeWiseDocument`/`EdgeWiseScan`, `LasDocument`/`LasScan`, `LazDocument`/`LazScan`, `CopcDocument`/`CopcScan`, `PcdDocument`/`PcdScan`, `PlyDocument`/`PlyScan`, `PtsDocument`/`PtsScan`, `PtxDocument`/`PtxScan`, `XyzDocument`/`XyzScan`, `SbfDocument`/`SbfScan`, `Tiles3dDocument`/`PntsScan`/`GlbScan`, `PotreeDocument`/`PotreeScan`, `EptDocument`/`EptScan` and `PtgDocument`/`PtgScan` are the readers behind
+`FaroFlsDocument`/`FaroScan`, `PinPointDocument`/`PinPointScan`, `EdgeWiseDocument`/`EdgeWiseScan`, `LasDocument`/`LasScan`, `LazDocument`/`LazScan`, `CopcDocument`/`CopcScan`, `PcdDocument`/`PcdScan`, `PlyDocument`/`PlyScan`, `PtsDocument`/`PtsScan`, `PtxDocument`/`PtxScan`, `XyzDocument`/`XyzScan`, `SbfDocument`/`SbfScan`, `Tiles3dDocument`/`PntsScan`/`GlbScan`, `PotreeDocument`/`PotreeScan`, `EptDocument`/`EptScan`, `PtgDocument`/`PtgScan` and `CcBinDocument`/`CcBinScan` are the readers behind
 `PclFile.Open`. Each has a static `Open` method and format-specific properties (for example the E57 version or the FARO scanner model).
 Their XML documentation states what each reader supports. Prefer `PclFile.Open`, which detects the format and chooses the reader.
 

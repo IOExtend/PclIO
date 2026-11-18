@@ -99,6 +99,9 @@ public sealed class RealFileTests
     public void Read_Real_Ptg_Points() => AssertReadsPoints(".ptg", PclFileKind.LeicaPtg);
 
     [SkippableFact]
+    public void Read_Real_Cc_Bin_Points() => AssertReadsPoints(".bin", PclFileKind.CcBin);
+
+    [SkippableFact]
     public void Read_Real_Xyz_Points() => AssertReadsPoints(".xyz", PclFileKind.Xyz);
 
     [SkippableFact]

@@ -28,6 +28,8 @@ internal static class KindDetector
     // Leica PTG binary scan signature and magic number.
     private static readonly byte[] PtgTag = [0x50, 0x54, 0x47, 0x00];
     private const uint PtgMagicNumber = 0x928FA3C7;
+    // CC BIN entity file signature (CCB2).
+    private static readonly byte[] CcBinMagic = "CCB2"u8.ToArray();
 
     public static PclFileKind Detect(string path)
     {
@@ -81,6 +83,14 @@ internal static class KindDetector
             : Path.GetExtension(path).ToLowerInvariant();
         if (ext == ".bin")
         {
+            using (var probeStream = File.OpenRead(path))
+            {
+                Span<byte> probeHead = stackalloc byte[4];
+                int probeRead = probeStream.ReadAtLeast(probeHead, 4, throwOnEndOfStream: false);
+                if (probeRead >= 4 && probeHead.StartsWith(CcBinMagic))
+                    return PclFileKind.CcBin;
+            }
+
             string? dir = Path.GetDirectoryName(Path.GetFullPath(path));
             for (int depth = 0; depth < 5 && dir != null; depth++)
             {
@@ -121,6 +131,9 @@ internal static class KindDetector
         // The extension rule for the cluster file below needs no content, so it also applies to a very short file.
         if (read < 4) return extension is ".c3db" or ".c3ptx" ? PclFileKind.EdgeWise : PclFileKind.Unknown;
         ReadOnlySpan<byte> head = buffer[..read];
+
+        if (head.StartsWith(CcBinMagic))
+            return PclFileKind.CcBin;
 
         if (head.Length >= 8 && head.StartsWith(PtgTag) && BinaryPrimitives.ReadUInt32LittleEndian(head[4..8]) == PtgMagicNumber)
             return PclFileKind.LeicaPtg;

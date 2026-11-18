@@ -537,6 +537,38 @@ public sealed class KindDetectionTests
         Assert.Equal(PclFileKind.Unknown, Detect(plainText, "text.ptg"));
     }
 
+    [Theory]
+    [InlineData("scan.bin")]
+    [InlineData("SCAN.BIN")]
+    [InlineData("scan.dat")]
+    public void Detects_Cc_Bin_By_Signature(string name)
+    {
+        byte[] bytes = SyntheticFixtures.CreateSyntheticCcBin([new CcBinSamplePoint(1, 2, 3)]);
+        Assert.Equal(PclFileKind.CcBin, Detect(bytes, name));
+
+        using var ms = new MemoryStream(bytes);
+        Assert.Equal(PclFileKind.CcBin, PclFile.DetectKind(ms));
+    }
+
+    [Fact]
+    public void Cc_Bin_Needs_The_Signature_Not_Just_The_Extension()
+    {
+        byte[] randomBin = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+        Assert.Equal(PclFileKind.Unknown, Detect(randomBin, "random.bin"));
+    }
+
+    [Fact]
+    public void Detects_Cc_Bin_File_Path()
+    {
+        using var tempDir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticCcBin([new CcBinSamplePoint(10, 20, 30)]);
+        string binPath = tempDir.Write("test.bin", bytes);
+        Assert.Equal(PclFileKind.CcBin, PclFile.DetectKind(binPath));
+
+        string badBin = tempDir.Write("bad.bin", [0x00, 0x01, 0x02, 0x03]);
+        Assert.Equal(PclFileKind.Unknown, PclFile.DetectKind(badBin));
+    }
+
     private sealed class NonSeekableStream(byte[] bytes) : MemoryStream(bytes)
     {
         public override bool CanSeek => false;

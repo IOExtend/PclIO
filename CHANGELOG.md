@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- CC BIN (`*.bin`, `CCB2`) reader supporting single and multi-cloud entity datasets with 32-bit floating point Cartesian XYZ coordinates, global shift and scale vectors, 8-bit RGB colour arrays, 4x4 coordinate transform matrices, and scalar fields (including intensity). Added `CcBinDocument`, `CcBinScan`, and `PclFileKind.CcBin`.
 - Leica PTG (`*.ptg`) gridded point cloud reader supporting binary scan files with `PTG\0` signature, magic number `0x928FA3C7`, ASCII metadata header (`NumRows`, `NumCols`, `%%properties`, `%%transform`), column offset array, and column validity bitmasks with single or double precision Cartesian XYZ coordinates, intensity and RGB colour. Top-level ASCII index files (`.ptg`) referencing binary scan files are aggregated into multi-scan documents. Added `PtgDocument`, `PtgScan`, and `PclFileKind.LeicaPtg`.
 - Entwine Point Tile (EPT) reader supporting dataset manifests (`ept.json`), octree hierarchy traversal (`ept-hierarchy/`) with sub-hierarchy page resolution and cycle detection, and point data tile streaming (`ept-data/`) across `"laszip"`, `"binary"`, and `"zstandard"` compression formats. Added `EptDocument`, `EptScan`, `EptKey`, `EptNode`, and `EptDimension`, with spatial bounding box queries (`FindNodes`, `ReadPoints`) and schema-driven dimension extraction.
 
