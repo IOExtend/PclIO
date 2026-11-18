@@ -2764,4 +2764,175 @@ internal static class SyntheticFixtures
 
         return (manifestJson, hierarchyJson, tileBytes, ext);
     }
+
+    public record PtgSamplePoint(double X, double Y, double Z, float? Intensity = null, PclColor? Color = null, bool IsValid = true);
+
+    public static readonly IReadOnlyList<PtgSamplePoint> DefaultPtgPoints =
+    [
+        new(1.0, 2.0, 3.0, 0.5f, new PclColor(10, 20, 30)),
+        new(-4.5, 5.25, 6.125, 1.0f, new PclColor(255, 255, 255)),
+        new(7.0, 8.0, 9.0, 0.2f, new PclColor(100, 150, 200)),
+    ];
+
+    public static byte[] CreateSyntheticPtgBinary(
+        int numCols = 3,
+        int numRows = 1,
+        int properties = 0x01 | 0x04 | 0x08,
+        IReadOnlyList<PtgSamplePoint>? points = null,
+        double[]? transformMatrix = null,
+        string? scanName = "SyntheticScan",
+        string? customHeader = null,
+        bool corruptMagic = false,
+        bool corruptOffsets = false)
+    {
+        points ??= DefaultPtgPoints;
+
+        using var ms = new MemoryStream();
+
+        byte[] tag = corruptMagic ? [0x58, 0x59, 0x5A, 0x00] : [0x50, 0x54, 0x47, 0x00];
+        ms.Write(tag);
+
+        uint magic = corruptMagic ? 0x12345678 : 0x928FA3C7;
+        Span<byte> magicBytes = stackalloc byte[4];
+        BinaryPrimitives.WriteUInt32LittleEndian(magicBytes, magic);
+        ms.Write(magicBytes);
+
+        byte[] headerBytes;
+        if (customHeader != null)
+        {
+            headerBytes = Encoding.ASCII.GetBytes(customHeader);
+        }
+        else
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine("%%header_begin");
+            sb.AppendLine("version 1");
+            sb.AppendLine(string.Create(CultureInfo.InvariantCulture, $"NumRows {numRows}"));
+            sb.AppendLine(string.Create(CultureInfo.InvariantCulture, $"NumCols {numCols}"));
+            sb.AppendLine(string.Create(CultureInfo.InvariantCulture, $"%%properties {properties}"));
+            if (!string.IsNullOrEmpty(scanName))
+                sb.AppendLine($"%%scan_name {scanName}");
+
+            if (transformMatrix is { Length: 16 } m)
+            {
+                sb.AppendLine("%%transform");
+                sb.AppendLine(string.Create(CultureInfo.InvariantCulture, $"{m[0]} {m[1]} {m[2]} {m[3]}"));
+                sb.AppendLine(string.Create(CultureInfo.InvariantCulture, $"{m[4]} {m[5]} {m[6]} {m[7]}"));
+                sb.AppendLine(string.Create(CultureInfo.InvariantCulture, $"{m[8]} {m[9]} {m[10]} {m[11]}"));
+                sb.AppendLine(string.Create(CultureInfo.InvariantCulture, $"{m[12]} {m[13]} {m[14]} {m[15]}"));
+            }
+
+            sb.AppendLine("%%header_end");
+            headerBytes = Encoding.ASCII.GetBytes(sb.ToString());
+        }
+        ms.Write(headerBytes);
+
+        int maskSize = (numRows + 7) / 8;
+        bool isDouble = (properties & 0x02) != 0;
+        bool hasIntensity = (properties & 0x04) != 0;
+        bool hasColors = (properties & 0x08) != 0;
+
+        List<byte[]> columnBlocks = [];
+        long[] colOffsets = new long[numCols];
+
+        long tableStartOffset = ms.Position;
+        long tableSize = (long)numCols * 8;
+        long currentDataOffset = tableStartOffset + tableSize;
+
+        int pointIdx = 0;
+        Span<byte> recordBuf = stackalloc byte[32];
+
+        for (int c = 0; c < numCols; c++)
+        {
+            colOffsets[c] = corruptOffsets ? (c == 0 ? 0 : currentDataOffset) : currentDataOffset;
+
+            byte[] mask = new byte[maskSize];
+            using var colDataMs = new MemoryStream();
+
+            for (int r = 0; r < numRows; r++)
+            {
+                var pt = points.Count > 0 ? points[pointIdx % points.Count] : new PtgSamplePoint(0, 0, 0);
+                pointIdx++;
+
+                if (pt.IsValid)
+                {
+                    int bIdx = r >> 3;
+                    int bit = 7 - (r & 7);
+                    mask[bIdx] |= (byte)(1 << bit);
+
+                    int recPos = 0;
+
+                    if (isDouble)
+                    {
+                        BinaryPrimitives.WriteDoubleLittleEndian(recordBuf[recPos..], pt.X);
+                        BinaryPrimitives.WriteDoubleLittleEndian(recordBuf[(recPos + 8)..], pt.Y);
+                        BinaryPrimitives.WriteDoubleLittleEndian(recordBuf[(recPos + 16)..], pt.Z);
+                        recPos += 24;
+                    }
+                    else
+                    {
+                        BinaryPrimitives.WriteSingleLittleEndian(recordBuf[recPos..], (float)pt.X);
+                        BinaryPrimitives.WriteSingleLittleEndian(recordBuf[(recPos + 4)..], (float)pt.Y);
+                        BinaryPrimitives.WriteSingleLittleEndian(recordBuf[(recPos + 8)..], (float)pt.Z);
+                        recPos += 12;
+                    }
+
+                    if (hasIntensity)
+                    {
+                        BinaryPrimitives.WriteSingleLittleEndian(recordBuf[recPos..], pt.Intensity ?? 0f);
+                        recPos += 4;
+                    }
+
+                    if (hasColors)
+                    {
+                        recordBuf[recPos] = pt.Color?.R ?? 255;
+                        recordBuf[recPos + 1] = pt.Color?.G ?? 255;
+                        recordBuf[recPos + 2] = pt.Color?.B ?? 255;
+                        recPos += 3;
+                    }
+
+                    colDataMs.Write(recordBuf[..recPos]);
+                }
+            }
+
+            byte[] colBlock = new byte[maskSize + colDataMs.Length];
+            Buffer.BlockCopy(mask, 0, colBlock, 0, maskSize);
+            byte[] ptBytes = colDataMs.ToArray();
+            Buffer.BlockCopy(ptBytes, 0, colBlock, maskSize, ptBytes.Length);
+
+            columnBlocks.Add(colBlock);
+            currentDataOffset += colBlock.Length;
+        }
+
+        Span<byte> offsetBuf = stackalloc byte[8];
+        for (int c = 0; c < numCols; c++)
+        {
+            BinaryPrimitives.WriteInt64LittleEndian(offsetBuf, colOffsets[c]);
+            ms.Write(offsetBuf);
+        }
+
+        foreach (var block in columnBlocks)
+        {
+            ms.Write(block);
+        }
+
+        return ms.ToArray();
+    }
+
+    public static byte[] CreateSyntheticPtgIndex(
+        IEnumerable<string> scanRelativePaths,
+        string? headerLine = "PTG index file")
+    {
+        var sb = new StringBuilder();
+        if (headerLine != null)
+        {
+            sb.AppendLine(headerLine);
+            sb.AppendLine("--------------");
+        }
+        foreach (var path in scanRelativePaths)
+        {
+            sb.AppendLine(path);
+        }
+        return Encoding.UTF8.GetBytes(sb.ToString());
+    }
 }

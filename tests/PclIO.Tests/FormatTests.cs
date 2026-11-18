@@ -11,6 +11,7 @@ using PclIO.Formats.Pcd;
 using PclIO.Formats.PinPoint;
 using PclIO.Formats.Ply;
 using PclIO.Formats.Potree;
+using PclIO.Formats.Ptg;
 using PclIO.Formats.Pts;
 using PclIO.Formats.Ptx;
 using PclIO.Formats.Recap;
@@ -6034,5 +6035,304 @@ public sealed class FormatTests
 
         using var doc = EptDocument.Open(eptPath);
         Assert.Throws<InvalidDataException>(() => doc.ReadAllPoints().ToList());
+    }
+
+    [Fact]
+    public void Read_Ptg_Binary_Float_With_Intensity_And_Color()
+    {
+        using var dir = new TempDirectory();
+        var points = new[]
+        {
+            new SyntheticFixtures.PtgSamplePoint(1.25, 2.5, 3.75, 0.5f, new PclColor(10, 20, 30)),
+            new SyntheticFixtures.PtgSamplePoint(4.0, 5.0, 6.0, 0.8f, new PclColor(100, 150, 200)),
+        };
+        byte[] ptgBytes = SyntheticFixtures.CreateSyntheticPtgBinary(
+            numCols: 2, numRows: 1, properties: 0x01 | 0x04 | 0x08, points: points, scanName: "StationA");
+
+        string path = dir.Write("scan.ptg", ptgBytes);
+        using var doc = PtgDocument.Open(path);
+
+        Assert.Equal(PclFileKind.LeicaPtg, doc.Kind);
+        Assert.Single(doc.Scans);
+        var scan = (PtgScan)doc.Scans[0];
+        Assert.Equal("StationA", scan.Name);
+        Assert.Equal(2, scan.Columns);
+        Assert.Equal(1, scan.Rows);
+        Assert.Equal(2, scan.GridSize);
+        Assert.Equal(2, scan.PointCount);
+        Assert.True(scan.HasColors);
+        Assert.True(scan.HasIntensities);
+
+        var readPts = scan.ReadPoints().ToList();
+        Assert.Equal(2, readPts.Count);
+
+        Assert.Equal(1.25, readPts[0].X, 3);
+        Assert.Equal(2.5, readPts[0].Y, 3);
+        Assert.Equal(3.75, readPts[0].Z, 3);
+        Assert.Equal(0.5f, readPts[0].Intensity);
+        Assert.Equal(new PclColor(10, 20, 30), readPts[0].Color);
+        Assert.Equal(0UL, readPts[0].Index);
+
+        Assert.Equal(4.0, readPts[1].X, 3);
+        Assert.Equal(5.0, readPts[1].Y, 3);
+        Assert.Equal(6.0, readPts[1].Z, 3);
+        Assert.Equal(0.8f, readPts[1].Intensity);
+        Assert.Equal(new PclColor(100, 150, 200), readPts[1].Color);
+        Assert.Equal(1UL, readPts[1].Index);
+    }
+
+    [Fact]
+    public void Read_Ptg_Binary_Double_Coordinates()
+    {
+        using var dir = new TempDirectory();
+        var points = new[]
+        {
+            new SyntheticFixtures.PtgSamplePoint(1234567.89012345, -987654.32109876, 5555.55555555),
+        };
+        byte[] ptgBytes = SyntheticFixtures.CreateSyntheticPtgBinary(
+            numCols: 1, numRows: 1, properties: 0x02, points: points);
+
+        string path = dir.Write("double.ptg", ptgBytes);
+        using var doc = PtgDocument.Open(path);
+
+        var scan = (PtgScan)doc.Scans[0];
+        Assert.False(scan.HasColors);
+        Assert.False(scan.HasIntensities);
+        Assert.Equal("double", scan.Properties["CoordinateType"]);
+
+        var pt = Assert.Single(scan.ReadPoints());
+        Assert.Equal(1234567.89012345, pt.X, 8);
+        Assert.Equal(-987654.32109876, pt.Y, 8);
+        Assert.Equal(5555.55555555, pt.Z, 8);
+        Assert.Null(pt.Intensity);
+        Assert.Null(pt.Color);
+    }
+
+    [Fact]
+    public void Read_Ptg_Binary_With_Missing_Returns()
+    {
+        using var dir = new TempDirectory();
+        // 2 cols x 2 rows = 4 cells; row 1 of col 0 and row 0 of col 1 are missing
+        var points = new[]
+        {
+            new SyntheticFixtures.PtgSamplePoint(1, 2, 3, IsValid: true),
+            new SyntheticFixtures.PtgSamplePoint(0, 0, 0, IsValid: false),
+            new SyntheticFixtures.PtgSamplePoint(0, 0, 0, IsValid: false),
+            new SyntheticFixtures.PtgSamplePoint(4, 5, 6, IsValid: true),
+        };
+        byte[] ptgBytes = SyntheticFixtures.CreateSyntheticPtgBinary(
+            numCols: 2, numRows: 2, properties: 0x01, points: points);
+
+        string path = dir.Write("missing.ptg", ptgBytes);
+        using var doc = PtgDocument.Open(path);
+        var scan = doc.Scans[0];
+
+        Assert.Equal(2, scan.PointCount);
+        var readPts = scan.ReadPoints().ToList();
+        Assert.Equal(2, readPts.Count);
+        Assert.Equal(1, readPts[0].X);
+        Assert.Equal(4, readPts[1].X);
+    }
+
+    [Fact]
+    public void Read_Ptg_Binary_With_Transform()
+    {
+        using var dir = new TempDirectory();
+        var points = new[] { new SyntheticFixtures.PtgSamplePoint(1, 2, 3) };
+        double[] matrix =
+        [
+            1, 0, 0, 10,
+            0, 1, 0, 20,
+            0, 0, 1, 30,
+            0, 0, 0, 1
+        ];
+        byte[] ptgBytes = SyntheticFixtures.CreateSyntheticPtgBinary(
+            numCols: 1, numRows: 1, properties: 0x01, points: points, transformMatrix: matrix);
+
+        string path = dir.Write("transformed.ptg", ptgBytes);
+        using var doc = PtgDocument.Open(path);
+        var scan = doc.Scans[0];
+
+        // ApplyTransform = true (default)
+        var ptTransformed = Assert.Single(scan.ReadPoints());
+        Assert.Equal(11, ptTransformed.X, 3);
+        Assert.Equal(22, ptTransformed.Y, 3);
+        Assert.Equal(33, ptTransformed.Z, 3);
+
+        // ApplyTransform = false
+        var ptRaw = Assert.Single(scan.ReadPoints(new PclReadOptions { ApplyTransform = false }));
+        Assert.Equal(1, ptRaw.X, 3);
+        Assert.Equal(2, ptRaw.Y, 3);
+        Assert.Equal(3, ptRaw.Z, 3);
+    }
+
+    [Fact]
+    public void Read_Ptg_Binary_Subsampling_And_MaxPoints()
+    {
+        using var dir = new TempDirectory();
+        var points = new[]
+        {
+            new SyntheticFixtures.PtgSamplePoint(1, 0, 0),
+            new SyntheticFixtures.PtgSamplePoint(2, 0, 0),
+            new SyntheticFixtures.PtgSamplePoint(3, 0, 0),
+            new SyntheticFixtures.PtgSamplePoint(4, 0, 0),
+        };
+        byte[] ptgBytes = SyntheticFixtures.CreateSyntheticPtgBinary(
+            numCols: 4, numRows: 1, properties: 0x01, points: points);
+
+        string path = dir.Write("options.ptg", ptgBytes);
+        using var doc = PtgDocument.Open(path);
+        var scan = doc.Scans[0];
+
+        // MaxPoints
+        var limited = scan.ReadPoints(new PclReadOptions { MaxPoints = 2 }).ToList();
+        Assert.Equal(2, limited.Count);
+        Assert.Equal(1, limited[0].X);
+        Assert.Equal(2, limited[1].X);
+
+        // SubsampleStep
+        var subsampled = scan.ReadPoints(new PclReadOptions { SubsampleStep = 2 }).ToList();
+        Assert.Equal(2, subsampled.Count);
+        Assert.Equal(1, subsampled[0].X);
+        Assert.Equal(3, subsampled[1].X);
+    }
+
+    [Fact]
+    public void Read_Ptg_Index_MultiScan()
+    {
+        using var dir = new TempDirectory();
+        byte[] ptg1 = SyntheticFixtures.CreateSyntheticPtgBinary(
+            numCols: 2, numRows: 1, properties: 0x01,
+            points: [new(1, 1, 1), new(2, 2, 2)], scanName: "ScanOne");
+        byte[] ptg2 = SyntheticFixtures.CreateSyntheticPtgBinary(
+            numCols: 1, numRows: 1, properties: 0x01,
+            points: [new(3, 3, 3)], scanName: "ScanTwo");
+
+        string scanFolder = Path.Combine(dir.Root, "Scans");
+        Directory.CreateDirectory(scanFolder);
+        File.WriteAllBytes(Path.Combine(scanFolder, "scan1.ptg"), ptg1);
+        File.WriteAllBytes(Path.Combine(scanFolder, "scan2.ptg"), ptg2);
+
+        byte[] idxBytes = SyntheticFixtures.CreateSyntheticPtgIndex(
+            [@"Scans\scan1.ptg", @"Scans\scan2.ptg"]);
+        string indexPath = dir.Write("project.ptg", idxBytes);
+
+        using var doc = PtgDocument.Open(indexPath);
+        Assert.Equal(2, doc.Scans.Count);
+        Assert.Equal(3, doc.TotalPointCount);
+
+        Assert.Equal("ScanOne", doc.Scans[0].Name);
+        Assert.Equal(2, doc.Scans[0].PointCount);
+
+        Assert.Equal("ScanTwo", doc.Scans[1].Name);
+        Assert.Equal(1, doc.Scans[1].PointCount);
+
+        var allPts = doc.ReadAllPoints().ToList();
+        Assert.Equal(3, allPts.Count);
+        Assert.Equal(1, allPts[0].X);
+        Assert.Equal(2, allPts[1].X);
+        Assert.Equal(3, allPts[2].X);
+    }
+
+    [Fact]
+    public void Read_Ptg_Index_Path_Traversal_Rejected()
+    {
+        using var dir = new TempDirectory();
+        byte[] idxBytes = SyntheticFixtures.CreateSyntheticPtgIndex(["../../outside.ptg"]);
+        string indexPath = dir.Write("escape.ptg", idxBytes);
+
+        Assert.Throws<InvalidDataException>(() => PtgDocument.Open(indexPath));
+    }
+
+    [Fact]
+    public void Ptg_Rejects_Corrupt_Magic_Or_Signature()
+    {
+        using var dir = new TempDirectory();
+        byte[] corruptMagic = SyntheticFixtures.CreateSyntheticPtgBinary(corruptMagic: true);
+        string path = dir.Write("corrupt.ptg", corruptMagic);
+
+        Assert.Throws<InvalidDataException>(() => PtgScan.Create(path, "scan-0"));
+    }
+
+    [Fact]
+    public void Ptg_Rejects_Missing_Header_End()
+    {
+        using var dir = new TempDirectory();
+        string customHeader = "%%header_begin\nNumRows 1\nNumCols 1\n%%properties 1\n";
+        byte[] badHeader = SyntheticFixtures.CreateSyntheticPtgBinary(customHeader: customHeader);
+        string path = dir.Write("no_end.ptg", badHeader);
+
+        Assert.Throws<InvalidDataException>(() => PtgScan.Create(path, "scan-0"));
+    }
+
+    [Fact]
+    public void Ptg_Rejects_Missing_Or_Invalid_Dimensions()
+    {
+        using var dir = new TempDirectory();
+        // Missing NumRows
+        string noRows = "%%header_begin\nNumCols 1\n%%properties 1\n%%header_end\n";
+        string path1 = dir.Write("no_rows.ptg", SyntheticFixtures.CreateSyntheticPtgBinary(customHeader: noRows));
+        Assert.Throws<InvalidDataException>(() => PtgScan.Create(path1, "scan-0"));
+
+        // Zero or negative rows
+        string zeroRows = "%%header_begin\nNumRows 0\nNumCols 1\n%%properties 1\n%%header_end\n";
+        string path2 = dir.Write("zero_rows.ptg", SyntheticFixtures.CreateSyntheticPtgBinary(customHeader: zeroRows));
+        Assert.Throws<InvalidDataException>(() => PtgScan.Create(path2, "scan-0"));
+
+        // Oversized dimensions
+        string huge = "%%header_begin\nNumRows 200000\nNumCols 1\n%%properties 1\n%%header_end\n";
+        string path3 = dir.Write("huge.ptg", SyntheticFixtures.CreateSyntheticPtgBinary(customHeader: huge));
+        Assert.Throws<InvalidDataException>(() => PtgScan.Create(path3, "scan-0"));
+    }
+
+    [Fact]
+    public void Ptg_Rejects_Invalid_Properties()
+    {
+        using var dir = new TempDirectory();
+        // Both float (0x1) and double (0x2)
+        string both = "%%header_begin\nNumRows 1\nNumCols 1\n%%properties 3\n%%header_end\n";
+        string path1 = dir.Write("both.ptg", SyntheticFixtures.CreateSyntheticPtgBinary(customHeader: both));
+        Assert.Throws<InvalidDataException>(() => PtgScan.Create(path1, "scan-0"));
+
+        // Neither float nor double (only intensity 0x4)
+        string neither = "%%header_begin\nNumRows 1\nNumCols 1\n%%properties 4\n%%header_end\n";
+        string path2 = dir.Write("neither.ptg", SyntheticFixtures.CreateSyntheticPtgBinary(customHeader: neither));
+        Assert.Throws<InvalidDataException>(() => PtgScan.Create(path2, "scan-0"));
+
+        // Unsupported property bits
+        string unsupported = "%%header_begin\nNumRows 1\nNumCols 1\n%%properties 0x21\n%%header_end\n";
+        string path3 = dir.Write("unsupported.ptg", SyntheticFixtures.CreateSyntheticPtgBinary(customHeader: unsupported));
+        Assert.Throws<InvalidDataException>(() => PtgScan.Create(path3, "scan-0"));
+    }
+
+    [Fact]
+    public void Ptg_Rejects_Corrupt_Offsets_Or_Truncated_Data()
+    {
+        using var dir = new TempDirectory();
+        // Corrupt offset (points to offset 0)
+        byte[] badOffset = SyntheticFixtures.CreateSyntheticPtgBinary(corruptOffsets: true);
+        string path1 = dir.Write("bad_offset.ptg", badOffset);
+        Assert.Throws<InvalidDataException>(() => PtgScan.Create(path1, "scan-0"));
+
+        // Truncated data
+        byte[] normal = SyntheticFixtures.CreateSyntheticPtgBinary();
+        byte[] truncated = normal[..(normal.Length - 10)];
+        string path2 = dir.Write("truncated.ptg", truncated);
+        Assert.Throws<InvalidDataException>(() => PtgScan.Create(path2, "scan-0"));
+    }
+
+    [Fact]
+    public void Ptg_Index_Rejects_Empty_References_Or_Missing_Files()
+    {
+        using var dir = new TempDirectory();
+        // Empty index
+        byte[] emptyIdx = SyntheticFixtures.CreateSyntheticPtgIndex([]);
+        string emptyPath = dir.Write("empty.ptg", emptyIdx);
+        Assert.Throws<InvalidDataException>(() => PtgDocument.Open(emptyPath));
+
+        // Missing referenced scan
+        byte[] missingScanIdx = SyntheticFixtures.CreateSyntheticPtgIndex(["nonexistent.ptg"]);
+        string missingPath = dir.Write("missing_ref.ptg", missingScanIdx);
+        Assert.Throws<FileNotFoundException>(() => PtgDocument.Open(missingPath));
     }
 }

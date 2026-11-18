@@ -65,4 +65,7 @@ public enum PclFileKind
 
     /// <summary>Entwine Point Tile dataset (ept.json).</summary>
     Ept = 20,
+
+    /// <summary>Leica gridded point cloud (.ptg).</summary>
+    LeicaPtg = 21,
 }

@@ -491,6 +491,50 @@ public sealed class KindDetectionTests
         string badEptFile = eptDir.WriteText("sub/ept.json", "{}");
         Assert.Equal(PclFileKind.Unknown, PclFile.DetectKind(badEptFile));
         Assert.Equal(PclFileKind.Unknown, PclFile.DetectKind(Path.GetDirectoryName(badEptFile)!));
+
+        // PTG binary and index
+        using var ptgDir = new TempDirectory();
+        string ptgBin = ptgDir.Write("scan.ptg", SyntheticFixtures.CreateSyntheticPtgBinary());
+        Assert.Equal(PclFileKind.LeicaPtg, PclFile.DetectKind(ptgBin));
+        string ptgIdx = ptgDir.Write("index.ptg", SyntheticFixtures.CreateSyntheticPtgIndex(["scan.ptg"]));
+        Assert.Equal(PclFileKind.LeicaPtg, PclFile.DetectKind(ptgIdx));
+        string badPtg = ptgDir.WriteText("bad.ptg", "Not a ptg file");
+        Assert.Equal(PclFileKind.Unknown, PclFile.DetectKind(badPtg));
+    }
+
+    [Fact]
+    public void Detects_Binary_Ptg_In_Various_Extensions_And_Streams()
+    {
+        byte[] ptgBytes = SyntheticFixtures.CreateSyntheticPtgBinary();
+        Assert.Equal(PclFileKind.LeicaPtg, Detect(ptgBytes, "scan.ptg"));
+        Assert.Equal(PclFileKind.LeicaPtg, Detect(ptgBytes, "scan.dat"));
+        using var ms = new MemoryStream(ptgBytes);
+        Assert.Equal(PclFileKind.LeicaPtg, PclFile.DetectKind(ms));
+    }
+
+    [Fact]
+    public void Detects_Ascii_Ptg_Index_With_Ptg_Extension()
+    {
+        byte[] idxBytes = SyntheticFixtures.CreateSyntheticPtgIndex(["scan1.ptg", "scan2.ptg"]);
+        Assert.Equal(PclFileKind.LeicaPtg, Detect(idxBytes, "project.ptg"));
+        // Without .ptg extension, an index file is not LeicaPtg
+        Assert.NotEqual(PclFileKind.LeicaPtg, Detect(idxBytes, "project.txt"));
+    }
+
+    [Fact]
+    public void Rejects_Invalid_Content_With_Ptg_Extension()
+    {
+        // Corrupt magic
+        byte[] corruptMagic = SyntheticFixtures.CreateSyntheticPtgBinary(corruptMagic: true);
+        Assert.Equal(PclFileKind.Unknown, Detect(corruptMagic, "scan.ptg"));
+
+        // Random binary data
+        byte[] randomBin = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+        Assert.Equal(PclFileKind.Unknown, Detect(randomBin, "random.ptg"));
+
+        // Plain text that is not a PTG index
+        byte[] plainText = "Hello world\nThis is not a ptg"u8.ToArray();
+        Assert.Equal(PclFileKind.Unknown, Detect(plainText, "text.ptg"));
     }
 
     private sealed class NonSeekableStream(byte[] bytes) : MemoryStream(bytes)
