@@ -286,6 +286,13 @@ public sealed class KindDetectionTests
         string bySmf = Path.GetDirectoryName(dir.WriteText("pin2/project.smf", "{}"))!;
         Assert.Equal(PclFileKind.PinPoint, PclFile.DetectKind(bySmf));
 
+        var (eptManifest, _, _, _) = SyntheticFixtures.CreateSyntheticEpt([new(1, 2, 3)]);
+        string eptDir = Path.GetDirectoryName(dir.WriteText("ept_dataset/ept.json", eptManifest))!;
+        Assert.Equal(PclFileKind.Ept, PclFile.DetectKind(eptDir));
+
+        string fakeEptDir = Path.GetDirectoryName(dir.WriteText("fake_ept/ept.json", "{}"))!;
+        Assert.Equal(PclFileKind.Unknown, PclFile.DetectKind(fakeEptDir));
+
         string empty = dir.PathOf("empty");
         Directory.CreateDirectory(empty);
         Assert.Equal(PclFileKind.Unknown, PclFile.DetectKind(empty));
@@ -428,6 +435,29 @@ public sealed class KindDetectionTests
         Assert.Equal(PclFileKind.Unknown, Detect("var x = 42;"u8.ToArray(), "cloud.js"));
     }
 
+    [Theory]
+    [InlineData("ept.json")]
+    [InlineData("EPT.JSON")]
+    [InlineData("manifest.json")]
+    public void Detects_Ept_Json_By_Content(string name)
+    {
+        var (manifest, _, _, _) = SyntheticFixtures.CreateSyntheticEpt([new(1, 2, 3)]);
+        Assert.Equal(PclFileKind.Ept, Detect(System.Text.Encoding.UTF8.GetBytes(manifest), name));
+    }
+
+    [Fact]
+    public void Ept_Rejects_Invalid_Manifest()
+    {
+        // Not JSON
+        Assert.Equal(PclFileKind.Unknown, Detect("not json"u8.ToArray(), "ept.json"));
+        // Empty object
+        Assert.Equal(PclFileKind.Unknown, Detect("{}"u8.ToArray(), "ept.json"));
+        // Missing schema
+        Assert.Equal(PclFileKind.Unknown, Detect("{\"bounds\":[0,0,0,1,1,1],\"dataType\":\"binary\"}"u8.ToArray(), "ept.json"));
+        // Wrong data type
+        Assert.Equal(PclFileKind.Unknown, Detect("{\"bounds\":[0,0,0,1,1,1],\"dataType\":\"custom\",\"schema\":[]}"u8.ToArray(), "ept.json"));
+    }
+
     [Fact]
     public void Detects_Files_On_Disk_The_Same_Way()
     {
@@ -451,6 +481,16 @@ public sealed class KindDetectionTests
 
         Assert.Equal(PclFileKind.Potree, PclFile.DetectKind(potreeDir.Root));
         Assert.Equal(PclFileKind.Potree, PclFile.DetectKind(binPath));
+
+        // EPT manifest and directory
+        using var eptDir = new TempDirectory();
+        var (eptJson, _, _, _) = SyntheticFixtures.CreateSyntheticEpt([new(1, 2, 3)]);
+        string eptFile = eptDir.WriteText("ept.json", eptJson);
+        Assert.Equal(PclFileKind.Ept, PclFile.DetectKind(eptFile));
+        Assert.Equal(PclFileKind.Ept, PclFile.DetectKind(eptDir.Root));
+        string badEptFile = eptDir.WriteText("sub/ept.json", "{}");
+        Assert.Equal(PclFileKind.Unknown, PclFile.DetectKind(badEptFile));
+        Assert.Equal(PclFileKind.Unknown, PclFile.DetectKind(Path.GetDirectoryName(badEptFile)!));
     }
 
     private sealed class NonSeekableStream(byte[] bytes) : MemoryStream(bytes)

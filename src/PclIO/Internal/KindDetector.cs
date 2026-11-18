@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.Globalization;
+using System.Text;
 using System.Text.Json;
 
 namespace PclIO.Internal;
@@ -51,11 +52,26 @@ internal static class KindDetector
                 return PclFileKind.Potree;
             }
 
+            string eptPath = Path.Combine(path, "ept.json");
+            if (File.Exists(eptPath))
+            {
+                using var s = File.OpenRead(eptPath);
+                if (IsEptJsonHeader(s, 0, "ept.json"))
+                    return PclFileKind.Ept;
+            }
+
             return PclFileKind.Unknown;
         }
 
         if (!File.Exists(path))
             throw new FileNotFoundException($"Point cloud file not found: {path}", path);
+
+        string filename = Path.GetFileName(path).ToLowerInvariant();
+        if (filename == "ept.json")
+        {
+            using var s = File.OpenRead(path);
+            return IsEptJsonHeader(s, 0, "ept.json") ? PclFileKind.Ept : PclFileKind.Unknown;
+        }
 
         string ext = path.EndsWith(".copc.laz", StringComparison.OrdinalIgnoreCase)
             ? ".copc.laz"
@@ -187,6 +203,10 @@ internal static class KindDetector
         // Potree hierarchy file (.hrc).
         if (IsPotreeHrcHeader(stream, origin, extension))
             return PclFileKind.Potree;
+
+        // Entwine Point Tile dataset manifest (ept.json).
+        if (IsEptJsonHeader(stream, origin, extension))
+            return PclFileKind.Ept;
 
         return PclFileKind.Unknown;
     }
@@ -1143,6 +1163,62 @@ internal static class KindDetector
             }
 
             return true;
+        }
+        catch
+        {
+            return false;
+        }
+        finally
+        {
+            stream.Position = origin;
+        }
+    }
+
+    // Entwine Point Tile manifest (ept.json).
+    private static bool IsEptJsonHeader(Stream stream, long origin, string? extension)
+    {
+        if (extension != null && extension != ".json" && !extension.EndsWith("ept.json", StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        long length = stream.CanSeek ? stream.Length : long.MaxValue;
+        if (length - origin < 10) return false;
+
+        int toRead = (int)Math.Min(65536, length - origin);
+        byte[] buf = new byte[toRead];
+        stream.Position = origin;
+        try
+        {
+            int got = stream.ReadAtLeast(buf, toRead, throwOnEndOfStream: false);
+            if (got < 10) return false;
+
+            int start = 0;
+            if (got >= 3 && buf[0] == 0xEF && buf[1] == 0xBB && buf[2] == 0xBF)
+                start = 3;
+            while (start < got && char.IsWhiteSpace((char)buf[start]))
+                start++;
+
+            if (start >= got || buf[start] != (byte)'{')
+                return false;
+
+            if (length - origin <= toRead)
+            {
+                using var doc = JsonDocument.Parse(buf.AsMemory(start, got - start));
+                var root = doc.RootElement;
+                if (root.ValueKind != JsonValueKind.Object) return false;
+
+                return root.TryGetProperty("bounds", out var bElem) && bElem.ValueKind == JsonValueKind.Array && bElem.GetArrayLength() == 6 &&
+                       root.TryGetProperty("dataType", out var dtElem) && dtElem.ValueKind == JsonValueKind.String &&
+                       dtElem.GetString() is "laszip" or "binary" or "zstandard" &&
+                       root.TryGetProperty("schema", out var sElem) && sElem.ValueKind == JsonValueKind.Array;
+            }
+            else
+            {
+                string text = Encoding.UTF8.GetString(buf, start, got - start);
+                return text.Contains("\"bounds\"") &&
+                       text.Contains("\"dataType\"") &&
+                       (text.Contains("\"laszip\"") || text.Contains("\"binary\"") || text.Contains("\"zstandard\"")) &&
+                       text.Contains("\"schema\"");
+            }
         }
         catch
         {
