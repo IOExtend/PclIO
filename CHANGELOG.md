@@ -62,6 +62,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - LAS files are read (`PclFileKind.Las`): versions 1.0 to 1.4 with point formats 0 to 10, the legacy and the extended
   1.4 point counts, scale and offset, and the coordinate system records when present. GPS time, return numbers, scan
   angles, point source ids, near infrared and waveform packet descriptors are not interpreted.
+- PCD files are read (`PclFileKind.Pcd`): ASCII, binary and binary compressed (LZF, decoded by a decoder of its own)
+  point data with the declared fields, organised and unorganised clouds, and the viewpoint as metadata. Points with
+  non-finite coordinates are not returned.
 - Leica scans read a block range with opt-in parallel decoding: the new `PclReadOptions.Blocks` selects the blocks of the
   scan in file order (per scan) and the new `PclReadOptions.MaxDegreeOfParallelism` (default 1, sequential streaming)
   decodes the selected blocks in parallel, keeping file order, consecutive `Index` values and `MaxPoints`/`SubsampleStep`

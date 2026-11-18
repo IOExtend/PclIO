@@ -43,6 +43,7 @@ The library targets .NET 8 and .NET 10. It is managed code with no dependencies 
 | PinPoint project | `.srf`, `.smf`, or a folder with `ScanProject.json` or `.smf`/`.srf` files | Experimental. The manifest (scan names, ids, poses, counts) is read. Points come from the referenced `.bin` files, in either of two layouts: a table of named channels, or numbered sections with a property table and Snappy-compressed channels, which PclIO decodes itself. Colour, intensity and normals are reported only when the file has that channel; in the second layout positions, colours, intensities, normals (`Normals`, three float32 components per point) and the per-point flags (`FilterBits`, one byte per point) are read, while the grid indices stored beside them are not interpreted, so by default every stored point that passes the plausibility rule below is returned. With `PclReadOptions.ExcludeFilteredPoints` the points with a non-zero flag are not returned. A manifest with a scan position list takes the point count from the manifest, else from the data file; a manifest with a data object list takes it from the data file the object refers to, and every location that shares one file reports its full count, because the shares are not recorded. |
 | EdgeWise | `.c3db`, `.c3ptx` | Experimental. A `.c3db` point database lists the scan clusters and a `.c3ptx` is one cluster file; the cluster files give positions only, as three 16-bit offsets from the cluster centre per point. The scale of the offsets is not stored in the files, so the reader assumes 32768 units = 0.128 m unless the caller states it with `PclReadOptions.EdgeWiseCoordinateScale`. |
 | LAS | `.las` | Points decoded from versions 1.0 to 1.4 with point formats 0 to 10: XYZ with scale and offset, intensity, classification and RGB for the colour formats (2, 3, 5, 7, 8, 10). GPS time, return numbers, scan angles, point source ids, near infrared and waveform packet descriptors are not interpreted; extra bytes past a format's base size are skipped. The extended point counts of 1.4 are used when stated. Coordinate system records name an `EPSG:` code from a GeoTIFF key directory when it holds one, else the OGC WKT when one is stored. |
+| PCD | `.pcd` | Points decoded from the 0.7 header in ASCII, binary and binary compressed (LZF) form: XYZ from x, y and z, colour from packed rgb or rgba, intensity, and normals from normal_x, normal_y and normal_z. Points with non-finite coordinates are not returned. The viewpoint is kept as metadata and not applied. |
 
 ### Format detection
 
@@ -52,7 +53,7 @@ regard to case.
 
 - E57, ReCap scan and Leica files are recognised by their content and accepted with any extension; for Leica, `.lgs` selects the
   older container and any other extension `.lgsx`. EdgeWise files are also recognised by content when the extension is none of its own.
-  A LAS file is recognised by the `LASF` signature with any extension except `.laz`, which shares the signature and stays unknown.
+  A LAS file is recognised by the `LASF` signature with any extension except `.laz`, which shares the signature and stays unknown. A PCD file is recognised by its header structure with any extension.
 - A FARO file must be an OLE2 compound file with the extension `.fls`. A ReCap project must be a ZIP archive with the extension
   `.rcp`. A PinPoint file must be a JSON text file with the extension `.smf` or `.srf`.
 - The extensions `.c3db` and `.c3ptx` select EdgeWise without a content check. A `.c3ptx` file is read as one cluster file and any
@@ -100,7 +101,7 @@ These readers drop data without an error or a warning, so a scan can yield fewer
   skipped, and a block that is not recognised ends the scan. The reader counts what it dropped or skipped and reports it in the
   warnings of the document, so that an incomplete result is visible. With `PclReadOptions.Strict` the read fails instead.
 - EdgeWise: a database node whose point count is 0 is skipped.
-
+- PCD: a point with a NaN or infinite coordinate is not returned.
 ### Limits
 
 A file that exceeds one of these limits, or whose declared sizes and counts do not fit the file, is rejected with
@@ -123,6 +124,7 @@ outside the file is fetched.
 | PinPoint | Manifest 64 MiB and the default nesting depth of `System.Text.Json` (64); 100,000 scans. The parsed manifest needs memory of about 15 times its size, so a manifest at the limit needs about 1 GB. Sectioned data file: at most 16 sections, a property table of at most 1 MiB nested at most 8 levels, copies in a compressed stream at most 8 MiB back with a decoder window of at most 8 MiB per stream; the sections must be contiguous and fill the file, and the `Points`, `RGB8`, `Intensities8`, `Normals` and `FilterBits` streams must decode to exactly 12, 3, 1, 12 and 1 bytes per stored point. |
 | EdgeWise | 1,048,576 characters per database line; 1,000,000 nodes. Patterns that parse a line have a time limit. |
 | LAS | Header of at least 227 bytes (375 for 1.4); at most 4096 variable length records of at most 1 MiB each; point records at most 1 MiB. |
+| PCD | 4096 header lines of at most 1 MiB each; at most 1024 fields with an element count of at most 65536; decompressed binary data at most 1 GiB. |
 
 ## Exporters
 

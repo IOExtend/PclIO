@@ -58,7 +58,18 @@ public sealed class KindDetectionTests
 
     [Fact]
     public void A_Laz_File_Is_Not_Detected_As_Las() =>
-        Assert.Equal(PclFileKind.Unknown, Detect(SyntheticFixtures.CreateSyntheticLas(), "sample.laz"));    [Fact]
+        Assert.Equal(PclFileKind.Unknown, Detect(SyntheticFixtures.CreateSyntheticLas(), "sample.laz"));
+
+    [Theory]
+    [InlineData("sample.pcd")]
+    [InlineData("SAMPLE.PCD")]
+    [InlineData("sample.dat")]
+    public void Detects_Pcd_By_Header_Structure(string name) =>
+        Assert.Equal(PclFileKind.Pcd, Detect(SyntheticFixtures.CreateSyntheticPcd(), name));
+
+    [Fact]
+    public void Pcd_Needs_The_Header_Structure_Not_Just_The_Extension() =>
+        Assert.Equal(PclFileKind.Unknown, Detect("just some text"u8.ToArray(), "sample.pcd"));    [Fact]
     public void Faro_Needs_The_Container_Signature_Not_Just_The_Extension() =>
         Assert.Equal(PclFileKind.Unknown, Detect(new byte[100], "scanner.fls"));
 

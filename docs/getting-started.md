@@ -88,11 +88,12 @@ reading), `NotSupportedException` (unrecognised format or unsupported feature) o
 | PinPoint project | `.srf`, `.smf`, or a folder with `ScanProject.json` or `.smf`/`.srf` files | Experimental; manifest plus point data files in one of two layouts (named channels, or sections with Snappy-compressed channels); a data file in neither layout is not read. |
 | EdgeWise | `.c3db`, `.c3ptx` | Experimental; positions only, with a coordinate scale that is an assumption of the reader. |
 | LAS | `.las` | Versions 1.0 to 1.4 with point formats 0 to 10; positions, intensity, classification and RGB for the colour formats. |
+| PCD | `.pcd` | ASCII, binary and binary compressed (LZF) data; positions, colour, intensity and normals from the declared fields. |
 
 A file is detected from its content, its extension or, for a folder, its layout. E57, ReCap scan and Leica files are recognised
 by content, `.fls` needs an OLE2 compound file, `.rcp` a ZIP archive, `.srf` and `.smf` a JSON text file, `.las` the `LASF`
 signature (a `.laz` file shares it and stays unknown), and `.c3db` and `.c3ptx`
-are decided by extension alone, without a content check. Anything else is `PclFileKind.Unknown`. The rules are in
+are decided by extension alone, without a content check. A `.pcd` file is recognised by its header structure. Anything else is `PclFileKind.Unknown`. The rules are in
 [Public API](public-api.md#format-detection).
 Anything a decoder does not support fails instead of being guessed, apart from the assumptions named in the README (the FARO folder
 record layout, the EdgeWise position scale and the ReCap scan channel flags). The sizes and counts a reader accepts are limited; a
