@@ -1,6 +1,8 @@
 # Third-party notices
 
-PclIO has no third-party runtime components: the published packages depend on no other package, and no third-party source code or binaries are included. The Zstandard and Snappy decoders it needs are its own code, written from the public format specifications (RFC 8878 for Zstandard, including its XXH64 content checksum, and the Snappy format description).
+The PclIO engine has no third-party runtime components: the `PclIO` package depends on no other package, and no third-party source code or binaries are included. The Zstandard and Snappy decoders it needs are its own code, written from the public format specifications (RFC 8878 for Zstandard, including its XXH64 content checksum, and the Snappy format description).
+
+The `PclIO.Scene` adapter depends on [IOScene](https://github.com/IOExtend/IOScene), the neutral scene model of the IOExtend ecosystem, released under the same MIT license by the same author. It is a first-party package, not a third-party component; the command line tool carries it through the adapter.
 
 Development and build-time packages (xunit, xunit.runner.visualstudio, Microsoft.NET.Test.Sdk, Microsoft.SourceLink.GitHub,
 and ZstdSharp.Port, a test-only benchmark reference for the Zstandard decoder) are not part of the published packages.

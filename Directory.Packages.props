@@ -10,6 +10,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- The scene adapter depends on the stable IOScene line; the upper bound keeps out the next breaking line. -->
+    <PackageVersion Include="IOScene" Version="[0.1.0, 0.2.0-0.0)" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- Test-only packages, pinned to exact versions (no floating ranges). -->
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.12.0" />
     <PackageVersion Include="xunit" Version="2.9.3" />

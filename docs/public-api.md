@@ -133,6 +133,17 @@ is empty, rooted, contains invalid characters or resolves outside the folder is 
 Each exporter has an overload with `out long skippedPoints`, the number of points skipped because a coordinate was NaN or infinite.
 Output is culture independent; XYZ and PTS end lines with `\n`, and JSON uses the line ends of the platform. LAS and PTS read the source twice; the others stream it once. Normals are not exported.
 
+## Scene adapter
+
+The `PclIO.Scene` package converts a document into an IOScene `SceneDocument`. It is a separate package so the engine stays a leaf;
+the [scene adapter guide](scene.md) describes the mapping, the diagnostics and the limits.
+
+| Type | Use |
+|---|---|
+| `PclSceneReader` | Static entry point. `Read(path, options)` opens the file with `PclFile.Open` and converts it; `Read(document, options)` converts an opened document. Both return a `PclSceneResult`. |
+| `PclSceneOptions` | `ModelKey` (null uses the file name), `MaxPoints` (default 1,000,000, null for no limit), `SubsampleStep` (default 1) and `MetresPerUnit` (default 1.0). A negative limit, a step below 1 or a non-positive or non-finite factor throws `ArgumentOutOfRangeException`. |
+| `PclSceneResult` | `Document` (the `SceneDocument`), `Diagnostics` (what the conversion left out), `ScanCount`, `ScansWithPoints`, `PointCount` and `MetresPerUnit`. |
+
 ## Command line
 
 `PclIO.Cli` installs the tool `pclio`. The `Program` class exposes `Run(args, stdout, stderr)` and the exit-code constants

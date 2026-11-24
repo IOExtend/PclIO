@@ -2414,13 +2414,21 @@ internal static class SyntheticFixtures
             ["octreeDir"] = "data",
             ["boundingBox"] = new Dictionary<string, double>
             {
-                ["lx"] = offset.X, ["ly"] = offset.Y, ["lz"] = offset.Z,
-                ["ux"] = offset.X + 100, ["uy"] = offset.Y + 100, ["uz"] = offset.Z + 100
+                ["lx"] = offset.X,
+                ["ly"] = offset.Y,
+                ["lz"] = offset.Z,
+                ["ux"] = offset.X + 100,
+                ["uy"] = offset.Y + 100,
+                ["uz"] = offset.Z + 100
             },
             ["tightBoundingBox"] = new Dictionary<string, double>
             {
-                ["lx"] = minX, ["ly"] = minY, ["lz"] = minZ,
-                ["ux"] = maxX, ["uy"] = maxY, ["uz"] = maxZ
+                ["lx"] = minX,
+                ["ly"] = minY,
+                ["lz"] = minZ,
+                ["ux"] = maxX,
+                ["uy"] = maxY,
+                ["uz"] = maxZ
             },
             ["pointAttributes"] = attrs,
             ["spacing"] = 0.05,

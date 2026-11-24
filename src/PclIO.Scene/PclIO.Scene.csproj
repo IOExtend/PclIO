@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <Description>Turns a point cloud read by PclIO into an IOScene scene document in metres: one element per scan, non-indexed point geometry with normals, and the scan properties as text.</Description>
+    <PackageTags>pointcloud;lidar;laser-scanning;ioscene;scene;viewer</PackageTags>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <RootNamespace>PclIO.Scene</RootNamespace>
+    <AssemblyName>PclIO.Scene</AssemblyName>
+    <PackageId>PclIO.Scene</PackageId>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <!-- IOScene is referenced by a range whose upper bound is a prerelease ([0.N.0, 0.N+1.0-0.0)); NU5104 is expected. -->
+    <NoWarn>$(NoWarn);NU5104</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\PclIO\PclIO.csproj" />
+    <PackageReference Include="IOScene" />
+  </ItemGroup>
+
+  <!-- The shared pack metadata expects icon.png beside the project; the adapter ships the engine's icon. -->
+  <ItemGroup>
+    <None Remove="$(MSBuildProjectDirectory)/icon.png" />
+    <None Include="..\PclIO\icon.png" Pack="true" PackagePath="/" Visible="false" />
+  </ItemGroup>
+
+  <!-- Adapter and engine ship on one tag, so the packed engine dependency is exact [X.Y.Z], not >=; a mix gives NU1608. -->
+  <Target Name="PinProjectReferencesExactly" AfterTargets="_GetProjectReferenceVersions">
+    <ItemGroup>
+      <_Pinned Include="@(_ProjectReferencesWithVersions)"><ProjectVersion>[%(_ProjectReferencesWithVersions.ProjectVersion)]</ProjectVersion></_Pinned>
+      <_ProjectReferencesWithVersions Remove="@(_ProjectReferencesWithVersions)" />
+      <_ProjectReferencesWithVersions Include="@(_Pinned)" />
+    </ItemGroup>
+  </Target>
+
+</Project>

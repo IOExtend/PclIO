@@ -524,24 +524,24 @@ public sealed class PntsScan : PclScan
         switch (_colorFormat)
         {
             case ColorFormat.Rgba:
-            {
-                int offset = _colOffset + (int)(index * 4);
-                color = new PclColor(ftBin[offset], ftBin[offset + 1], ftBin[offset + 2], ftBin[offset + 3]);
-                break;
-            }
+                {
+                    int offset = _colOffset + (int)(index * 4);
+                    color = new PclColor(ftBin[offset], ftBin[offset + 1], ftBin[offset + 2], ftBin[offset + 3]);
+                    break;
+                }
             case ColorFormat.Rgb:
-            {
-                int offset = _colOffset + (int)(index * 3);
-                color = new PclColor(ftBin[offset], ftBin[offset + 1], ftBin[offset + 2], 255);
-                break;
-            }
+                {
+                    int offset = _colOffset + (int)(index * 3);
+                    color = new PclColor(ftBin[offset], ftBin[offset + 1], ftBin[offset + 2], 255);
+                    break;
+                }
             case ColorFormat.Rgb565:
-            {
-                int offset = _colOffset + (int)(index * 2);
-                ushort c = BinaryPrimitives.ReadUInt16LittleEndian(ftBin.Slice(offset, 2));
-                color = DecodeRgb565(c);
-                break;
-            }
+                {
+                    int offset = _colOffset + (int)(index * 2);
+                    ushort c = BinaryPrimitives.ReadUInt16LittleEndian(ftBin.Slice(offset, 2));
+                    color = DecodeRgb565(c);
+                    break;
+                }
             case ColorFormat.ConstantRgba:
                 color = _constantColor;
                 break;
@@ -552,24 +552,24 @@ public sealed class PntsScan : PclScan
         switch (_normalFormat)
         {
             case NormalFormat.Vec3Float:
-            {
-                int offset = _normOffset + (int)(index * 12);
-                float nx = BinaryPrimitives.ReadSingleLittleEndian(ftBin.Slice(offset, 4));
-                float ny = BinaryPrimitives.ReadSingleLittleEndian(ftBin.Slice(offset + 4, 4));
-                float nz = BinaryPrimitives.ReadSingleLittleEndian(ftBin.Slice(offset + 8, 4));
-                if (float.IsFinite(nx) && float.IsFinite(ny) && float.IsFinite(nz))
                 {
-                    double len = Math.Sqrt(nx * nx + ny * ny + nz * nz);
-                    normal = len > 0 ? new PclVector3(nx / len, ny / len, nz / len) : new PclVector3(nx, ny, nz);
+                    int offset = _normOffset + (int)(index * 12);
+                    float nx = BinaryPrimitives.ReadSingleLittleEndian(ftBin.Slice(offset, 4));
+                    float ny = BinaryPrimitives.ReadSingleLittleEndian(ftBin.Slice(offset + 4, 4));
+                    float nz = BinaryPrimitives.ReadSingleLittleEndian(ftBin.Slice(offset + 8, 4));
+                    if (float.IsFinite(nx) && float.IsFinite(ny) && float.IsFinite(nz))
+                    {
+                        double len = Math.Sqrt(nx * nx + ny * ny + nz * nz);
+                        normal = len > 0 ? new PclVector3(nx / len, ny / len, nz / len) : new PclVector3(nx, ny, nz);
+                    }
+                    break;
                 }
-                break;
-            }
             case NormalFormat.Oct16p:
-            {
-                int offset = _normOffset + (int)(index * 2);
-                normal = DecodeOct16p(ftBin[offset], ftBin[offset + 1]);
-                break;
-            }
+                {
+                    int offset = _normOffset + (int)(index * 2);
+                    normal = DecodeOct16p(ftBin[offset], ftBin[offset + 1]);
+                    break;
+                }
         }
 
         // Intensity

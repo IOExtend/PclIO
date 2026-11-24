@@ -504,33 +504,33 @@ public sealed class GlbScan : PclScan
         switch (desc.ComponentType)
         {
             case 5121: // UNSIGNED_BYTE
-            {
-                byte r = span[0];
-                byte g = span[1];
-                byte b = span[2];
-                byte a = hasAlpha ? span[3] : (byte)255;
-                return new PclColor(r, g, b, a);
-            }
+                {
+                    byte r = span[0];
+                    byte g = span[1];
+                    byte b = span[2];
+                    byte a = hasAlpha ? span[3] : (byte)255;
+                    return new PclColor(r, g, b, a);
+                }
             case 5123: // UNSIGNED_SHORT
-            {
-                ushort r16 = BinaryPrimitives.ReadUInt16LittleEndian(span);
-                ushort g16 = BinaryPrimitives.ReadUInt16LittleEndian(span[2..]);
-                ushort b16 = BinaryPrimitives.ReadUInt16LittleEndian(span[4..]);
-                ushort a16 = hasAlpha ? BinaryPrimitives.ReadUInt16LittleEndian(span[6..]) : (ushort)65535;
-                return new PclColor((byte)(r16 * 255 / 65535), (byte)(g16 * 255 / 65535), (byte)(b16 * 255 / 65535), (byte)(a16 * 255 / 65535));
-            }
+                {
+                    ushort r16 = BinaryPrimitives.ReadUInt16LittleEndian(span);
+                    ushort g16 = BinaryPrimitives.ReadUInt16LittleEndian(span[2..]);
+                    ushort b16 = BinaryPrimitives.ReadUInt16LittleEndian(span[4..]);
+                    ushort a16 = hasAlpha ? BinaryPrimitives.ReadUInt16LittleEndian(span[6..]) : (ushort)65535;
+                    return new PclColor((byte)(r16 * 255 / 65535), (byte)(g16 * 255 / 65535), (byte)(b16 * 255 / 65535), (byte)(a16 * 255 / 65535));
+                }
             case 5126: // FLOAT
-            {
-                float rf = BinaryPrimitives.ReadSingleLittleEndian(span);
-                float gf = BinaryPrimitives.ReadSingleLittleEndian(span[4..]);
-                float bf = BinaryPrimitives.ReadSingleLittleEndian(span[8..]);
-                float af = hasAlpha ? BinaryPrimitives.ReadSingleLittleEndian(span[12..]) : 1.0f;
-                return new PclColor(
-                    (byte)Math.Clamp((int)Math.Round(rf * 255.0f), 0, 255),
-                    (byte)Math.Clamp((int)Math.Round(gf * 255.0f), 0, 255),
-                    (byte)Math.Clamp((int)Math.Round(bf * 255.0f), 0, 255),
-                    (byte)Math.Clamp((int)Math.Round(af * 255.0f), 0, 255));
-            }
+                {
+                    float rf = BinaryPrimitives.ReadSingleLittleEndian(span);
+                    float gf = BinaryPrimitives.ReadSingleLittleEndian(span[4..]);
+                    float bf = BinaryPrimitives.ReadSingleLittleEndian(span[8..]);
+                    float af = hasAlpha ? BinaryPrimitives.ReadSingleLittleEndian(span[12..]) : 1.0f;
+                    return new PclColor(
+                        (byte)Math.Clamp((int)Math.Round(rf * 255.0f), 0, 255),
+                        (byte)Math.Clamp((int)Math.Round(gf * 255.0f), 0, 255),
+                        (byte)Math.Clamp((int)Math.Round(bf * 255.0f), 0, 255),
+                        (byte)Math.Clamp((int)Math.Round(af * 255.0f), 0, 255));
+                }
             default:
                 return new PclColor(255, 255, 255, 255);
         }

@@ -13,14 +13,16 @@ PclIO is a .NET library and command line tool that reads point cloud files from 
 - Detects the format of a file or folder from its content, extension or layout.
 - Opens a file as a document with its scans, bounds, transforms, metadata and warnings, and streams the points with a point limit, a subsampling step and an optional scan transform.
 - Exports to ASPRS LAS 1.2 (point format 2), ASCII XYZ, ASCII PTS and JSON.
+- Converts a document into an IOScene scene for viewers and coordination tools (`PclIO.Scene`).
 - Ships the command line tool `pclio` with `info`, `scans`, `points` and `export`.
 
-The library targets .NET 8 and .NET 10, is managed code with no dependencies on other packages, never writes to the console and never contacts the network. It is tested on Windows, Linux and macOS. PclIO is a preview (0.x).
+The library targets .NET 8 and .NET 10, is managed code with no dependencies on other packages, never writes to the console and never contacts the network. The scene adapter depends on the neutral IOScene contract; the engine itself stays a leaf. It is tested on Windows, Linux and macOS. PclIO is a preview (0.x).
 
 ## Where to go next
 
 - [Getting started](getting-started.md): install the tool or the package, the supported formats, exit codes and a first export.
 - [Public API](public-api.md): the supported surface of the library.
+- [Scene adapter](scene.md): a point cloud as an IOScene scene, its diagnostics and limits.
 - [Dependencies](dependencies.md): packages and build settings.
 - [Private test fixtures](test-fixtures.md): how tests that need real scan files find them and when they are skipped.
 - [API reference](api/PclIO.yml): every public type, generated from the XML documentation.

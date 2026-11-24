@@ -26,6 +26,7 @@ jobs:
             8.0.x
       - run: dotnet restore PclIO.slnx
       - run: dotnet build PclIO.slnx -c Release --no-restore
+      - run: dotnet format PclIO.slnx --verify-no-changes --severity error --no-restore
       - run: dotnet test PclIO.slnx -c Release --no-build
       - run: dotnet pack PclIO.slnx -c Release --no-build -o artifacts
       - uses: actions/upload-artifact@v7

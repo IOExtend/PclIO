@@ -189,17 +189,17 @@ public sealed class PotreeScan : PclScan
                     normal = DecodeOct16p(record[off], record[off + 1]);
                     break;
                 case NormalEncoding.Floats:
-                {
-                    float nx = BinaryPrimitives.ReadSingleLittleEndian(record.Slice(off, 4));
-                    float ny = BinaryPrimitives.ReadSingleLittleEndian(record.Slice(off + 4, 4));
-                    float nz = BinaryPrimitives.ReadSingleLittleEndian(record.Slice(off + 8, 4));
-                    if (float.IsFinite(nx) && float.IsFinite(ny) && float.IsFinite(nz))
                     {
-                        double len = Math.Sqrt(nx * nx + ny * ny + nz * nz);
-                        normal = len > 0 ? new PclVector3(nx / len, ny / len, nz / len) : new PclVector3(nx, ny, nz);
+                        float nx = BinaryPrimitives.ReadSingleLittleEndian(record.Slice(off, 4));
+                        float ny = BinaryPrimitives.ReadSingleLittleEndian(record.Slice(off + 4, 4));
+                        float nz = BinaryPrimitives.ReadSingleLittleEndian(record.Slice(off + 8, 4));
+                        if (float.IsFinite(nx) && float.IsFinite(ny) && float.IsFinite(nz))
+                        {
+                            double len = Math.Sqrt(nx * nx + ny * ny + nz * nz);
+                            normal = len > 0 ? new PclVector3(nx / len, ny / len, nz / len) : new PclVector3(nx, ny, nz);
+                        }
+                        break;
                     }
-                    break;
-                }
             }
         }
 
