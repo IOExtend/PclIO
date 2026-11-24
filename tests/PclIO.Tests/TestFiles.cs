@@ -3,8 +3,8 @@ namespace PclIO.Tests;
 /// <summary>Where the tests find private scan files that are not part of the repository. The folder is named by the
 /// environment variable PCLIO_TEST_FILES; when it is not set, a folder test_files in the repository root (or in an ancestor of
 /// the test binary) is used. A fixture is found by its extension, anywhere up to three folder levels below the root, so no file
-/// name is ever written into a test. A test that needs a file which is not there is reported as skipped with the reason,
-/// never passed.</summary>
+/// name is ever written into a test. Temporary and scratch artifacts below the root are never fixtures. A test that needs a
+/// file which is not there is reported as skipped with the reason, never passed.</summary>
 internal static class TestFiles
 {
     public const string EnvironmentVariable = "PCLIO_TEST_FILES";
@@ -49,12 +49,33 @@ internal static class TestFiles
                         ? f.EndsWith("ept.json", StringComparison.OrdinalIgnoreCase)
                         : string.Equals(Path.GetExtension(f), extension, StringComparison.OrdinalIgnoreCase))
                 .Where(f => !string.Equals(extension, ".laz", StringComparison.OrdinalIgnoreCase) || !f.EndsWith(".copc.laz", StringComparison.OrdinalIgnoreCase))
+                .Where(f => !IsTemporaryArtifact(f, root))
                 .Order(StringComparer.Ordinal)
                 .FirstOrDefault();
             if (found != null) return found;
         }
 
         return null;
+    }
+
+    /// <summary>Temporary and scratch artifacts are never fixtures: a mirrored Temp folder holds truncated downloads and
+    /// crafted fuzz files that a reader is right to reject. Only the part of the path below the search root is inspected, so a
+    /// corpus the caller places under a temporary folder still works.</summary>
+    private static bool IsTemporaryArtifact(string path, string root)
+    {
+        if (Path.GetFileName(path).Contains(".tmp.", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        for (var directory = Path.GetDirectoryName(path);
+            directory != null && directory.Length > root.Length;
+            directory = Path.GetDirectoryName(directory))
+        {
+            string name = Path.GetFileName(directory);
+            if (name.Equals("temp", StringComparison.OrdinalIgnoreCase) || name.Equals("tmp", StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        return false;
     }
 
     /// <summary>The path of a fixture with this extension, or a <see cref="SkipException"/> when none is available.</summary>
