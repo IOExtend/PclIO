@@ -55,8 +55,11 @@ public sealed class PtgScan : PclScan
         _properties["HasColors"] = header.HasColors ? "true" : "false";
 
         if (!string.IsNullOrEmpty(header.Version)) _properties["Version"] = header.Version;
+        if (!string.IsNullOrEmpty(header.ScannerName)) _properties["ScannerName"] = header.ScannerName;
         if (!string.IsNullOrEmpty(header.ScannerModel)) _properties["ScannerModel"] = header.ScannerModel;
         if (!string.IsNullOrEmpty(header.SoftwareName)) _properties["SoftwareName"] = header.SoftwareName;
+        if (!string.IsNullOrEmpty(header.CreationDate)) _properties["CreationDate"] = header.CreationDate;
+        if (!string.IsNullOrEmpty(header.CreationTime)) _properties["CreationTime"] = header.CreationTime;
     }
 
     internal static PtgScan Create(string filePath, string id, string? defaultName = null)

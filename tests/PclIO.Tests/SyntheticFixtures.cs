@@ -2780,6 +2780,10 @@ internal static class SyntheticFixtures
         new(7.0, 8.0, 9.0, 0.2f, new PclColor(100, 150, 200)),
     ];
 
+    /// <summary>Creates a synthetic Leica PTG binary scan file. The header is a sequence of TLV records
+    /// (see <see cref="PtgTlvRecord"/>); <paramref name="transformMatrix"/> is in the PTG row-vector convention
+    /// with the translation in the last row. <paramref name="customHeader"/> replaces the whole record block
+    /// after the 8-byte signature, for malformed-input tests.</summary>
     public static byte[] CreateSyntheticPtgBinary(
         int numCols = 3,
         int numRows = 1,
@@ -2787,7 +2791,7 @@ internal static class SyntheticFixtures
         IReadOnlyList<PtgSamplePoint>? points = null,
         double[]? transformMatrix = null,
         string? scanName = "SyntheticScan",
-        string? customHeader = null,
+        byte[]? customHeader = null,
         bool corruptMagic = false,
         bool corruptOffsets = false)
     {
@@ -2806,30 +2810,32 @@ internal static class SyntheticFixtures
         byte[] headerBytes;
         if (customHeader != null)
         {
-            headerBytes = Encoding.ASCII.GetBytes(customHeader);
+            headerBytes = customHeader;
         }
         else
         {
-            var sb = new StringBuilder();
-            sb.AppendLine("%%header_begin");
-            sb.AppendLine("version 1");
-            sb.AppendLine(string.Create(CultureInfo.InvariantCulture, $"NumRows {numRows}"));
-            sb.AppendLine(string.Create(CultureInfo.InvariantCulture, $"NumCols {numCols}"));
-            sb.AppendLine(string.Create(CultureInfo.InvariantCulture, $"%%properties {properties}"));
+            using var hdr = new MemoryStream();
+            hdr.Write(PtgTlvRecord("%%header_begin", []));
+            hdr.Write(PtgU32Record("%%version", 1));
+            hdr.Write(PtgStringRecord("%%sw_name", "SyntheticSoftware"));
             if (!string.IsNullOrEmpty(scanName))
-                sb.AppendLine($"%%scan_name {scanName}");
-
+                hdr.Write(PtgStringRecord("%%scan_name", scanName));
+            hdr.Write(PtgStringRecord("%%scanner_name", "Scanner"));
+            hdr.Write(PtgStringRecord("%%scanner_model", "Model"));
+            hdr.Write(PtgStringRecord("%%creation_date", "2000-01-01-0000"));
+            hdr.Write(PtgStringRecord("%%creation_time", "2000-01-01-0000"));
+            hdr.Write(PtgU32Record("%%cols", (uint)numCols));
+            hdr.Write(PtgU32Record("%%rows", (uint)numRows));
             if (transformMatrix is { Length: 16 } m)
             {
-                sb.AppendLine("%%transform");
-                sb.AppendLine(string.Create(CultureInfo.InvariantCulture, $"{m[0]} {m[1]} {m[2]} {m[3]}"));
-                sb.AppendLine(string.Create(CultureInfo.InvariantCulture, $"{m[4]} {m[5]} {m[6]} {m[7]}"));
-                sb.AppendLine(string.Create(CultureInfo.InvariantCulture, $"{m[8]} {m[9]} {m[10]} {m[11]}"));
-                sb.AppendLine(string.Create(CultureInfo.InvariantCulture, $"{m[12]} {m[13]} {m[14]} {m[15]}"));
+                byte[] matrixBytes = new byte[128];
+                for (int i = 0; i < 16; i++)
+                    BinaryPrimitives.WriteDoubleLittleEndian(matrixBytes.AsSpan(i * 8, 8), m[i]);
+                hdr.Write(PtgTlvRecord("%%transform", matrixBytes));
             }
-
-            sb.AppendLine("%%header_end");
-            headerBytes = Encoding.ASCII.GetBytes(sb.ToString());
+            hdr.Write(PtgU32Record("%%properties", (uint)properties));
+            hdr.Write(PtgTlvRecord("%%header_end", []));
+            headerBytes = hdr.ToArray();
         }
         ms.Write(headerBytes);
 
@@ -2922,6 +2928,45 @@ internal static class SyntheticFixtures
             ms.Write(block);
         }
 
+        return ms.ToArray();
+    }
+
+    /// <summary>One PTG header record: uint32 name length, the name with a trailing NUL, then the raw value bytes.</summary>
+    public static byte[] PtgTlvRecord(string key, byte[] value)
+    {
+        byte[] name = Encoding.ASCII.GetBytes(key + "\0");
+        using var ms = new MemoryStream();
+        Span<byte> len = stackalloc byte[4];
+        BinaryPrimitives.WriteUInt32LittleEndian(len, (uint)name.Length);
+        ms.Write(len);
+        ms.Write(name);
+        ms.Write(value);
+        return ms.ToArray();
+    }
+
+    /// <summary>A PTG header record whose value is a bare uint32 (%%version, %%cols, %%rows, %%properties).</summary>
+    public static byte[] PtgU32Record(string key, uint value)
+    {
+        byte[] buf = new byte[4];
+        BinaryPrimitives.WriteUInt32LittleEndian(buf, value);
+        return PtgTlvRecord(key, buf);
+    }
+
+    /// <summary>A PTG header record whose value is a length-prefixed string with a trailing NUL.</summary>
+    public static byte[] PtgStringRecord(string key, string value)
+    {
+        byte[] text = Encoding.UTF8.GetBytes(value + "\0");
+        byte[] buf = new byte[4 + text.Length];
+        BinaryPrimitives.WriteUInt32LittleEndian(buf, (uint)text.Length);
+        text.CopyTo(buf, 4);
+        return PtgTlvRecord(key, buf);
+    }
+
+    /// <summary>Concatenates PTG header records into a custom header block for malformed-input tests.</summary>
+    public static byte[] PtgHeaderRecords(params byte[][] records)
+    {
+        using var ms = new MemoryStream();
+        foreach (var record in records) ms.Write(record);
         return ms.ToArray();
     }
 

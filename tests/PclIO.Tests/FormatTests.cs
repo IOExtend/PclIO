@@ -6140,12 +6140,13 @@ public sealed class FormatTests
     {
         using var dir = new TempDirectory();
         var points = new[] { new SyntheticFixtures.PtgSamplePoint(1, 2, 3) };
+        // PTG stores a row-vector matrix: the translation lives in the last row.
         double[] matrix =
         [
-            1, 0, 0, 10,
-            0, 1, 0, 20,
-            0, 0, 1, 30,
-            0, 0, 0, 1
+            1, 0, 0, 0,
+            0, 1, 0, 0,
+            0, 0, 1, 0,
+            10, 20, 30, 1
         ];
         byte[] ptgBytes = SyntheticFixtures.CreateSyntheticPtgBinary(
             numCols: 1, numRows: 1, properties: 0x01, points: points, transformMatrix: matrix);
@@ -6165,6 +6166,49 @@ public sealed class FormatTests
         Assert.Equal(1, ptRaw.X, 3);
         Assert.Equal(2, ptRaw.Y, 3);
         Assert.Equal(3, ptRaw.Z, 3);
+    }
+
+    [Fact]
+    public void Read_Ptg_Binary_Rotation_Transform_Convention()
+    {
+        using var dir = new TempDirectory();
+        var points = new[] { new SyntheticFixtures.PtgSamplePoint(1, 0, 0) };
+        // A +90 degree rotation about Z in the PTG row-vector convention, plus a translation.
+        // The local X axis maps to +Y, so (1,0,0) becomes (10,21,30).
+        double[] matrix =
+        [
+            0, 1, 0, 0,
+            -1, 0, 0, 0,
+            0, 0, 1, 0,
+            10, 20, 30, 1
+        ];
+        byte[] ptgBytes = SyntheticFixtures.CreateSyntheticPtgBinary(
+            numCols: 1, numRows: 1, properties: 0x01, points: points, transformMatrix: matrix);
+
+        string path = dir.Write("rotated.ptg", ptgBytes);
+        using var doc = PtgDocument.Open(path);
+        var pt = Assert.Single(doc.Scans[0].ReadPoints());
+        Assert.Equal(10, pt.X, 3);
+        Assert.Equal(21, pt.Y, 3);
+        Assert.Equal(30, pt.Z, 3);
+    }
+
+    [Fact]
+    public void Read_Ptg_Binary_Metadata_Properties()
+    {
+        using var dir = new TempDirectory();
+        byte[] ptgBytes = SyntheticFixtures.CreateSyntheticPtgBinary(scanName: "StationA");
+        string path = dir.Write("meta.ptg", ptgBytes);
+        using var doc = PtgDocument.Open(path);
+        var scan = (PtgScan)doc.Scans[0];
+
+        Assert.Equal("StationA", scan.Name);
+        Assert.Equal("1", scan.Properties["Version"]);
+        Assert.Equal("Scanner", scan.Properties["ScannerName"]);
+        Assert.Equal("Model", scan.Properties["ScannerModel"]);
+        Assert.Equal("SyntheticSoftware", scan.Properties["SoftwareName"]);
+        Assert.Equal("2000-01-01-0000", scan.Properties["CreationDate"]);
+        Assert.Equal("2000-01-01-0000", scan.Properties["CreationTime"]);
     }
 
     [Fact]
@@ -6259,9 +6303,14 @@ public sealed class FormatTests
     public void Ptg_Rejects_Missing_Header_End()
     {
         using var dir = new TempDirectory();
-        string customHeader = "%%header_begin\nNumRows 1\nNumCols 1\n%%properties 1\n";
-        byte[] badHeader = SyntheticFixtures.CreateSyntheticPtgBinary(customHeader: customHeader);
-        string path = dir.Write("no_end.ptg", badHeader);
+        // Records stop before %%header_end and the file ends: the next record length cannot be read.
+        byte[] records = SyntheticFixtures.PtgHeaderRecords(
+            SyntheticFixtures.PtgTlvRecord("%%header_begin", []),
+            SyntheticFixtures.PtgU32Record("%%rows", 1),
+            SyntheticFixtures.PtgU32Record("%%cols", 1),
+            SyntheticFixtures.PtgU32Record("%%properties", 1));
+        byte[] file = [0x50, 0x54, 0x47, 0x00, 0xC7, 0xA3, 0x8F, 0x92, .. records];
+        string path = dir.Write("no_end.ptg", file);
 
         Assert.Throws<InvalidDataException>(() => PtgScan.Create(path, "scan-0"));
     }
@@ -6270,18 +6319,32 @@ public sealed class FormatTests
     public void Ptg_Rejects_Missing_Or_Invalid_Dimensions()
     {
         using var dir = new TempDirectory();
-        // Missing NumRows
-        string noRows = "%%header_begin\nNumCols 1\n%%properties 1\n%%header_end\n";
+        // Missing %%rows
+        byte[] noRows = SyntheticFixtures.PtgHeaderRecords(
+            SyntheticFixtures.PtgTlvRecord("%%header_begin", []),
+            SyntheticFixtures.PtgU32Record("%%cols", 1),
+            SyntheticFixtures.PtgU32Record("%%properties", 1),
+            SyntheticFixtures.PtgTlvRecord("%%header_end", []));
         string path1 = dir.Write("no_rows.ptg", SyntheticFixtures.CreateSyntheticPtgBinary(customHeader: noRows));
         Assert.Throws<InvalidDataException>(() => PtgScan.Create(path1, "scan-0"));
 
-        // Zero or negative rows
-        string zeroRows = "%%header_begin\nNumRows 0\nNumCols 1\n%%properties 1\n%%header_end\n";
+        // Zero rows
+        byte[] zeroRows = SyntheticFixtures.PtgHeaderRecords(
+            SyntheticFixtures.PtgTlvRecord("%%header_begin", []),
+            SyntheticFixtures.PtgU32Record("%%rows", 0),
+            SyntheticFixtures.PtgU32Record("%%cols", 1),
+            SyntheticFixtures.PtgU32Record("%%properties", 1),
+            SyntheticFixtures.PtgTlvRecord("%%header_end", []));
         string path2 = dir.Write("zero_rows.ptg", SyntheticFixtures.CreateSyntheticPtgBinary(customHeader: zeroRows));
         Assert.Throws<InvalidDataException>(() => PtgScan.Create(path2, "scan-0"));
 
         // Oversized dimensions
-        string huge = "%%header_begin\nNumRows 200000\nNumCols 1\n%%properties 1\n%%header_end\n";
+        byte[] huge = SyntheticFixtures.PtgHeaderRecords(
+            SyntheticFixtures.PtgTlvRecord("%%header_begin", []),
+            SyntheticFixtures.PtgU32Record("%%rows", 200000),
+            SyntheticFixtures.PtgU32Record("%%cols", 1),
+            SyntheticFixtures.PtgU32Record("%%properties", 1),
+            SyntheticFixtures.PtgTlvRecord("%%header_end", []));
         string path3 = dir.Write("huge.ptg", SyntheticFixtures.CreateSyntheticPtgBinary(customHeader: huge));
         Assert.Throws<InvalidDataException>(() => PtgScan.Create(path3, "scan-0"));
     }
@@ -6291,19 +6354,80 @@ public sealed class FormatTests
     {
         using var dir = new TempDirectory();
         // Both float (0x1) and double (0x2)
-        string both = "%%header_begin\nNumRows 1\nNumCols 1\n%%properties 3\n%%header_end\n";
+        byte[] both = SyntheticFixtures.PtgHeaderRecords(
+            SyntheticFixtures.PtgTlvRecord("%%header_begin", []),
+            SyntheticFixtures.PtgU32Record("%%rows", 1),
+            SyntheticFixtures.PtgU32Record("%%cols", 1),
+            SyntheticFixtures.PtgU32Record("%%properties", 3),
+            SyntheticFixtures.PtgTlvRecord("%%header_end", []));
         string path1 = dir.Write("both.ptg", SyntheticFixtures.CreateSyntheticPtgBinary(customHeader: both));
         Assert.Throws<InvalidDataException>(() => PtgScan.Create(path1, "scan-0"));
 
         // Neither float nor double (only intensity 0x4)
-        string neither = "%%header_begin\nNumRows 1\nNumCols 1\n%%properties 4\n%%header_end\n";
+        byte[] neither = SyntheticFixtures.PtgHeaderRecords(
+            SyntheticFixtures.PtgTlvRecord("%%header_begin", []),
+            SyntheticFixtures.PtgU32Record("%%rows", 1),
+            SyntheticFixtures.PtgU32Record("%%cols", 1),
+            SyntheticFixtures.PtgU32Record("%%properties", 4),
+            SyntheticFixtures.PtgTlvRecord("%%header_end", []));
         string path2 = dir.Write("neither.ptg", SyntheticFixtures.CreateSyntheticPtgBinary(customHeader: neither));
         Assert.Throws<InvalidDataException>(() => PtgScan.Create(path2, "scan-0"));
 
         // Unsupported property bits
-        string unsupported = "%%header_begin\nNumRows 1\nNumCols 1\n%%properties 0x21\n%%header_end\n";
+        byte[] unsupported = SyntheticFixtures.PtgHeaderRecords(
+            SyntheticFixtures.PtgTlvRecord("%%header_begin", []),
+            SyntheticFixtures.PtgU32Record("%%rows", 1),
+            SyntheticFixtures.PtgU32Record("%%cols", 1),
+            SyntheticFixtures.PtgU32Record("%%properties", 0x21),
+            SyntheticFixtures.PtgTlvRecord("%%header_end", []));
         string path3 = dir.Write("unsupported.ptg", SyntheticFixtures.CreateSyntheticPtgBinary(customHeader: unsupported));
         Assert.Throws<InvalidDataException>(() => PtgScan.Create(path3, "scan-0"));
+    }
+
+    [Fact]
+    public void Ptg_Rejects_Unknown_Header_Key_Or_Version()
+    {
+        using var dir = new TempDirectory();
+        byte[] unknownKey = SyntheticFixtures.PtgHeaderRecords(
+            SyntheticFixtures.PtgTlvRecord("%%header_begin", []),
+            SyntheticFixtures.PtgStringRecord("%%mystery", "value"),
+            SyntheticFixtures.PtgU32Record("%%rows", 1),
+            SyntheticFixtures.PtgU32Record("%%cols", 1),
+            SyntheticFixtures.PtgU32Record("%%properties", 1),
+            SyntheticFixtures.PtgTlvRecord("%%header_end", []));
+        string path1 = dir.Write("unknown_key.ptg", SyntheticFixtures.CreateSyntheticPtgBinary(customHeader: unknownKey));
+        Assert.Throws<NotSupportedException>(() => PtgScan.Create(path1, "scan-0"));
+
+        byte[] badVersion = SyntheticFixtures.PtgHeaderRecords(
+            SyntheticFixtures.PtgTlvRecord("%%header_begin", []),
+            SyntheticFixtures.PtgU32Record("%%version", 2),
+            SyntheticFixtures.PtgU32Record("%%rows", 1),
+            SyntheticFixtures.PtgU32Record("%%cols", 1),
+            SyntheticFixtures.PtgU32Record("%%properties", 1),
+            SyntheticFixtures.PtgTlvRecord("%%header_end", []));
+        string path2 = dir.Write("bad_version.ptg", SyntheticFixtures.CreateSyntheticPtgBinary(customHeader: badVersion));
+        Assert.Throws<NotSupportedException>(() => PtgScan.Create(path2, "scan-0"));
+    }
+
+    [Fact]
+    public void Ptg_Rejects_Oversized_Name_Or_Truncated_Transform()
+    {
+        using var dir = new TempDirectory();
+        // A record name length beyond the 256-byte bound.
+        byte[] hugeName = [0x50, 0x54, 0x47, 0x00, 0xC7, 0xA3, 0x8F, 0x92, 0xFF, 0xFF, 0xFF, 0xFF];
+        string path1 = dir.Write("huge_name.ptg", hugeName);
+        Assert.Throws<InvalidDataException>(() => PtgScan.Create(path1, "scan-0"));
+
+        // A %%transform record whose value is cut short; the file ends inside the matrix.
+        byte[] records = SyntheticFixtures.PtgHeaderRecords(
+            SyntheticFixtures.PtgTlvRecord("%%header_begin", []),
+            SyntheticFixtures.PtgU32Record("%%rows", 1),
+            SyntheticFixtures.PtgU32Record("%%cols", 1),
+            SyntheticFixtures.PtgU32Record("%%properties", 1),
+            SyntheticFixtures.PtgTlvRecord("%%transform", new byte[64]));
+        byte[] file = [0x50, 0x54, 0x47, 0x00, 0xC7, 0xA3, 0x8F, 0x92, .. records];
+        string path2 = dir.Write("short_transform.ptg", file);
+        Assert.Throws<InvalidDataException>(() => PtgScan.Create(path2, "scan-0"));
     }
 
     [Fact]
