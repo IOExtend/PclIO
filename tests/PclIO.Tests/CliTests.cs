@@ -290,6 +290,7 @@ public sealed class CliTests
     [InlineData("xyz")]
     [InlineData("pts")]
     [InlineData("json")]
+    [InlineData("scene")]
     public void Export_Writes_The_Requested_Format(string format)
     {
         using var dir = new TempDirectory();
@@ -301,7 +302,7 @@ public sealed class CliTests
         Assert.Equal(Program.ExitOk, result.Exit);
         Assert.Contains(format == "json" ? "Exported 0 points" : "Exported 3 points", result.Out);
         Assert.True(new FileInfo(output).Length > 0);
-        Assert.Equal(format == "las" ? (byte)'L' : format == "json" ? (byte)'{' : (byte)(format == "pts" ? '3' : '1'), File.ReadAllBytes(output)[0]);
+        Assert.Equal(format == "las" ? (byte)'L' : format is "json" or "scene" ? (byte)'{' : (byte)(format == "pts" ? '3' : '1'), File.ReadAllBytes(output)[0]);
         Assert.Equal([Path.GetFileName(output), Path.GetFileName(input)], Directory.GetFiles(dir.Root).Select(Path.GetFileName).Order(StringComparer.Ordinal));
     }
 
@@ -347,6 +348,52 @@ public sealed class CliTests
 
         Assert.Equal(Program.ExitUsage, Run("export", input, dir.PathOf("two.json"), "--step", "2").Exit);
         Assert.Equal(Program.ExitUsage, Run("export", input, dir.PathOf("two.json"), "--no-transform").Exit);
+    }
+
+    [Fact]
+    public void Export_Scene_Writes_An_Ioscene_Document()
+    {
+        using var dir = new TempDirectory();
+        string input = PointsRcs(dir);
+        string output = dir.PathOf("out.scene.json");
+
+        var result = Run("export", input, output);
+
+        Assert.Equal(Program.ExitOk, result.Exit);
+        Assert.Contains("Exported 3 points to IOScene JSON", result.Out);
+        // Per-point channels that IOScene 0.1.0 does not hold are reported on standard error.
+        Assert.Contains("colours-dropped", result.Err);
+        Assert.Contains("intensities-dropped", result.Err);
+        IOScene.SceneDocument scene = IOScene.SceneJson.Load(output);
+        Assert.Equal("ioscene", scene.Kind);
+        Assert.Equal(3, scene.Geometries[0].Vertices.Count);
+        Assert.Equal("rcs", scene.Models[0].SourceFormat);
+    }
+
+    [Fact]
+    public void Export_Scene_Format_Option_And_Limit()
+    {
+        using var dir = new TempDirectory();
+        string input = PointsRcs(dir);
+        string output = dir.PathOf("out.dat");
+
+        var result = Run("export", input, output, "--format", "scene", "--limit", "2");
+
+        Assert.Equal(Program.ExitOk, result.Exit);
+        IOScene.SceneDocument scene = IOScene.SceneJson.Load(output);
+        Assert.Equal(2, scene.Geometries[0].Vertices.Count);
+        Assert.Contains("points-capped", result.Err);
+    }
+
+    [Fact]
+    public void Export_Scene_Rejects_No_Transform()
+    {
+        using var dir = new TempDirectory();
+
+        var result = Run("export", PointsRcs(dir), dir.PathOf("out.scene.json"), "--no-transform");
+
+        Assert.Equal(Program.ExitUsage, result.Exit);
+        Assert.False(File.Exists(dir.PathOf("out.scene.json")));
     }
 
     [Fact]

@@ -2,7 +2,8 @@
   "metadata": [
     {
       "src": [
-        { "src": "src/PclIO", "files": ["PclIO.csproj"] }
+        { "src": "src/PclIO", "files": ["PclIO.csproj"] },
+        { "src": "src/PclIO.Scene", "files": ["PclIO.Scene.csproj"] }
       ],
       "dest": "docs/api",
       "properties": { "TargetFramework": "net10.0", "TargetFrameworks": "net10.0" },

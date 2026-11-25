@@ -5,6 +5,8 @@
   items:
     - name: Public API
       href: public-api.md
+    - name: Scene adapter
+      href: scene.md
     - name: Dependencies
       href: dependencies.md
     - name: Private test fixtures

@@ -2,6 +2,8 @@
   <Folder Name="/src/">
     <Project Path="src/PclIO/PclIO.csproj" />
     <Project Path="src/PclIO.Cli/PclIO.Cli.csproj" />
+    <Project Path="src/PclIO.Scene/PclIO.Scene.csproj" />
   </Folder>
   <Project Path="tests/PclIO.Tests/PclIO.Tests.csproj" />
+  <Project Path="tests/PclIO.Scene.Tests/PclIO.Scene.Tests.csproj" />
 </Solution>

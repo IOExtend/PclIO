@@ -22,14 +22,17 @@ pclio scans scan.e57
 pclio points scan.e57 --limit 20 --format xyz
 pclio export scan.e57 scan.xyz --step 10
 pclio export scan.e57 scan.json --limit 100 --force
+pclio export scan.e57 scan.scene.json --limit 100000
 ```
 
-The output format of `export` comes from `--format` or from the extension of the output file (`.las`, `.xyz`, `.pts`, `.json`);
-any other extension needs `--format`. The output is written to a temporary file next to the target and moved into place when
+The output format of `export` comes from `--format` or from the extension of the output file (`.las`, `.xyz`, `.pts`, `.json`,
+`.scene.json`); any other extension needs `--format`. The output is written to a temporary file next to the target and moved into place when
 it is complete. Export refuses to write to the input (compared after following links and junctions; hard links are not detected),
 to a path inside an input folder, to a missing folder or to a directory, and refuses to replace an existing file unless `--force`
 is given. `points --format xyz` and `--format pts` print the same lines as the exporters. When points with a NaN or infinite
-coordinate are skipped, one `warning: skipped N points ...` line goes to standard error. Run `pclio --help` for all options.
+coordinate are skipped, one `warning: skipped N points ...` line goes to standard error. A scene export (`--format scene`) writes
+an IOScene scene JSON, keeps at most 1,000,000 points unless `--limit` is given, rejects `--no-transform` and prints the
+conversion diagnostics on standard error; see [Scene adapter](scene.md). Run `pclio --help` for all options.
 
 ### Exit codes
 

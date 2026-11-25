@@ -2,20 +2,21 @@
   <img src="docs/images/pclio-banner.png" alt="PclIO" width="640">
 </p>
 
-PclIO is a .NET library and command line tool that reads point cloud files from several scanner and project formats and exports the points to LAS, XYZ, PTS and JSON, without the software that wrote the files.
+PclIO is a .NET library and command line tool that reads point cloud files from several scanner and project formats and exports the points to LAS, XYZ, PTS and JSON, without the software that wrote the files. The `PclIO.Scene` adapter turns a cloud into an [IOScene](https://github.com/IOExtend/IOScene) scene for viewers and coordination tools.
 
 ## What it does
 
 - Detects the format of a file or folder from its content, extension or layout (`PclFile.DetectKind`).
 - Opens a file as a `PclDocument` with its scans, bounds, transforms, metadata and warnings, and streams the points (`ReadAllPoints`, `PclScan.ReadPoints`) with a point limit, a subsampling step and an optional scan transform. Leica scans additionally read a block range with opt-in parallel decoding.
 - Exports to ASPRS LAS 1.2 (point format 2) and 1.4 (point formats 6 to 8), ASCII XYZ, ASCII PTS and JSON.
+- Converts a document into an IOScene `SceneDocument` in metres (`PclIO.Scene`, see [scene adapter](docs/scene.md)).
 - Ships the command line tool `pclio` with `info`, `scans`, `points` and `export`.
 
 ## Install
 
 PclIO is a preview (0.x). The packages are published on nuget.org, not on GitHub Packages, so the Packages box of this repository stays empty.
 
-[![PclIO on NuGet](https://img.shields.io/nuget/v/PclIO?label=PclIO)](https://www.nuget.org/packages/PclIO) [![PclIO.Cli on NuGet](https://img.shields.io/nuget/v/PclIO.Cli?label=PclIO.Cli)](https://www.nuget.org/packages/PclIO.Cli)
+[![PclIO on NuGet](https://img.shields.io/nuget/v/PclIO?label=PclIO)](https://www.nuget.org/packages/PclIO) [![PclIO.Cli on NuGet](https://img.shields.io/nuget/v/PclIO.Cli?label=PclIO.Cli)](https://www.nuget.org/packages/PclIO.Cli) [![PclIO.Scene on NuGet](https://img.shields.io/nuget/v/PclIO.Scene?label=PclIO.Scene)](https://www.nuget.org/packages/PclIO.Scene)
 
 Install the command line tool:
 
@@ -29,7 +30,13 @@ Add the library to a .NET project:
 dotnet add package PclIO
 ```
 
-The library targets .NET 8 and .NET 10. It is managed code with no dependencies on other packages (see [third-party notices](THIRD-PARTY-NOTICES.md)), has no native dependencies or Windows-only APIs, and is tested on Windows, Linux and macOS. It does not contact the network and writes nothing to the console.
+Add the scene adapter (depends on `PclIO` and `IOScene`):
+
+```sh
+dotnet add package PclIO.Scene
+```
+
+The library targets .NET 8 and .NET 10. It is managed code with no dependencies on other packages (see [third-party notices](THIRD-PARTY-NOTICES.md)), has no native dependencies or Windows-only APIs, and is tested on Windows, Linux and macOS. It does not contact the network and writes nothing to the console. The engine stays a leaf: only the `PclIO.Scene` adapter references IOScene, and only the command line tool combines the two.
 
 ## Supported formats
 
@@ -165,13 +172,27 @@ outside the file is fetched.
 
 XYZ and PTS output is culture independent (`.` decimal separator) and ends lines with `\n`. JSON output is culture independent; its line ends are those of the platform. Points with a NaN or infinite coordinate are skipped; the overloads with `out long skippedPoints` report how many, and the command line prints `warning: skipped N points with a NaN or infinite coordinate` on standard error when N is not zero. The exception is `pclio points --format json`, which skips nothing and writes such a coordinate as the string `"NaN"`, `"Infinity"` or `"-Infinity"`. Files written by `export` are UTF-8 without a BOM; `info`, `scans` and `points` write to the console with the platform's own line ends and encoding, and control characters in names and messages are printed as `\uXXXX`.
 
+## Scene adapter
+
+`PclIO.Scene` converts a point cloud document into an IOScene `SceneDocument`: one model, one element per scan, non-indexed `Points` geometry in metres, and the scan properties as text. It follows the [IOScene contract](https://github.com/IOExtend/IOScene/blob/main/docs/contract.md); large clouds are outside that model, so the reader caps the scene at 1,000,000 points by default and reports what it left out. Per-point colour, intensity and classification are not part of IOScene 0.1.0 and are reported as dropped; normals are kept when every point of a scan has one. See [docs/scene.md](docs/scene.md) for the mapping, diagnostics and limits.
+
+```csharp
+using IOScene;
+using PclIO.Scene;
+
+PclSceneResult result = PclSceneReader.Read("site.e57");
+SceneJson.Save(result.Document, "site.scene.json");
+```
+
+The command line writes the same scene: `pclio export site.e57 site.scene.json`.
+
 ## Command line
 
 ```text
 pclio info <file> [--json]
 pclio scans <file> [--json]
 pclio points <file> [--scan <id>] [--limit <n>] [--step <s>] [--format <xyz|pts|json>] [--no-transform]
-pclio export <input> <output> [--format <las|xyz|pts|json>] [--limit <n>] [--step <s>] [--no-transform] [--force]
+pclio export <input> <output> [--format <las|xyz|pts|json|scene>] [--limit <n>] [--step <s>] [--no-transform] [--force]
 pclio <input> [--json]               same as 'info'
 pclio <input> <output> [options]     same as 'export'
 ```
@@ -179,8 +200,8 @@ pclio <input> <output> [options]     same as 'export'
 - `info` prints the format, file size, scans, point count, bounds, coordinate system, metadata and warnings.
 - `scans` lists the scans with their point counts, channels, bounds and translation.
 - `points` prints points to standard output, at most 1000 unless `--limit` is given. `--scan` selects one scan by 0-based index, id or name. `--format xyz` and `--format pts` print the same lines as the exporters (PTS starts with its count line); `--format json` prints one JSON object per line.
-- `export` writes a file. The format comes from `--format` or from the output extension (`.las`, `.xyz`, `.pts`, `.json`); any other extension needs `--format`. The output is written to a temporary file next to the target and moved into place when complete. Export refuses to write to the input (compared after following links and junctions, and on Windows by file identity, so the verbatim and device prefixes and administrative shares are caught too; hard links are not detected elsewhere), to a path inside an input folder, to a missing folder or to a directory, and refuses to replace an existing file unless `--force` is given.
-- `--limit` and `--step` take integers of at least 1. `--no-transform` returns coordinates as stored. A JSON export rejects `--step` and `--no-transform`, and `--limit` for it is the number of sample points.
+- `export` writes a file. The format comes from `--format` or from the output extension (`.las`, `.xyz`, `.pts`, `.json`, `.scene.json`); any other extension needs `--format`. The output is written to a temporary file next to the target and moved into place when complete. Export refuses to write to the input (compared after following links and junctions, and on Windows by file identity, so the verbatim and device prefixes and administrative shares are caught too; hard links are not detected elsewhere), to a path inside an input folder, to a missing folder or to a directory, and refuses to replace an existing file unless `--force` is given.
+- `--limit` and `--step` take integers of at least 1. `--no-transform` returns coordinates as stored. A JSON export rejects `--step` and `--no-transform`, and `--limit` for it is the number of sample points. A scene export rejects `--no-transform`, keeps at most 1,000,000 points unless `--limit` is given, and prints the conversion diagnostics on standard error.
 - `--help`, `-h` and `help`, and `--version`, `-v` and `version`, print and exit with code 0.
 
 Errors are one line on standard error, with no stack trace for any exit code.
@@ -226,7 +247,7 @@ See the [public API](docs/public-api.md) for the supported surface and [dependen
 
 ## Documentation
 
-[Getting started](docs/getting-started.md), the [public API](docs/public-api.md), [dependencies](docs/dependencies.md) and [private test fixtures](docs/test-fixtures.md) are in `docs/`. The documentation site with the API reference is at <https://ioextend.github.io/PclIO/>, built from them with DocFX (`docfx.json`). [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/IOExtend/PclIO) offers an automatically generated overview of the repository.
+[Getting started](docs/getting-started.md), the [public API](docs/public-api.md), the [scene adapter](docs/scene.md), [dependencies](docs/dependencies.md) and [private test fixtures](docs/test-fixtures.md) are in `docs/`. The documentation site with the API reference is at <https://ioextend.github.io/PclIO/>, built from them with DocFX (`docfx.json`). [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/IOExtend/PclIO) offers an automatically generated overview of the repository.
 
 ## Limitations
 

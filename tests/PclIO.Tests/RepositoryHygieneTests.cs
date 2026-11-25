@@ -9,8 +9,8 @@ namespace PclIO.Tests;
 
 /// <summary>Keeps private data and proprietary material out of the repository. The files checked are the ones git tracks (or
 /// would track), or every file outside build output when git is not available. The patterns are assembled from pieces at
-/// run time so that this file does not contain a literal that would match itself. It also checks that the shipped projects
-/// reference no package.</summary>
+/// run time so that this file does not contain a literal that would match itself. It also checks that the engine and the
+/// CLI reference no package, and the scene adapter only the neutral scene contract.</summary>
 public sealed class RepositoryHygieneTests
 {
     private const long MaxFileBytes = 1024 * 1024;
@@ -63,9 +63,10 @@ public sealed class RepositoryHygieneTests
         ("assistant or generator mention", Rx(
             "cla" + "ude|anthr" + "opic|co-auth" + "ored-by|generated " + "with|" + @"\bai[\s-]+assist" + "|chat" + "gpt|open" + @"ai\b")),
 
-        // Sibling projects and other implementations are not referred to.
+        // Sibling projects and other implementations are not referred to. IOScene is the neutral scene contract the
+        // adapter depends on, so it is named; the viewer and the sibling engines are not.
         ("other project or implementation", Rx(
-            @"\b(?:Rvt|Pla|Tdb|Nwc|Dwg|Ifc)" + @"IO\b|\bIO(?:Sc" + "ene|Vie" + @"wer)\b|lib" + "e57|cloud" + "compare|" + @"\bpd" + @"al\b|\bla" + @"spy\b"
+            @"\b(?:Rvt|Pla|Tdb|Nwc|Dwg|Ifc)" + @"IO\b|\bIOVie" + @"wer\b|lib" + "e57|cloud" + "compare|" + @"\bpd" + @"al\b|\bla" + @"spy\b"
             + "|pye" + "57|open" + "3d|las" + "tools|lib" + "las|pot" + "reeconverter")),
     ];
 
@@ -383,17 +384,21 @@ public sealed class RepositoryHygieneTests
     }
 
     [SkippableFact]
-    public void The_Packages_Have_No_Dependencies_On_Other_Packages()
+    public void The_Engine_And_Cli_Have_No_Package_Dependencies()
     {
         string root = FindRepoRoot();
 
-        // Neither shipped project references a package; the only package any of them gets is the build-time one that
+        // The engine and the CLI reference no package; the only package they get is the build-time one that
         // Directory.Build.props adds with PrivateAssets, which never reaches the consumer.
         foreach (string project in new[] { "src/PclIO/PclIO.csproj", "src/PclIO.Cli/PclIO.Cli.csproj" })
         {
             var references = XDocument.Load(Path.Combine(root, project)).Descendants("PackageReference");
             Assert.Empty(references);
         }
+
+        // The scene adapter is the only shipped project with a package dependency, and it is the neutral scene contract.
+        var adapter = XDocument.Load(Path.Combine(root, "src/PclIO.Scene/PclIO.Scene.csproj")).Descendants("PackageReference").ToList();
+        Assert.Equal(["IOScene"], adapter.Select(r => (string?)r.Attribute("Include")));
 
         var shared = XDocument.Load(Path.Combine(root, "Directory.Build.props")).Descendants("PackageReference");
         Assert.All(shared, r => Assert.Equal("all", (string?)r.Attribute("PrivateAssets")));

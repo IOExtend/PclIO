@@ -6751,7 +6751,7 @@ public sealed class FormatTests
             ];
             byte[] paletteSteps = new byte[18 + 4 + 2 * 19];
             paletteSteps[18] = 2;
-            palette = [..nameAndId, ..paletteSteps];
+            palette = [.. nameAndId, .. paletteSteps];
         }
 
         string path = dir.Write("two_scalars.bin", [..bytes.AsSpan(0, fieldStart), ..firstField, ..display,

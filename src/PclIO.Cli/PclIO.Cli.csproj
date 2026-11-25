@@ -2,7 +2,7 @@
 
   <PropertyGroup>
     <PackageId>PclIO.Cli</PackageId>
-    <Description>Command line tool that inspects point cloud files, lists their scans, prints sample points and exports to LAS, XYZ, PTS or JSON.</Description>
+    <Description>Command line tool that inspects point cloud files, lists their scans, prints sample points and exports to LAS, XYZ, PTS, JSON or an IOScene scene.</Description>
     <OutputType>Exe</OutputType>
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>pclio</ToolCommandName>
@@ -12,6 +12,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\PclIO\PclIO.csproj" />
+    <ProjectReference Include="..\PclIO.Scene\PclIO.Scene.csproj" />
   </ItemGroup>
 
 </Project>

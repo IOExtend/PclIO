@@ -31,7 +31,7 @@ public static class Program
     private const long DefaultPointsLimit = 1000;
 
     private static readonly string[] PointsFormats = ["xyz", "pts", "json"];
-    private static readonly string[] ExportFormats = ["las", "xyz", "pts", "json"];
+    private static readonly string[] ExportFormats = ["las", "xyz", "pts", "json", "scene"];
 
     private static readonly UTF8Encoding Utf8NoBom = new(encoderShouldEmitUTF8Identifier: false);
 
@@ -57,7 +57,7 @@ public static class Program
           pclio info <file> [--json]
           pclio scans <file> [--json]
           pclio points <file> [--scan <id>] [--limit <n>] [--step <s>] [--format <xyz|pts|json>] [--no-transform]
-          pclio export <input> <output> [--format <las|xyz|pts|json>] [--limit <n>] [--step <s>] [--no-transform] [--force]
+          pclio export <input> <output> [--format <las|xyz|pts|json|scene>] [--limit <n>] [--step <s>] [--no-transform] [--force]
           pclio <input> [--json]               same as 'info'
           pclio <input> <output> [options]     same as 'export'
           pclio --help | -h
@@ -90,6 +90,11 @@ public static class Program
           SBF           Simple Binary Format with a companion header (.sbf, .sbf.data)
           3D Tiles      OGC 3D Tiles point clouds and glTF point primitives (.pnts, .glb, tileset.json)
           Potree        Potree octree point clouds (cloud.js, metadata.json, .hrc, .bin)
+          LAZ           LASzip compressed LAS by signature and a valid LASzip record (.laz)
+          COPC          Cloud Optimized Point Cloud, a LAS 1.4 copc record (.copc.laz)
+          EPT           Entwine Point Tile datasets (ept.json, ept-hierarchy/, ept-data/)
+          Leica PTG     by the PTG signature and magic, or a 'PTG index' header with the extension .ptg
+          CC BIN        binary point cloud entities by the CCB2 signature (.bin)
 
         Output formats (--format, or the output extension; any other extension needs --format):
           las    ASPRS LAS 1.2, point data record format 2 (XYZ, intensity, RGB)
@@ -97,10 +102,14 @@ public static class Program
           pts    ASCII: a line with the point count, then "X Y Z intensity R G B" per point
           json   export: metadata and scans; with --limit also the first n points (--step and --no-transform are rejected)
                  points: one JSON object per line with x, y, z, intensity, r, g, b (null when the point lacks a value)
+          scene  IOScene scene JSON (also inferred from the extension .scene.json): one element per scan, point geometry
+                 in metres, scan properties as text. Per-point colour, intensity and classification are not part of
+                 IOScene 0.1.0 and are reported on standard error. At most 1,000,000 points unless --limit is given;
+                 --no-transform is rejected. Conversion notes and warnings go to standard error.
           las, xyz, pts and the json export skip points with a NaN or infinite coordinate; the count is reported on
           standard error. 'points --format json' writes every point; such coordinates appear as the strings "NaN",
           "Infinity" and "-Infinity".
-          No output format stores normals.
+          No output format stores normals, except scene, which keeps them when every point of a scan has one.
 
         Options:
           --scan <id>       points only: read one scan by 0-based index, id or name (default: all scans)
@@ -426,6 +435,9 @@ public static class Program
                 throw Usage($"--limit for --format json must not exceed {int.MaxValue}");
         }
 
+        if (format == "scene" && parsed.Flags.Contains("--no-transform"))
+            throw Usage("--no-transform is not supported with --format scene; the scene holds one transformed coordinate space");
+
         string input = ResolveInput(parsed.Positionals[0]);
         string output = FullPath(outputArg, "output");
 
@@ -491,6 +503,23 @@ public static class Program
                     skipped = s;
                     return n;
                 }));
+                break;
+            case "scene":
+                label = "IOScene JSON";
+                var sceneOptions = new PclIO.Scene.PclSceneOptions
+                {
+                    // Without --limit the adapter's own cap applies, so a huge cloud cannot fill the disk by accident.
+                    MaxPoints = options.MaxPoints ?? PclIO.Scene.PclSceneOptions.Default.MaxPoints,
+                    SubsampleStep = options.SubsampleStep,
+                };
+                count = WriteThroughTempFile(output, stderr, force, fs =>
+                {
+                    PclIO.Scene.PclSceneResult result = PclIO.Scene.PclSceneReader.Read(doc, sceneOptions);
+                    foreach (IOScene.SceneDiagnostic d in result.Diagnostics)
+                        stderr.WriteLine($"{(d.Severity == IOScene.SceneSeverity.Warning ? "warning" : "note")}: {d.Code}: {d.Message}");
+                    IOScene.SceneJson.Write(result.Document, fs);
+                    return result.PointCount;
+                });
                 break;
             default:
                 label = "XYZ";
@@ -631,6 +660,9 @@ public static class Program
 
     private static string FormatFromExtension(string outputPath)
     {
+        if (outputPath.EndsWith(".scene.json", StringComparison.OrdinalIgnoreCase))
+            return "scene";
+
         string ext = Path.GetExtension(outputPath).TrimStart('.').ToLowerInvariant();
         if (!ExportFormats.Contains(ext))
             throw Usage($"cannot infer the output format from '{outputPath}'; use --format <{string.Join('|', ExportFormats)}>");
