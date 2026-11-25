@@ -144,6 +144,7 @@ public class SkippableFactTests
 
         // The Temp folders and the .tmp. infix sort before the real sample in ordinal order; none of them may win.
         Assert.Equal(Path.Combine(dir.Root, "pc", "ddd.e57"), TestFiles.TryFindByExtension(".e57", [dir.Root]));
+        Assert.Equal([Path.Combine(dir.Root, "pc", "ddd.e57")], TestFiles.TryFindAllByExtension(".e57", [dir.Root]));
 
         // A corpus the caller places under a temporary folder still works: only the part below the root is inspected.
         using var nested = new TempDirectory();

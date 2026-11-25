@@ -30,7 +30,13 @@ internal static class TestFiles
     public static string? TryFindByExtension(string extension) => TryFindByExtension(extension, Roots());
 
     /// <summary>The first file with this extension in the first of the given folders that holds one, or null.</summary>
-    public static string? TryFindByExtension(string extension, IEnumerable<string> roots)
+    public static string? TryFindByExtension(string extension, IEnumerable<string> roots) =>
+        TryFindAllByExtension(extension, roots).FirstOrDefault();
+
+    /// <summary>Every file with this extension, in ordinal path order, across the given folders in order. A caller that
+    /// needs a fixture the reader can actually read walks this list: a corpus can hold shells without data and variants
+    /// the reader does not decode beside the readable files.</summary>
+    public static IReadOnlyList<string> TryFindAllByExtension(string extension, IEnumerable<string> roots)
     {
         var options = new EnumerationOptions
         {
@@ -40,9 +46,10 @@ internal static class TestFiles
             MatchCasing = MatchCasing.CaseInsensitive,
         };
 
+        var found = new List<string>();
         foreach (string root in roots)
         {
-            string? found = Directory.EnumerateFiles(root, "*" + extension, options)
+            found.AddRange(Directory.EnumerateFiles(root, "*" + extension, options)
                 .Where(f => string.Equals(extension, ".copc.laz", StringComparison.OrdinalIgnoreCase)
                     ? f.EndsWith(".copc.laz", StringComparison.OrdinalIgnoreCase)
                     : string.Equals(extension, "ept.json", StringComparison.OrdinalIgnoreCase)
@@ -50,12 +57,10 @@ internal static class TestFiles
                         : string.Equals(Path.GetExtension(f), extension, StringComparison.OrdinalIgnoreCase))
                 .Where(f => !string.Equals(extension, ".laz", StringComparison.OrdinalIgnoreCase) || !f.EndsWith(".copc.laz", StringComparison.OrdinalIgnoreCase))
                 .Where(f => !IsTemporaryArtifact(f, root))
-                .Order(StringComparer.Ordinal)
-                .FirstOrDefault();
-            if (found != null) return found;
+                .Order(StringComparer.Ordinal));
         }
 
-        return null;
+        return found;
     }
 
     /// <summary>Temporary and scratch artifacts are never fixtures: a mirrored Temp folder holds truncated downloads and

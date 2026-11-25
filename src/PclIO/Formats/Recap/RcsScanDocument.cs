@@ -264,7 +264,7 @@ public sealed class RcsScan : PclScan
         try
         {
             using var fs = File.OpenRead(_filePath);
-            var nodes = ReadNodeTable(fs, layout, out _);
+            var nodes = ReadNodeTable(fs, layout, _document.MinorVersion, out _);
 
             bool colors = false, intensities = false, normals = false;
             foreach (var node in nodes)
@@ -277,9 +277,9 @@ public sealed class RcsScan : PclScan
 
             return (colors, intensities, normals);
         }
-        catch (InvalidDataException)
+        catch (Exception e) when (e is InvalidDataException or NotSupportedException)
         {
-            // A damaged node table leaves the channels unknown.
+            // A damaged node table or an undecoded payload leaves the channels unknown.
             return (false, false, false);
         }
     }
@@ -304,7 +304,7 @@ public sealed class RcsScan : PclScan
         long yielded = 0;
 
         using var fs = File.OpenRead(_filePath);
-        var nodes = ReadNodeTable(fs, layout, out long payloadStart);
+        var nodes = ReadNodeTable(fs, layout, _document.MinorVersion, out long payloadStart);
 
         long curOffset = payloadStart;
         byte[] chunkBuf = new byte[65536];
@@ -411,7 +411,7 @@ public sealed class RcsScan : PclScan
     }
 
     // Reads and validates the node table; payloadStart is where the first node payload begins.
-    private static List<Node> ReadNodeTable(FileStream fs, RcsLayout layout, out long payloadStart)
+    private static List<Node> ReadNodeTable(FileStream fs, RcsLayout layout, uint minorVersion, out long payloadStart)
     {
         if (fs.Length < layout.NodeTableOffset + 8) throw FormatError.Truncated("RCS node table");
 
@@ -455,7 +455,8 @@ public sealed class RcsScan : PclScan
                 if (nbytes != (long)npts * PositionRecordSize &&
                     nbytes != (long)npts * PointRecordSize &&
                     nbytes != (long)npts * (PointRecordSize + NormalRecordSize))
-                    throw FormatError.Unsupported("RCS node payload does not match a known point record layout.");
+                    throw FormatError.Unsupported(
+                        $"RCS container version {layout.MajorVersion}.{minorVersion}: node payload does not match a known point record layout.");
             }
 
             nodes.Add(new Node(new PclVector3(tMinX, tMinY, tMinZ), npts, nbytes));

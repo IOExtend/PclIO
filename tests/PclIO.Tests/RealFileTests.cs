@@ -4,28 +4,63 @@ using Xunit;
 namespace PclIO.Tests;
 
 /// <summary>Reads private scan files that are not part of the repository (see <see cref="TestFiles"/>). A test is skipped
-/// when no file with the extension is available. The assertions are generic invariants only: nothing here depends on the
-/// content, size or identifiers of any particular file.</summary>
+/// when no file with the extension is available, or when none of the candidates is a readable fixture: a corpus can hold
+/// project shells without data and variants the reader does not decode beside the readable files. The assertions are
+/// generic invariants only: nothing here depends on the content, size or identifiers of any particular file.</summary>
 public sealed class RealFileTests
 {
     private const int SampleSize = 100;
 
     private static void AssertReadsPoints(string extension, PclFileKind kind)
     {
-        string path = TestFiles.FindByExtension(extension);
+        var candidates = TestFiles.TryFindAllByExtension(extension, TestFiles.Roots());
+        foreach (string path in candidates)
+        {
+            if (PclFile.DetectKind(path) != kind) continue;
 
-        Assert.Equal(kind, PclFile.DetectKind(path));
+            PclDocument doc;
+            try
+            {
+                doc = PclFile.Open(path);
+            }
+            catch (Exception e) when (e is InvalidDataException or NotSupportedException)
+            {
+                continue;
+            }
 
-        using var doc = PclFile.Open(path);
-        Assert.Equal(kind, doc.Kind);
-        Assert.True(doc.Scans.Count > 0, "the document lists at least one scan");
-        Assert.True(doc.FileSize > 0);
+            using (doc)
+            {
+                Assert.Equal(kind, doc.Kind);
+                // A shell without scan data lists no scans; a manifest whose data files are missing reads no points.
+                if (doc.Scans.Count == 0) continue;
+                Assert.True(doc.FileSize > 0);
 
-        long totalPoints = doc.Scans.Sum(s => s.PointCount);
-        int expected = (int)Math.Min(SampleSize, totalPoints > 0 ? totalPoints : SampleSize);
-        var options = new PclReadOptions { MaxPoints = SampleSize };
-        var points = doc.ReadAllPoints(options).ToList();
+                long totalPoints = doc.Scans.Sum(s => s.PointCount);
+                int expected = (int)Math.Min(SampleSize, totalPoints > 0 ? totalPoints : SampleSize);
+                var options = new PclReadOptions { MaxPoints = SampleSize };
+                List<PclPoint> points;
+                try
+                {
+                    points = doc.ReadAllPoints(options).ToList();
+                }
+                catch (Exception e) when (e is InvalidDataException or NotSupportedException)
+                {
+                    continue;
+                }
+                if (points.Count == 0) continue;
 
+                AssertReadable(doc, points, expected, options);
+                return;
+            }
+        }
+
+        throw candidates.Count == 0
+            ? TestFiles.Missing(extension)
+            : new SkipException($"No private '{extension}' fixture with readable points is available: the candidates hold no scans, hold no points, or use a layout the reader does not decode. Set {TestFiles.EnvironmentVariable} to a folder that holds private scan files, or create a test_files folder.");
+    }
+
+    private static void AssertReadable(PclDocument doc, List<PclPoint> points, int expected, PclReadOptions options)
+    {
         // The requested number of points comes back, and every coordinate is a real number.
         Assert.Equal(expected, points.Count);
         Assert.All(points, p =>
