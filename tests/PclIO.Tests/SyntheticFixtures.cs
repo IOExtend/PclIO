@@ -7,9 +7,6 @@ using System.Text.Json;
 
 namespace PclIO.Tests;
 
-/// <summary>One point record of a synthetic .rcs node: quantised offsets, intensity, colour and an optional packed normal.</summary>
-public readonly record struct RcsSamplePoint(ushort X, ushort Y, ushort Z, byte Intensity, byte R, byte G, byte B, sbyte Nx = 0, sbyte Ny = 0, sbyte Nz = 0);
-
 /// <summary>One point of a synthetic Leica block: 10-bit grid coordinates, optional RGB565 colour and 16-bit intensity.</summary>
 public readonly record struct LeicaSamplePoint(int X, int Y, int Z, ushort Color565 = 0, ushort Intensity = 0);
 
@@ -80,99 +77,34 @@ public readonly record struct CcBinSamplePoint(
 /// no byte of any of them comes from a real scan.</summary>
 internal static class SyntheticFixtures
 {
-    private const int RcsNodeTableOffset = 98605;
-    private const int RcsNodeSize = 368;
-
     // ---- ReCap scan (.rcs) --------------------------------------------------------------------------------------
 
-    /// <summary>A header-only scan: the declared point count is set, the node table is empty, so it yields no points.</summary>
-    public static byte[] CreateSyntheticRcs(long pointCount = 100, double tx = 1.0, double ty = 2.0, double tz = 3.0)
-    {
-        byte[] buffer = new byte[RcsNodeTableOffset + 1024];
-        WriteRcsHeader(buffer, pointCount, tx, ty, tz);
-        return buffer;
-    }
+    /// <summary>A scan that states a point count in its header but holds no leaf, so it stores no points.</summary>
+    public static byte[] CreateSyntheticRcs(long pointCount = 100, double tx = 1.0, double ty = 2.0, double tz = 3.0) =>
+        new RcsScanBuilder { PointCount = pointCount, Translation = (tx, ty, tz), Color = false, Intensity = false }.Build();
 
-    /// <summary>A scan with one node table entry and its point records at the end of the file.</summary>
-    /// <param name="points">Point records; the position is <paramref name="nodeMin"/> plus 0.0001 times each offset.</param>
-    /// <param name="nodeMin">Tight minimum of the node.</param>
-    /// <param name="withNormals">Whether the packed normal plane follows the records.</param>
-    /// <param name="withColor">Whether the records hold an intensity and a colour; without them they hold the position only.</param>
-    /// <param name="declaredPayloadBytes">Overrides the payload size the node declares; the records stay as written.</param>
-    /// <param name="tx">Translation of the scan.</param>
-    /// <param name="ty">Translation of the scan.</param>
-    /// <param name="tz">Translation of the scan.</param>
-    public static byte[] CreateSyntheticRcsWithPoints(IReadOnlyList<RcsSamplePoint> points, (double X, double Y, double Z) nodeMin,
+    /// <summary>A scan with one leaf, whose cube is large enough for the largest offset a record can hold, and its records.</summary>
+    /// <param name="points">The records of the leaf; a position counts its offsets in millimetres from <paramref name="leafMin"/>.</param>
+    /// <param name="leafMin">Lower corner of the cube of the leaf, relative to the translation of the scan.</param>
+    /// <param name="withNormals">Whether the header states that the points can hold normals.</param>
+    /// <param name="withColor">Whether the header states that the points hold a colour and an intensity.</param>
+    /// <param name="declaredPayloadBytes">The block size the leaf states instead of the size it is written with.</param>
+    /// <param name="tx">Translation of the scan, X.</param>
+    /// <param name="ty">Translation of the scan, Y.</param>
+    /// <param name="tz">Translation of the scan, Z.</param>
+    public static byte[] CreateSyntheticRcsWithPoints(IReadOnlyList<RcsSamplePoint> points, (double X, double Y, double Z) leafMin,
         bool withNormals = false, double tx = 0.0, double ty = 0.0, double tz = 0.0, bool withColor = true, uint? declaredPayloadBytes = null)
     {
-        int recordBytes = withColor ? 16 : 10;
-        int recordBytesTotal = recordBytes + (withNormals ? 4 : 0);
-        int recordBytes_ = points.Count * recordBytesTotal;
-        byte[] buffer = new byte[RcsNodeTableOffset + 8 + RcsNodeSize + recordBytes_];
-        WriteRcsHeader(buffer, points.Count, tx, ty, tz);
-
-        BinaryPrimitives.WriteUInt64LittleEndian(buffer.AsSpan(RcsNodeTableOffset, 8), 1);
-        Span<byte> node = buffer.AsSpan(RcsNodeTableOffset + 8, RcsNodeSize);
-        double[] min = [nodeMin.X, nodeMin.Y, nodeMin.Z];
-        for (int i = 0; i < 3; i++)
+        var scan = new RcsScanBuilder
         {
-            BinaryPrimitives.WriteDoubleLittleEndian(node.Slice(0x30 + (i * 8), 8), min[i]);
-            BinaryPrimitives.WriteDoubleLittleEndian(node.Slice(0x48 + (i * 8), 8), min[i] + 7.0);
-        }
-        BinaryPrimitives.WriteUInt32LittleEndian(node.Slice(0x64, 4), (uint)points.Count);
-        BinaryPrimitives.WriteUInt32LittleEndian(node.Slice(0x68, 4), declaredPayloadBytes ?? (uint)recordBytes_);
-
-        int payload = buffer.Length - recordBytes_;
-        int normals = payload + (points.Count * recordBytes);
-        for (int i = 0; i < points.Count; i++)
-        {
-            var p = points[i];
-            Span<byte> record = buffer.AsSpan(payload + (i * recordBytes), recordBytes);
-            BinaryPrimitives.WriteUInt16LittleEndian(record.Slice(4, 2), p.X);
-            BinaryPrimitives.WriteUInt16LittleEndian(record.Slice(6, 2), p.Y);
-            BinaryPrimitives.WriteUInt16LittleEndian(record.Slice(8, 2), p.Z);
-            if (withColor)
-            {
-                record[12] = p.Intensity;
-                record[13] = p.R;
-                record[14] = p.G;
-                record[15] = p.B;
-            }
-
-            if (withNormals)
-            {
-                buffer[normals + (i * 4)] = (byte)p.Nx;
-                buffer[normals + (i * 4) + 1] = (byte)p.Ny;
-                buffer[normals + (i * 4) + 2] = (byte)p.Nz;
-            }
-        }
-
-        return buffer;
-    }
-
-    private static void WriteRcsHeader(byte[] buffer, long pointCount, double tx, double ty, double tz)
-    {
-        // Container signature, then version 3.2.
-        "ADOCT"u8.CopyTo(buffer.AsSpan(0, 5));
-        BinaryPrimitives.WriteUInt32LittleEndian(buffer.AsSpan(8, 4), 3);
-        BinaryPrimitives.WriteUInt32LittleEndian(buffer.AsSpan(12, 4), 2);
-
-        // Translation, rotation, scale.
-        double[] values = [tx, ty, tz, 0, 0, 0, 1, 1, 1];
-        for (int i = 0; i < values.Length; i++)
-            BinaryPrimitives.WriteDoubleLittleEndian(buffer.AsSpan(0x10 + (i * 8), 8), values[i]);
-
-        // Octree bounds, then local bounds: min -10, max 10 on every axis.
-        double[] bounds = [-10, -10, -10, 10, 10, 10];
-        for (int i = 0; i < bounds.Length; i++)
-        {
-            BinaryPrimitives.WriteDoubleLittleEndian(buffer.AsSpan(0x70 + (i * 8), 8), bounds[i]);
-            BinaryPrimitives.WriteDoubleLittleEndian(buffer.AsSpan(0xA0 + (i * 8), 8), bounds[i]);
-        }
-
-        BinaryPrimitives.WriteUInt64LittleEndian(buffer.AsSpan(0xD8, 8), (ulong)pointCount);
-        "00000000-0000-0000-0000-000000000001"u8.CopyTo(buffer.AsSpan(0xE3, 36));
-        "LOCAL_GRID_SYSTEM"u8.CopyTo(buffer.AsSpan(0x1B9, 17));
+            PointCount = points.Count,
+            Translation = (tx, ty, tz),
+            Color = withColor,
+            Intensity = withColor,
+            Normals = withNormals,
+        };
+        scan.AddLeaf(leafMin, RcsScanBuilder.MaxOffset * 0.001, [.. points]).DeclaredBlockSize = declaredPayloadBytes;
+        return scan.Build();
     }
 
     // ---- ReCap project (.rcp) -------------------------------------------------------------------------------------

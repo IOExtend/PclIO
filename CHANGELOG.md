@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- ReCap scans (`.rcs`) of container major version 3 are decoded. The points come from the leaves of the file and the blocks the
+  points section holds for them: a position on a 1 mm grid, counted from the cube of the leaf, an intensity, an 8-bit colour and
+  a normal packed as a code that names a cell on a cube face. The sections are taken from the table of the header whatever their
+  order, the other sections are skipped, and a leaf may hold more index words than its points need. A point has a normal only
+  when its record states a plain cell code. Before, a file whose leaf blocks were not a whole multiple of a record size was
+  rejected.
+- A ReCap scan is checked as a whole before its first point is returned. A section table that does not fit in the file, a
+  missing or duplicated section, a leaf table that does not fit in its section, a leaf block that does not fit its points and
+  blocks that do not fill the points section are rejected with `InvalidDataException`, and nothing is returned. Before, the
+  records of a file were checked one at a time while its points were streamed.
+- The point count of a ReCap scan is the number of points the file stores, which a full read returns. The count stated in the
+  header is not that number; it stays available as `RcsScanDocument.DeclaredPointCount`. A scan that states a count in its header
+  but holds no leaf reports 0 points.
+- The channels of a ReCap scan (`HasColors`, `HasIntensities`, `HasNormals`) follow flags of the header, so they are known from
+  the header alone; before, they were derived from the size of a node payload. The bytes of a channel are read only when the
+  header states the channel.
+
 ## [0.1.1] - 2026-11-25
 
 ### Added

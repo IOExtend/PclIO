@@ -84,7 +84,7 @@ reading), `NotSupportedException` (unrecognised format or unsupported feature) o
 | Format | Extensions | Support level |
 | --- | --- | --- |
 | ASTM E57 | `.e57` | Points decoded for a defined subset (uncompressed bit-packed streams, single or double precision Cartesian coordinates, 8-bit colour and intensity). Per-point validity flags and images are not read. |
-| ReCap scan | `.rcs` | Experimental; layout of major version 3 only. |
+| ReCap scan | `.rcs` | Experimental; layout of major version 3 only. Positions, intensity, colour and normals; rotation is not applied. |
 | ReCap project | `.rcp` | Lists scans; opens the `.rcs` files it finds next to the project. Node transforms are not applied. |
 | Leica scan container | `.lgsx`, `.lgs` | Experimental; poses and bounds are not read, and all points of a container form one scan. |
 | FARO scan | `.fls`, or a FARO scan folder | Experimental; the scan grid comes from the stored parameters. A folder scan is read with an assumed layout, and a warning says so. |
@@ -101,7 +101,7 @@ are decided by extension alone, without a content check. A `.pcd` file is recogn
 and a `.ply` file by its magic word and header structure. Anything else is `PclFileKind.Unknown`. The rules are in
 [Public API](public-api.md#format-detection).
 Anything a decoder does not support fails instead of being guessed, apart from the assumptions named in the README (the FARO folder
-record layout, the EdgeWise position scale and the ReCap scan channel flags). The sizes and counts a reader accepts are limited; a
+record layout and the EdgeWise position scale). The sizes and counts a reader accepts are limited; a
 file that exceeds a limit is rejected with `InvalidDataException`, with the exceptions listed in the README.
 
 ## Limitations
