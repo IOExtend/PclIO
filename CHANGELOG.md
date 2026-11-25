@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-25
+
 ### Added
 
 - `PclIO.Scene` scene adapter: `PclSceneReader.Read` turns a point cloud file or an opened `PclDocument` into an IOScene `SceneDocument` in metres — one model, one element per scan with the engine's scan id as `SourceId`, non-indexed `Points` geometry with normals when every point of a scan has one, and the scan properties as text. `PclSceneOptions` sets the model key, a total point cap (default 1,000,000, the IOScene contract holds small clouds), a subsampling step and a metres-per-unit factor; `PclSceneResult` reports the scene, the counts and diagnostics for what was left out (per-point colour, intensity and classification are not part of IOScene 0.1.0). The engine stays a leaf: only the adapter references IOScene (`[0.1.0, 0.2.0-0.0)`), and it pins the engine exactly because both ship on one tag.
@@ -34,6 +36,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sizes do not fit.
 - The node layout of a ReCap scan is described in one place per container version. A file of a version without a described
   layout is rejected with a message that names the version and the described ones.
+- A ReCap node payload whose byte count is not a whole multiple of a known point record stride (as in BLK360 exports,
+  container 3.2, whose records are variable-length) is rejected with a message that names the container version instead of
+  being decoded with a guessed stride.
 - The channels of a ReCap scan follow from the file: the size of the payload of the nodes tells whether the points hold a
   colour, an intensity and a normal. `HasColors`, `HasIntensities` and `HasNormals` are no longer constants.
 - The transform of a ReCap project scan node is applied to its points unless `ApplyTransform` is false; when the manifest
