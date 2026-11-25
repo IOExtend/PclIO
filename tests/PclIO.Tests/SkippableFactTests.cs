@@ -132,4 +132,23 @@ public class SkippableFactTests
         Assert.DoesNotContain(dir.Root, TestFiles.Roots(""));
         Assert.DoesNotContain(dir.Root, TestFiles.Roots(null));
     }
+
+    [Fact]
+    public void TemporaryAndScratchArtifactsBelowTheRootAreNeverFixtures()
+    {
+        using var dir = new TempDirectory();
+        dir.Write("Temp/aaa.e57", []);
+        dir.Write("appdata/Local/TMP/bbb.e57", []);
+        dir.Write("ccc.tmp.e57", []);
+        dir.Write("pc/ddd.e57", []);
+
+        // The Temp folders and the .tmp. infix sort before the real sample in ordinal order; none of them may win.
+        Assert.Equal(Path.Combine(dir.Root, "pc", "ddd.e57"), TestFiles.TryFindByExtension(".e57", [dir.Root]));
+        Assert.Equal([Path.Combine(dir.Root, "pc", "ddd.e57")], TestFiles.TryFindAllByExtension(".e57", [dir.Root]));
+
+        // A corpus the caller places under a temporary folder still works: only the part below the root is inspected.
+        using var nested = new TempDirectory();
+        nested.Write("real.e57", []);
+        Assert.Equal(nested.PathOf("real.e57"), TestFiles.TryFindByExtension(".e57", [nested.Root]));
+    }
 }
