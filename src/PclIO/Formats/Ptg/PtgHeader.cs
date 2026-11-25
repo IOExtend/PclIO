@@ -6,10 +6,19 @@ using PclIO.Internal;
 namespace PclIO.Formats.Ptg;
 
 /// <summary>Parsed metadata and layout information from a Leica PTG binary scan header.</summary>
+/// <remarks>
+/// The header is a sequence of records: a uint32 name length, the name with a trailing NUL, then a value whose
+/// shape depends on the name. Strings carry a uint32 byte length and the bytes with a trailing NUL; counters are
+/// a bare uint32; the transform is 16 float64 values. The record <c>%%header_end</c> terminates the header and is
+/// immediately followed by the column offset table.
+/// </remarks>
 internal sealed class PtgHeader
 {
     internal static readonly byte[] Tag = [0x50, 0x54, 0x47, 0x00];
     internal const uint MagicNumber = 0x928FA3C7;
+
+    private const int MaxHeaderBytes = 1 << 20; // 1 MB limit
+    private const int MaxNameBytes = 256;
 
     public int NumRows { get; }
     public int NumCols { get; }
@@ -17,9 +26,12 @@ internal sealed class PtgHeader
     public PclTransform Transform { get; }
     public long ColumnPositionsOffset { get; }
     public string? ScanName { get; }
+    public string? ScannerName { get; }
     public string? ScannerModel { get; }
     public string? SoftwareName { get; }
     public string? Version { get; }
+    public string? CreationDate { get; }
+    public string? CreationTime { get; }
 
     public bool HasFloatCoordinates => (Properties & 0x01) != 0;
     public bool HasDoubleCoordinates => (Properties & 0x02) != 0;
@@ -35,9 +47,12 @@ internal sealed class PtgHeader
         PclTransform transform,
         long columnPositionsOffset,
         string? scanName,
+        string? scannerName,
         string? scannerModel,
         string? softwareName,
-        string? version)
+        string? version,
+        string? creationDate,
+        string? creationTime)
     {
         NumRows = numRows;
         NumCols = numCols;
@@ -45,14 +60,16 @@ internal sealed class PtgHeader
         Transform = transform;
         ColumnPositionsOffset = columnPositionsOffset;
         ScanName = scanName;
+        ScannerName = scannerName;
         ScannerModel = scannerModel;
         SoftwareName = softwareName;
         Version = version;
+        CreationDate = creationDate;
+        CreationTime = creationTime;
     }
 
     public static PtgHeader Parse(Stream stream)
     {
-        long origin = stream.Position;
         Span<byte> head = stackalloc byte[8];
         int read = stream.ReadAtLeast(head, 8, throwOnEndOfStream: false);
         if (read < 8)
@@ -64,162 +81,89 @@ internal sealed class PtgHeader
         if (BinaryPrimitives.ReadUInt32LittleEndian(head[4..8]) != MagicNumber)
             throw FormatError.Corrupted("Invalid PTG magic number.");
 
-        const int maxHeaderBytes = 1 << 20; // 1 MB limit
-        byte[] buffer = new byte[4096];
-        using var ms = new MemoryStream();
-
-        byte[] endMarker = "%%header_end"u8.ToArray();
-        int foundIndex = -1;
-        int endLineLength = 0;
-
-        while (ms.Length < maxHeaderBytes)
-        {
-            int n = stream.Read(buffer, 0, buffer.Length);
-            if (n == 0) break;
-            int prevLen = (int)ms.Length;
-            ms.Write(buffer, 0, n);
-
-            byte[] fullBytes = ms.GetBuffer();
-            int totalBytes = (int)ms.Length;
-
-            int searchStart = Math.Max(0, prevLen - endMarker.Length);
-            int idx = fullBytes.AsSpan(searchStart, totalBytes - searchStart).IndexOf(endMarker);
-            if (idx >= 0)
-            {
-                foundIndex = searchStart + idx;
-                int afterTag = foundIndex + endMarker.Length;
-                int nlIdx = fullBytes.AsSpan(afterTag, totalBytes - afterTag).IndexOf((byte)'\n');
-                if (nlIdx >= 0)
-                {
-                    endLineLength = afterTag + nlIdx + 1;
-                    break;
-                }
-            }
-        }
-
-        if (foundIndex < 0 || endLineLength == 0)
-            throw FormatError.Truncated("PTG header end tag '%%header_end'");
-
-        long columnPositionsOffset = origin + 8 + endLineLength;
-        byte[] headerBytes = ms.ToArray();
-        string headerText = Encoding.ASCII.GetString(headerBytes, 0, foundIndex);
-
-        using var reader = new StringReader(headerText);
-        string? line;
+        long headerStart = stream.Position;
         int? numRows = null;
         int? numCols = null;
         int? properties = null;
-        List<double>? matrix = null;
+        double[]? matrix = null;
         string? scanName = null;
+        string? scannerName = null;
         string? scannerModel = null;
         string? softwareName = null;
         string? version = null;
+        string? creationDate = null;
+        string? creationTime = null;
 
-        while ((line = reader.ReadLine()) != null)
+        byte[] nameBuf = new byte[MaxNameBytes];
+        bool ended = false;
+        while (!ended)
         {
-            line = line.Trim();
-            if (line.Length == 0) continue;
-            if (line.StartsWith("%%header_begin", StringComparison.OrdinalIgnoreCase) ||
-                line.StartsWith("header_begin", StringComparison.OrdinalIgnoreCase))
-            {
-                continue;
-            }
+            if (stream.Position - headerStart > MaxHeaderBytes)
+                throw FormatError.Corrupted("PTG header exceeds the 1 MiB limit.");
 
-            if (line.StartsWith("%%version", StringComparison.OrdinalIgnoreCase) ||
-                line.StartsWith("version", StringComparison.OrdinalIgnoreCase))
-            {
-                version = ExtractValue(line);
-                continue;
-            }
+            uint nameLength = ReadUInt32(stream);
+            if (nameLength < 2 || nameLength > MaxNameBytes)
+                throw FormatError.Corrupted($"Invalid PTG header record name length {nameLength}.");
 
-            if (line.StartsWith("NumRows", StringComparison.OrdinalIgnoreCase) ||
-                line.StartsWith("%%NumRows", StringComparison.OrdinalIgnoreCase))
-            {
-                string val = ExtractValue(line);
-                if (!int.TryParse(val, NumberStyles.Integer, CultureInfo.InvariantCulture, out int nr))
-                    throw FormatError.Corrupted($"Invalid NumRows value '{val}'.");
-                numRows = nr;
-                continue;
-            }
+            ReadExactly(stream, nameBuf.AsSpan(0, (int)nameLength), "PTG header record name");
+            if (nameBuf[(int)nameLength - 1] != 0)
+                throw FormatError.Corrupted("PTG header record name is not NUL-terminated.");
+            string key = Encoding.ASCII.GetString(nameBuf, 0, (int)nameLength - 1);
 
-            if (line.StartsWith("NumCols", StringComparison.OrdinalIgnoreCase) ||
-                line.StartsWith("%%NumCols", StringComparison.OrdinalIgnoreCase))
+            switch (key)
             {
-                string val = ExtractValue(line);
-                if (!int.TryParse(val, NumberStyles.Integer, CultureInfo.InvariantCulture, out int nc))
-                    throw FormatError.Corrupted($"Invalid NumCols value '{val}'.");
-                numCols = nc;
-                continue;
-            }
-
-            if (line.StartsWith("%%properties", StringComparison.OrdinalIgnoreCase) ||
-                line.StartsWith("properties", StringComparison.OrdinalIgnoreCase))
-            {
-                string val = ExtractValue(line);
-                int p;
-                if (val.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
-                {
-                    if (!int.TryParse(val[2..], NumberStyles.HexNumber, CultureInfo.InvariantCulture, out p))
-                        throw FormatError.Corrupted($"Invalid properties hex value '{val}'.");
-                }
-                else
-                {
-                    if (!int.TryParse(val, NumberStyles.Integer, CultureInfo.InvariantCulture, out p))
-                        throw FormatError.Corrupted($"Invalid properties value '{val}'.");
-                }
-                properties = p;
-                continue;
-            }
-
-            if (line.StartsWith("%%transform", StringComparison.OrdinalIgnoreCase) ||
-                line.StartsWith("transform", StringComparison.OrdinalIgnoreCase))
-            {
-                matrix = [];
-                string remaining = ExtractValue(line);
-                if (!string.IsNullOrWhiteSpace(remaining))
-                {
-                    AddDoubles(remaining, matrix);
-                }
-                while (matrix.Count < 16)
-                {
-                    string? nextLine = reader.ReadLine();
-                    if (nextLine == null)
-                        throw FormatError.Truncated("PTG transform matrix; expected 16 values.");
-                    AddDoubles(nextLine, matrix);
-                }
-                if (matrix.Count != 16)
-                    throw FormatError.Corrupted($"Invalid PTG transform matrix: expected 16 values, got {matrix.Count}.");
-                continue;
-            }
-
-            if (line.StartsWith("%%scan_name", StringComparison.OrdinalIgnoreCase) ||
-                line.StartsWith("scan_name", StringComparison.OrdinalIgnoreCase))
-            {
-                scanName = ExtractValue(line);
-                continue;
-            }
-
-            if (line.StartsWith("%%scanner_model", StringComparison.OrdinalIgnoreCase) ||
-                line.StartsWith("scanner_model", StringComparison.OrdinalIgnoreCase))
-            {
-                scannerModel = ExtractValue(line);
-                continue;
-            }
-
-            if (line.StartsWith("%%sw_name", StringComparison.OrdinalIgnoreCase) ||
-                line.StartsWith("sw_name", StringComparison.OrdinalIgnoreCase))
-            {
-                softwareName = ExtractValue(line);
-                continue;
+                case "%%header_begin":
+                    break;
+                case "%%header_end":
+                    ended = true;
+                    break;
+                case "%%version":
+                    uint v = ReadUInt32(stream);
+                    if (v != 1)
+                        throw FormatError.Unsupported($"PTG header version {v}; only version 1 is described.");
+                    version = v.ToString(CultureInfo.InvariantCulture);
+                    break;
+                case "%%cols":
+                    numCols = ReadCount(stream, key);
+                    break;
+                case "%%rows":
+                    numRows = ReadCount(stream, key);
+                    break;
+                case "%%properties":
+                    properties = (int)ReadUInt32(stream);
+                    break;
+                case "%%transform":
+                    matrix = ReadTransform(stream);
+                    break;
+                case "%%scan_name":
+                    scanName = ReadString(stream, key);
+                    break;
+                case "%%scanner_name":
+                    scannerName = ReadString(stream, key);
+                    break;
+                case "%%scanner_model":
+                    scannerModel = ReadString(stream, key);
+                    break;
+                case "%%sw_name":
+                    softwareName = ReadString(stream, key);
+                    break;
+                case "%%creation_date":
+                    creationDate = ReadString(stream, key);
+                    break;
+                case "%%creation_time":
+                    creationTime = ReadString(stream, key);
+                    break;
+                default:
+                    throw FormatError.Unsupported($"PTG header key '{key}'.");
             }
         }
 
         if (!numRows.HasValue)
-            throw FormatError.Corrupted("Missing NumRows in PTG header.");
+            throw FormatError.Corrupted("Missing %%rows in PTG header.");
         if (!numCols.HasValue)
-            throw FormatError.Corrupted("Missing NumCols in PTG header.");
+            throw FormatError.Corrupted("Missing %%cols in PTG header.");
         if (!properties.HasValue)
-            throw FormatError.Corrupted("Missing properties in PTG header.");
+            throw FormatError.Corrupted("Missing %%properties in PTG header.");
 
         int rows = numRows.Value;
         int cols = numCols.Value;
@@ -238,29 +182,73 @@ internal sealed class PtgHeader
         if ((pVal & ~0x0F) != 0)
             throw FormatError.Corrupted($"Unsupported PTG property bits: 0x{pVal:X}.");
 
-        PclTransform transform = matrix != null ? new PclTransform { Matrix4x4 = matrix.ToArray() } : PclTransform.Identity;
-
-        return new PtgHeader(rows, cols, pVal, transform, columnPositionsOffset, scanName, scannerModel, softwareName, version);
-    }
-
-    private static string ExtractValue(string line)
-    {
-        int i = 0;
-        while (i < line.Length && !char.IsWhiteSpace(line[i]) && line[i] != ':' && line[i] != '=') i++;
-        while (i < line.Length && (char.IsWhiteSpace(line[i]) || line[i] == ':' || line[i] == '=')) i++;
-        return i < line.Length ? line[i..].Trim() : string.Empty;
-    }
-
-    private static void AddDoubles(string text, List<double> values)
-    {
-        string[] parts = text.Split([' ', '\t', ','], StringSplitOptions.RemoveEmptyEntries);
-        foreach (var part in parts)
+        // PTG stores a row-vector matrix (translation in the last row); PclTransform applies a column-vector one
+        // (translation in the last column), so the matrix is transposed on load.
+        PclTransform transform = PclTransform.Identity;
+        if (matrix != null)
         {
-            if (!double.TryParse(part, NumberStyles.Float, CultureInfo.InvariantCulture, out double val))
-                throw FormatError.Corrupted($"Invalid numeric value in PTG transform: '{part}'.");
+            double[] m = new double[16];
+            for (int r = 0; r < 4; r++)
+                for (int c = 0; c < 4; c++)
+                    m[r * 4 + c] = matrix[c * 4 + r];
+            transform = new PclTransform { Matrix4x4 = m };
+        }
+
+        return new PtgHeader(rows, cols, pVal, transform, stream.Position,
+            scanName, scannerName, scannerModel, softwareName, version, creationDate, creationTime);
+    }
+
+    private static void ReadExactly(Stream stream, Span<byte> buffer, string what)
+    {
+        try
+        {
+            stream.ReadExactly(buffer);
+        }
+        catch (EndOfStreamException)
+        {
+            throw FormatError.Truncated(what);
+        }
+    }
+
+    private static uint ReadUInt32(Stream stream)
+    {
+        Span<byte> buf = stackalloc byte[4];
+        ReadExactly(stream, buf, "PTG header uint32");
+        return BinaryPrimitives.ReadUInt32LittleEndian(buf);
+    }
+
+    private static int ReadCount(Stream stream, string key)
+    {
+        uint value = ReadUInt32(stream);
+        if (value > int.MaxValue)
+            throw FormatError.Corrupted($"PTG {key} value {value} exceeds the supported range.");
+        return (int)value;
+    }
+
+    private static string ReadString(Stream stream, string key)
+    {
+        uint length = ReadUInt32(stream);
+        if (length == 0 || length > MaxHeaderBytes)
+            throw FormatError.Corrupted($"Invalid PTG {key} string length {length}.");
+
+        byte[] buf = new byte[length];
+        ReadExactly(stream, buf, $"PTG {key} string");
+        int textLength = buf[length - 1] == 0 ? (int)length - 1 : (int)length;
+        return Encoding.UTF8.GetString(buf, 0, textLength);
+    }
+
+    private static double[] ReadTransform(Stream stream)
+    {
+        byte[] buf = new byte[128];
+        ReadExactly(stream, buf, "PTG transform matrix");
+        double[] values = new double[16];
+        for (int i = 0; i < 16; i++)
+        {
+            double val = BinaryPrimitives.ReadDoubleLittleEndian(buf.AsSpan(i * 8, 8));
             if (!double.IsFinite(val))
                 throw FormatError.Corrupted("Non-finite numeric value in PTG transform.");
-            values.Add(val);
+            values[i] = val;
         }
+        return values;
     }
 }
