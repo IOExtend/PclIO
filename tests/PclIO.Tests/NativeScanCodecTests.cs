@@ -65,6 +65,36 @@ public sealed class NativeScanCodecTests
         Assert.Throws<InvalidDataException>(() => doc.ReadAllPoints().ToArray());
     }
 
+    [Theory]
+    [InlineData((byte)'*')]
+    [InlineData((byte)'X')]
+    public void Leica_Unknown_Point_Payload_Reports_An_Error_For_Its_Container(byte marker)
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticLgsx(containerMarker: marker, assignPointsToSetups: true);
+        int pointData = bytes.AsSpan().IndexOf("mMPK"u8);
+        Assert.True(pointData > 0);
+        bytes.AsSpan(pointData, 4).Clear();
+        using var doc = LgsxDocument.Open(dir.Write("scan.lgsx", bytes));
+        Assert.Contains(doc.Entries, entry => entry.Name == "PointCloud");
+        var scan = Assert.Single(doc.Scans);
+        if (marker == (byte)'*')
+        {
+            Assert.Equal(PclFileKind.LeicaLgs, doc.Kind);
+            Assert.Null(doc.GetEncodedPointCount());
+            Assert.Null(Assert.Single(doc.Setups).Translation);
+            Assert.False(scan.HasColors);
+            Assert.Throws<NotSupportedException>(() => scan.PointCount);
+            var error = Assert.Throws<NotSupportedException>(() => scan.ReadPoints().First());
+            Assert.Contains("Convert the project to LGSx", error.Message);
+        }
+        else
+        {
+            Assert.Equal(PclFileKind.LeicaLgsx, doc.Kind);
+            Assert.Throws<InvalidDataException>(() => scan.ReadPoints().First());
+        }
+    }
+
     [Fact]
     public void E57_Image_Blob_Checks_Header_And_Each_Page()
     {

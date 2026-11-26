@@ -34,6 +34,18 @@ public sealed class KindDetectionTests
         Assert.Equal(PclFileKind.LeicaLgs, Detect(SyntheticFixtures.CreateSyntheticLgsx(), "site.lgs"));
 
     [Theory]
+    [InlineData((byte)'*', "renamed.lgsx", PclFileKind.LeicaLgs)]
+    [InlineData((byte)'X', "renamed.lgs", PclFileKind.LeicaLgsx)]
+    [InlineData((byte)'*', "renamed.dat", PclFileKind.LeicaLgs)]
+    public void Leica_Footer_Distinguishes_The_Container_Regardless_Of_Extension(byte marker, string name, PclFileKind expected)
+    {
+        byte[] bytes = SyntheticFixtures.CreateSyntheticLgsx(containerMarker: marker);
+        using var stream = new MemoryStream(bytes);
+        Assert.Equal(expected, PclFile.DetectKind(stream, name));
+        Assert.Equal(0, stream.Position);
+    }
+
+    [Theory]
     [InlineData("project.smf")]
     [InlineData("project.srf")]
     public void Detects_PinPoint_Json_Manifests(string name) =>

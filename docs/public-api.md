@@ -30,8 +30,8 @@ Detection finds the kind from the content of the file, its extension or the layo
 `PclFileKind.Unknown` for anything else. Extensions are compared without regard to case; for the stream overload the extension
 is the argument, which may also be a file name.
 
-- `E57`, `RecapScan` and the Leica kinds are recognised by content and accepted with any extension; `LeicaLgs` is chosen for the
-  extension `.lgs` and `LeicaLgsx` for any other. `EdgeWise` is also recognised by content in a file with another extension.
+- `E57`, `RecapScan` and the Leica kinds are recognised by content with any extension. A recognised Leica footer determines
+  `LeicaLgs` or `LeicaLgsx`, with the extension as a fallback. `EdgeWise` can also be recognised by content.
   `Las` is recognised by the `LASF` signature with any extension except `.laz` and `.copc.laz`.
   `Laz` is recognised by the `LASF` signature, a valid LASzip VLR and the `.laz` extension.
   `Copc` is recognised by the LAS 1.4 header and the `copc` info VLR with `.copc.laz` or any extension.
@@ -102,8 +102,9 @@ request. An unresolved reference reports false for the channel properties. A res
 
 ## Format documents
 
-For sampling plans, `LgsxDocument.GetEncodedPointCount` reads the declared counts in version 22 point block headers without
-decompressing the point data. It returns null when the file uses another block layout or has no point blocks.
+For sampling plans, `LgsxDocument.GetEncodedPointCount` reads the declared counts from native LGS point metadata or
+version 22 LGSx point block headers without decoding the points. It returns null when the count is unavailable.
+Legacy LGS returns one scan in project coordinates. Its dependent blocks are traversed together in spatial order.
 `PclSceneOptions.PointObserver` receives retained points in scene geometry order, including their source attributes.
 `PclSceneOptions.MaxDegreeOfParallelism` passes the requested concurrency to formats that support block decoding.
 
