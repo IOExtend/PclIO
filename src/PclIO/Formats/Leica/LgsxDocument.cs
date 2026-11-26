@@ -58,6 +58,10 @@ public sealed class LgsxDocument : PclDocument
     private readonly List<LgsxSetup> _setups = [];
     private readonly bool _isLgsLegacy;
 
+    internal bool HasUnsupportedLegacyPoints { get; private set; }
+    internal const string UnsupportedLegacyPointsMessage =
+        "The Leica LGS point encoding or data mask is unsupported. Convert the project to LGSx to read its points.";
+
     private LgsxDocument(string path, long fileSize, string guid, string version, bool isLegacy)
         : base(path, fileSize)
     {
@@ -83,13 +87,14 @@ public sealed class LgsxDocument : PclDocument
     }
 
     /// <summary>
-    /// Returns the sum of the declared point counts in the version 22 block headers, or null for other layouts.
-    /// This reads the block headers and does not decompress their data.
+    /// Returns the declared point count of a supported native point section, or null when unavailable.
+    /// This reads metadata without decoding the points.
     /// </summary>
     public long? GetEncodedPointCount()
     {
+        if (_scans.FirstOrDefault() is LegacyLgsScan legacy) return legacy.PointCount;
         var entry = Entries.FirstOrDefault(e => e.Name.Equals("PointCloud", StringComparison.OrdinalIgnoreCase));
-        if (entry == null) return null;
+        if (entry == null || HasUnsupportedLegacyPoints) return null;
         using var stream = File.OpenRead(FilePath);
         var chain = ReadBlockChain(stream, entry);
         if (chain.Count == 0) return null;
@@ -110,6 +115,33 @@ public sealed class LgsxDocument : PclDocument
         return total;
     }
 
+    // Both containers share the leading signature. Published files distinguish their format in the footer.
+    internal static PclFileKind? DetectFooterKind(Stream stream)
+    {
+        ReadOnlySpan<byte> signature = "Leica Project File "u8;
+        Span<byte> footer = stackalloc byte[signature.Length + 1 + sizeof(uint) + sizeof(ulong)];
+        long origin = stream.Position;
+        if (stream.Length - origin < ContainerMagic.Length + footer.Length) return null;
+        try
+        {
+            stream.Position = stream.Length - footer.Length;
+            if (stream.ReadAtLeast(footer, footer.Length, throwOnEndOfStream: false) != footer.Length ||
+                !footer.StartsWith(signature))
+                return null;
+
+            return footer[signature.Length] switch
+            {
+                (byte)'*' => PclFileKind.LeicaLgs,
+                (byte)'X' => PclFileKind.LeicaLgsx,
+                _ => null,
+            };
+        }
+        finally
+        {
+            stream.Position = origin;
+        }
+    }
+
     /// <summary>Opens a Leica container and reads its table of contents.</summary>
     /// <param name="path">Path of the .lgsx or .lgs file.</param>
     /// <param name="options">Read options; currently unused when opening.</param>
@@ -127,7 +159,9 @@ public sealed class LgsxDocument : PclDocument
         if (fs.ReadAtLeast(magic, magic.Length, throwOnEndOfStream: false) < magic.Length || !magic.AsSpan().SequenceEqual(ContainerMagic))
             throw FormatError.Corrupted("not a Leica LGSx file, container signature mismatch.");
 
-        bool isLegacy = path.EndsWith(".lgs", StringComparison.OrdinalIgnoreCase);
+        PclFileKind? footerKind = DetectFooterKind(fs);
+        bool isLegacy = footerKind == PclFileKind.LeicaLgs ||
+            (footerKind == null && path.EndsWith(".lgs", StringComparison.OrdinalIgnoreCase));
 
         // The last 8 bytes hold the offset of the table of contents.
         fs.Seek(-8, SeekOrigin.End);
@@ -235,8 +269,8 @@ public sealed class LgsxDocument : PclDocument
 
                     var setup = new LgsxSetup(setupId, name, payloadOffset, payloadLength);
 
-                    // The payload of a setup entry holds its record: the pose, the bounds and the range of its points.
-                    var record = ReadSetupRecord(fs, setup);
+                    // Only the LGSx setup record layout is known.
+                    var record = footerKind != PclFileKind.LeicaLgs ? ReadSetupRecord(fs, setup) : null;
                     if (record != null)
                     {
                         setup = setup with
@@ -256,12 +290,24 @@ public sealed class LgsxDocument : PclDocument
 
         // The points are assigned to the setups when the container says which part of the point data belongs to
         // each of them; otherwise all points stay in one scan.
-        var assignments = pointCloudEntry != null
+        if (footerKind == PclFileKind.LeicaLgs &&
+            pointCloudEntry is { Size: >= 4 } && !HasReadablePointHeader(fs, pointCloudEntry))
+        {
+            if (LegacyLgsScan.TryOpen(fs, pointCloudEntry) is { } scan)
+            {
+                document._scans.Add(scan);
+                return document;
+            }
+            document.HasUnsupportedLegacyPoints = true;
+        }
+        var assignments = pointCloudEntry != null && !document.HasUnsupportedLegacyPoints
             ? AssignBlocksToSetups(path, pointCloudEntry, document._setups)
             : null;
 
         // The number of points is read from the container when it states it; otherwise it is counted by decoding.
-        long? declaredCount = pointCloudEntry != null ? ReadDeclaredPointCount(fs, pointCloudEntry) : null;
+        long? declaredCount = pointCloudEntry != null && !document.HasUnsupportedLegacyPoints
+            ? ReadDeclaredPointCount(fs, pointCloudEntry)
+            : null;
 
         if (assignments != null)
         {
@@ -296,11 +342,13 @@ public sealed class LgsxDocument : PclDocument
                     document: document));
             }
 
-            if (scanSetups.Count > 0)
+            if (scanSetups.Count > 0 && !document.HasUnsupportedLegacyPoints)
                 document._warnings.Add($"The container lists {scanSetups.Count} setup entries; points are not assigned to them and are returned as one scan.");
         }
 
-        if (document._scans.Count > 0)
+        if (document.HasUnsupportedLegacyPoints)
+            document._warnings.Add(UnsupportedLegacyPointsMessage);
+        else if (document._scans.Count > 0)
         {
             if (pointCloudEntry == null)
                 document._warnings.Add("No point data entry was found; scans have no readable points.");
@@ -363,6 +411,14 @@ public sealed class LgsxDocument : PclDocument
             pointOffset,
             pointLength,
             pointCount > long.MaxValue ? -1 : (long)pointCount);
+    }
+
+    private static bool HasReadablePointHeader(FileStream fs, LgsxEntry entry)
+    {
+        Span<byte> header = stackalloc byte[4];
+        fs.Position = (long)entry.Offset;
+        fs.ReadExactly(header);
+        return header.SequenceEqual(PointDataMagic);
     }
 
     /// <summary>
@@ -603,6 +659,7 @@ public sealed class LgsxScan : PclScan
     /// first access decodes the whole point data and caches the result, which can be slow for large files.
     /// </summary>
     /// <exception cref="InvalidDataException">The point data is malformed; the exception is thrown by the first access.</exception>
+    /// <exception cref="NotSupportedException">The container uses an unsupported legacy point encoding.</exception>
     public override long PointCount =>
         _declaredPointCount ?? (_pointCount >= 0 ? _pointCount : _pointCount = CountPoints());
 
@@ -641,7 +698,7 @@ public sealed class LgsxScan : PclScan
 
     private (bool, bool, bool) DetectChannels()
     {
-        if (_entry == null) return (false, false, false);
+        if (_entry == null || _document?.HasUnsupportedLegacyPoints == true) return (false, false, false);
 
         using var fs = File.OpenRead(_filePath);
         foreach (var (start, length) in LgsxDocument.ReadBlockChain(fs, _entry))
@@ -679,6 +736,7 @@ public sealed class LgsxScan : PclScan
     /// </remarks>
     /// <param name="options">Read options; null uses defaults.</param>
     /// <exception cref="InvalidDataException">The point data is malformed, declares oversized data or is incomplete in strict mode.</exception>
+    /// <exception cref="NotSupportedException">The container uses an unsupported legacy point encoding.</exception>
     public override IEnumerable<PclPoint> ReadPoints(PclReadOptions? options = null)
     {
         options ??= PclReadOptions.Default;
@@ -686,6 +744,8 @@ public sealed class LgsxScan : PclScan
 
         long targetCount = options.MaxPoints ?? long.MaxValue;
         if (targetCount <= 0) yield break;
+        if (_document?.HasUnsupportedLegacyPoints == true)
+            throw FormatError.Unsupported(LgsxDocument.UnsupportedLegacyPointsMessage);
         int step = Math.Max(1, options.SubsampleStep);
         long yielded = 0;
 

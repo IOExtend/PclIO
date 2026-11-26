@@ -76,7 +76,7 @@ public static class Program
           ASTM E57      by signature, any extension
           ReCap scan    by signature (.rcs)
           ReCap project a ZIP archive with the extension .rcp
-          Leica scan    by signature; .lgs selects the older container, any other extension .lgsx
+          Leica scan    by signature and footer; extension used when the footer is unrecognised
           FARO scan     an OLE2 compound file with the extension .fls, or a folder with a FARO scan layout
           PinPoint      a JSON text file with the extension .smf or .srf, or a folder that holds
                         ScanProject.json, a .smf file or a .srf file

@@ -86,7 +86,8 @@ reading), `NotSupportedException` (unrecognised format or unsupported feature) o
 | ASTM E57 | `.e57` | Points decoded for a defined subset (uncompressed bit-packed streams, single or double precision Cartesian coordinates, 8-bit colour and intensity). The format API also reads image blobs with checksum verification. |
 | ReCap scan | `.rcs` | Experimental support for container version 3.2. Reads positions, intensity, colour and normals. Rotation values are metadata. |
 | ReCap project | `.rcp` | Opens referenced `.rcs` files next to the project. With transforms enabled, uses the node's translation and scale when stated, and otherwise uses the scan file's transform. Rotation values are metadata. |
-| Leica scan container | `.lgsx`, `.lgs` | Experimental. Version 22 blocks provide geometry, RGB and intensity. Containers without setup assignments open as one scan in container coordinates. |
+| Leica scan container | `.lgsx` | Experimental. Version 22 blocks provide geometry, RGB and intensity. Containers without setup assignments open as one scan in container coordinates. |
+| Leica legacy container | `.lgs` | Reads the supported octree layout as one scan with source RGB and intensity. Convert unrecognized variants to LGSx. |
 | FARO scan | `.fls`, or a FARO scan folder | Experimental. Single-file distance mode 26 reconstructs both halves of the scan grid. A folder scan is read with an assumed layout and carries a warning. |
 | PinPoint project | `.srf`, `.smf`, or a folder with `ScanProject.json` or `.smf`/`.srf` files | Experimental; manifest plus point data files in one of two layouts (named channels, or sections with Snappy-compressed channels); a data file in neither layout is not read. |
 | EdgeWise | `.c3db`, `.c3ptx` | Experimental; positions only, with a coordinate scale that is an assumption of the reader. |

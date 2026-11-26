@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
+using PclIO.Formats.Leica;
 
 namespace PclIO.Internal;
 
@@ -139,7 +140,7 @@ internal static class KindDetector
             return PclFileKind.E57;
 
         if (head.StartsWith(LeicaMagic))
-            return extension == ".lgs" ? PclFileKind.LeicaLgs : PclFileKind.LeicaLgsx;
+            return LgsxDocument.DetectFooterKind(stream) ?? (extension == ".lgs" ? PclFileKind.LeicaLgs : PclFileKind.LeicaLgsx);
 
         if (head.StartsWith(RcsMagic))
             return PclFileKind.RecapScan;

@@ -174,7 +174,7 @@ internal static class SyntheticFixtures
         IReadOnlyList<byte[]>? extraPlanes = null, int setupCount = 1, bool assignPointsToSetups = false, bool overlappingSetupRanges = false,
         bool collidingSetupNames = false, bool damagedSetupRecord = false, bool damagedPointData = false, bool withPointCount = true,
         bool oversizedFrame = false, bool unknownBlock = false, bool unknownFirstBlock = false, bool truncatedFrameList = false, bool fewPlanes = false,
-        int blockCount = 0, int damagedBlock = -1, bool nativeLeicaBlock = false)
+        int blockCount = 0, int damagedBlock = -1, bool nativeLeicaBlock = false, byte? containerMarker = null)
     {
         points ??= DefaultLeicaPoints;
         using var ms = new MemoryStream();
@@ -238,6 +238,12 @@ internal static class SyntheticFixtures
         if (withPointData) bw.Write((ulong)pointEntry);
 
         bw.Write(Encoding.ASCII.GetBytes("build 2024.1.0 {12345678-1234-1234-1234-123456789abc}"));
+        if (containerMarker is { } marker)
+        {
+            bw.Write("Leica Project File "u8);
+            bw.Write(marker);
+            bw.Write(205u);
+        }
         bw.Write((ulong)tocOffset);
         return ms.ToArray();
     }
