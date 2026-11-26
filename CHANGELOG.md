@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-11-26
+
 ### Added
 
 - Read legacy Leica LGS octree points with source RGB and intensity.
