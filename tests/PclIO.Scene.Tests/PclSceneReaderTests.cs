@@ -262,7 +262,15 @@ public sealed class PclSceneReaderTests
         using var dir = new TempDirectory();
         string path = XyzFile(dir, 10);
 
-        var result = PclSceneReader.Read(path, new PclSceneOptions { SubsampleStep = 2 });
+        var observed = new List<(int Geometry, PclPoint Point)>();
+        var result = PclSceneReader.Read(path, new PclSceneOptions
+        {
+            SubsampleStep = 2,
+            PointObserver = (id, point) => observed.Add((id, point)),
+        });
+        var geometry = Assert.Single(result.Document.Geometries);
+        Assert.All(observed, item => Assert.Equal(geometry.Id, item.Geometry));
+        Assert.Equal(geometry.Vertices, observed.Select(item => new Vector3d(item.Point.X, item.Point.Y, item.Point.Z)));
 
         Assert.Equal(5, result.PointCount);
         Assert.Throws<ArgumentOutOfRangeException>(() => new PclSceneOptions { SubsampleStep = 0 });

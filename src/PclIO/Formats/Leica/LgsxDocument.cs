@@ -82,6 +82,34 @@ public sealed class LgsxDocument : PclDocument
         }
     }
 
+    /// <summary>
+    /// Returns the sum of the declared point counts in the version 22 block headers, or null for other layouts.
+    /// This reads the block headers and does not decompress their data.
+    /// </summary>
+    public long? GetEncodedPointCount()
+    {
+        var entry = Entries.FirstOrDefault(e => e.Name.Equals("PointCloud", StringComparison.OrdinalIgnoreCase));
+        if (entry == null) return null;
+        using var stream = File.OpenRead(FilePath);
+        var chain = ReadBlockChain(stream, entry);
+        if (chain.Count == 0) return null;
+
+        Span<byte> header = stackalloc byte[16];
+        long total = 0;
+        foreach (var (start, _) in chain)
+        {
+            stream.Position = start + 12;
+            stream.ReadExactly(header);
+            if (Bytes.ReadUInt32LE(header) != LgsxScan.Morton96Version) return null;
+            ulong count = Bytes.ReadUInt64LE(header[8..]);
+            if (count is 0 or > LgsxScan.MaxFrameBytes)
+                throw FormatError.Corrupted("point block declares an invalid point count.");
+            total = checked(total + (long)count);
+        }
+
+        return total;
+    }
+
     /// <summary>Opens a Leica container and reads its table of contents.</summary>
     /// <param name="path">Path of the .lgsx or .lgs file.</param>
     /// <param name="options">Read options; currently unused when opening.</param>
@@ -521,7 +549,7 @@ public sealed class LgsxScan : PclScan
 
     // Limits that bound memory and work for sizes declared by the file.
     private const int MaxCompressedFrameBytes = 10_000_000;
-    private const int MaxFrameBytes = 16 * 1024 * 1024;
+    internal const int MaxFrameBytes = 16 * 1024 * 1024;
     private const int MaxFramesPerBlock = 64;
     private const long MaxBlockBytes = 128L * 1024 * 1024;
 
@@ -531,6 +559,8 @@ public sealed class LgsxScan : PclScan
 
     // Minimum plane counts at which an optional channel is read.
     private const int ColorFrames = 14;
+    private const int Morton96Planes = 12;
+    internal const uint Morton96Version = 22;
     private const int IntensityFrames = 16;
     private const int NormalFrames = 19;
 
@@ -576,13 +606,13 @@ public sealed class LgsxScan : PclScan
     public override long PointCount =>
         _declaredPointCount ?? (_pointCount >= 0 ? _pointCount : _pointCount = CountPoints());
 
-    /// <summary>True when the first point block carries colour planes.</summary>
+    /// <summary>True when the colour encoding of the first point block is supported.</summary>
     public override bool HasColors => Channels.Colors;
 
     /// <summary>True when the first point block carries intensity planes.</summary>
     public override bool HasIntensities => Channels.Intensities;
 
-    /// <summary>True when the first point block carries normal planes.</summary>
+    /// <summary>True when the normal encoding of the first point block is supported.</summary>
     public override bool HasNormals => Channels.Normals;
 
     private (bool Colors, bool Intensities, bool Normals) Channels => _channels ??= DetectChannels();
@@ -602,7 +632,10 @@ public sealed class LgsxScan : PclScan
     }
 
     /// <summary>Decoded planes of one point block together with its coordinate frame.</summary>
-    private sealed record Block(double ScaleX, double ScaleY, double ScaleZ, double MinX, double MinY, double MinZ, List<byte[]> Frames);
+    private sealed record Block(double ScaleX, double ScaleY, double ScaleZ, double MinX, double MinY, double MinZ,
+        List<byte[]> Frames, NativeLayout? Layout);
+
+    private sealed record NativeLayout(int PointCount, int Intensity, int Color);
 
     private long CountPoints() => ReadPoints(new PclReadOptions { ApplyTransform = false }).LongCount();
 
@@ -611,8 +644,12 @@ public sealed class LgsxScan : PclScan
         if (_entry == null) return (false, false, false);
 
         using var fs = File.OpenRead(_filePath);
-        foreach (var block in ReadBlocks(fs, new ReadState()))
+        foreach (var (start, length) in LgsxDocument.ReadBlockChain(fs, _entry))
         {
+            if (!BelongsToScan(start)) continue;
+            var (block, _, _, _, _) = DecodeBlock(fs, start, length);
+            if (block == null) continue;
+            if (block.Layout is { } layout) return (layout.Color >= 0, layout.Intensity >= 0, false);
             int n = block.Frames.Count;
             return (n >= ColorFrames, n >= IntensityFrames, n >= NormalFrames);
         }
@@ -623,10 +660,9 @@ public sealed class LgsxScan : PclScan
     /// <summary>Streams the points of this scan.</summary>
     /// <remarks>
     /// <para>
-    /// Positions are decoded from the packed position planes of each block. A code of zero at any slot except the
-    /// first of a block is treated as unused padding and is not returned, so a real point that sits exactly at the
-    /// block origin is dropped. A block yields as many points as its shortest position plane holds. Returned points
-    /// keep consecutive <see cref="PclPoint.Index"/> values.
+    /// Version 22 blocks store differential 96-bit Morton positions. A zero delta repeats the previous position.
+    /// The legacy four-plane layout treats zero codes after the first slot as padding.
+    /// Returned points keep consecutive <see cref="PclPoint.Index"/> values.
     /// </para>
     /// <para>
     /// With <see cref="PclReadOptions.Blocks"/> only the blocks of the scan in that range are read; without it all
@@ -823,7 +859,15 @@ public sealed class LgsxScan : PclScan
         if (chain.FullChain.Count > 0)
         {
             long lastEnd = chain.FullChain[^1].Start + chain.FullChain[^1].Length;
-            if (chain.PayloadEnd - lastEnd >= 8 + 128) state.ChainEndedEarly = true;
+            if (chain.PayloadEnd - lastEnd >= 8 + 128)
+            {
+                // Version 22 payloads end with a JSON tree descriptor after the last point block.
+                ReadOnlySpan<byte> descriptor = "{\n\t\"tree-header-info\""u8;
+                Span<byte> prefix = stackalloc byte[descriptor.Length];
+                fs.Position = lastEnd;
+                fs.ReadExactly(prefix);
+                state.ChainEndedEarly = !prefix.SequenceEqual(descriptor);
+            }
         }
         else
         {
@@ -865,81 +909,6 @@ public sealed class LgsxScan : PclScan
         if (strict) throw FormatError.Corrupted(message);
 
         _document?.AddWarning(message);
-    }
-
-    /// <summary>Walks the chain of point blocks and yields those that carry point planes and belong to this scan.</summary>
-    private IEnumerable<Block> ReadBlocks(FileStream fs, ReadState state)
-    {
-        long fileLength = fs.Length;
-        long decodedLimit = DecodedAllowanceBytes + (fileLength * DecodedBytesPerFileByte);
-        long decodedBytes = 0;
-        byte[] blockHeader = new byte[128];
-
-        var chain = LgsxDocument.ReadBlockChain(fs, _entry!);
-        long payloadEnd = (long)_entry!.Offset + (long)_entry.Size;
-
-        foreach (var (blockStart, blockLength) in chain)
-        {
-            if (!BelongsToScan(blockStart)) continue;
-
-            // The block header follows the 8-byte block signature and length.
-            fs.Position = blockStart + 8;
-            fs.ReadExactly(blockHeader);
-
-            double scaleX = Bytes.ReadDoubleLE(blockHeader.AsSpan(0x34, 8));
-            double scaleY = Bytes.ReadDoubleLE(blockHeader.AsSpan(0x3C, 8));
-            double scaleZ = Bytes.ReadDoubleLE(blockHeader.AsSpan(0x44, 8));
-            double minX = Bytes.ReadDoubleLE(blockHeader.AsSpan(0x4C, 8));
-            double minY = Bytes.ReadDoubleLE(blockHeader.AsSpan(0x54, 8));
-            double minZ = Bytes.ReadDoubleLE(blockHeader.AsSpan(0x5C, 8));
-
-            long blockEnd = blockStart + blockLength;
-
-            // Find the first compressed frame; its 8-byte length prefix precedes it.
-            byte[] searchBuf = new byte[(int)Math.Min(1024L, blockLength)];
-            fs.Position = blockStart + 8;
-            int bytesRead = fs.Read(searchBuf, 0, searchBuf.Length);
-            int firstFrame = -1;
-            for (int s = 0; s < bytesRead - 4; s++)
-            {
-                if (searchBuf.AsSpan(s, 4).SequenceEqual(FrameMagic))
-                {
-                    firstFrame = s;
-                    break;
-                }
-            }
-
-            if (firstFrame >= 8)
-            {
-                long firstFrameOffset = blockStart + firstFrame;
-                var frames = ReadAllFrames(fs, firstFrameOffset, blockEnd, state);
-
-                // Many small blocks that each expand a lot would otherwise make the file cost unbounded time.
-                foreach (byte[] plane in frames) decodedBytes += plane.Length;
-                if (decodedBytes > decodedLimit)
-                    throw FormatError.Corrupted("the point data decompresses to more than the accepted total size.");
-
-                // Blocks with fewer than four planes carry no positions.
-                if (frames.Count >= 4)
-                {
-                    if (!(double.IsFinite(scaleX) && scaleX > 0 && double.IsFinite(scaleY) && scaleY > 0 &&
-                          double.IsFinite(scaleZ) && scaleZ > 0 &&
-                          double.IsFinite(minX) && double.IsFinite(minY) && double.IsFinite(minZ)))
-                        throw FormatError.Corrupted("point block has an invalid coordinate scale or origin.");
-
-                    state.BlocksRead++;
-                    yield return new Block(scaleX, scaleY, scaleZ, minX, minY, minZ, frames);
-                }
-            }
-        }
-
-        // Data that is left in the point data but that is not a point block means that the reader did not read
-        // everything the container holds.
-        if (chain.Count > 0)
-        {
-            long lastEnd = chain[^1].Start + chain[^1].Length;
-            if (payloadEnd - lastEnd >= 8 + 128) state.ChainEndedEarly = true;
-        }
     }
 
     // A scan without its own blocks holds all of them; otherwise only the blocks the container assigned to it.
@@ -997,12 +966,153 @@ public sealed class LgsxScan : PclScan
               double.IsFinite(minX) && double.IsFinite(minY) && double.IsFinite(minZ)))
             throw FormatError.Corrupted("point block has an invalid coordinate scale or origin.");
 
-        return (new Block(scaleX, scaleY, scaleZ, minX, minY, minZ, frames), decodedBytes, skippedStreams, 0, incomplete);
+        NativeLayout? layout = Bytes.ReadUInt32LE(blockHeader.AsSpan(4, 4)) == Morton96Version
+            ? ReadNativeLayout(searchBuf.AsSpan(0, firstFrame - 8), frames)
+            : null;
+
+        return (new Block(scaleX, scaleY, scaleZ, minX, minY, minZ, frames, layout), decodedBytes, skippedStreams, 0, incomplete);
+    }
+
+    private static NativeLayout ReadNativeLayout(ReadOnlySpan<byte> header, List<byte[]> frames)
+    {
+        const int attributesOffset = 160;
+        if (header.Length < attributesOffset + 20)
+            throw FormatError.Truncated("the point block attributes");
+
+        uint count = Bytes.ReadUInt32LE(header[attributesOffset..]);
+        ulong points = Bytes.ReadUInt64LE(header[12..]);
+        if (count == 0 || points == 0 || points > MaxFrameBytes ||
+            frames.Count < Morton96Planes)
+            throw FormatError.Corrupted("point block has invalid Morton position planes.");
+
+        int offset = attributesOffset + 4;
+        int intensity = -1;
+        bool red = false, green = false, blue = false;
+        int widerPlanes = 0, twoBytePlanes = 0, planeCount = 0;
+
+        for (uint i = 0; i < count; i++)
+        {
+            // POSITION occupies twelve byte planes. Subsequent attributes prefix their descriptor with
+            // the sample width expressed as a power of two.
+            int width = Morton96Planes;
+            if (i > 0)
+            {
+                if (offset >= header.Length || header[offset] > 2)
+                    throw FormatError.Unsupported("unknown point block attribute size.");
+                width = 1 << header[offset++];
+            }
+
+            int descriptorSize = i == 0 ? 8 : 7;
+            if (offset > header.Length - descriptorSize)
+                throw FormatError.Truncated("a point block attribute");
+            offset += descriptorSize;
+            int nameLength = Bytes.ReadUInt16LE(header[(offset - 2)..]);
+            if (nameLength > header.Length - offset)
+                throw FormatError.Truncated("a point block attribute name");
+
+            var name = header.Slice(offset, nameLength);
+            if (i == 0 && !name.SequenceEqual("POSITION"u8))
+                throw FormatError.Corrupted("the first block attribute is not POSITION.");
+            // The planes are ordered by sample width, with POSITION and four-byte attributes before U16.
+            if (width > 2) widerPlanes += width;
+            if (width == 2)
+            {
+                if (name.SequenceEqual("INTENSITY"u8)) intensity = twoBytePlanes;
+                twoBytePlanes += width;
+            }
+            if (width == 1)
+            {
+                red |= name.SequenceEqual("R"u8);
+                green |= name.SequenceEqual("G"u8);
+                blue |= name.SequenceEqual("B"u8);
+            }
+
+            offset += nameLength;
+            planeCount += width;
+            if (planeCount > frames.Count) throw FormatError.Truncated("a point block attribute plane");
+        }
+
+        if (frames.Take(planeCount).Any(plane => (ulong)plane.Length != points))
+            throw FormatError.Corrupted("point block attribute length does not match the point count.");
+
+        // RGB is a group of three planes after the individual one-byte attributes.
+        int color = red && green && blue ? planeCount - 3 : -1;
+        return new NativeLayout((int)points, intensity >= 0 ? widerPlanes + intensity : -1, color);
+    }
+
+    private static List<PclPoint> UnpackNativeBlock(Block block, NativeLayout layout, int step, bool applyTransform,
+        PclTransform transform, ulong baseIndex)
+    {
+        var frames = block.Frames;
+        var points = new List<PclPoint>(1 + (layout.PointCount - 1) / step);
+        UInt128 morton = 0;
+        ushort intensity = 0;
+        int green = 0;
+        byte[]? greenDeltas = layout.Color >= 0 ? frames[layout.Color] : null;
+        for (int i = 0; i < layout.PointCount; i++)
+        {
+            // Each pair is stored in reverse order. An unpaired final sample keeps its slot.
+            int slot = i ^ 1;
+            if (slot >= layout.PointCount) slot = i;
+            UInt128 delta = 0;
+            for (int b = Morton96Planes - 1; b >= 0; b--) delta = (delta << 8) | frames[b][slot];
+            morton += delta;
+            if (morton >> 96 != 0)
+                throw FormatError.Corrupted("point block Morton position exceeds 96 bits.");
+
+            if (layout.Intensity >= 0)
+            {
+                int code = frames[layout.Intensity][slot] | (frames[layout.Intensity + 1][slot] << 8);
+                intensity = unchecked((ushort)(intensity + code));
+            }
+
+            if (greenDeltas != null) green = (green + greenDeltas[slot]) & 255;
+            if (i % step != 0) continue;
+
+            // Green is accumulated across points. Blue and red are byte differences from the current green.
+            PclColor? color = greenDeltas == null ? null : new PclColor(
+                unchecked((byte)(green + frames[layout.Color + 2][slot])),
+                (byte)green,
+                unchecked((byte)(green + frames[layout.Color + 1][slot])));
+
+            var position = new PclVector3(
+                block.MinX + (UnpackMortonAxis(morton) * block.ScaleX),
+                block.MinY + (UnpackMortonAxis(morton >> 1) * block.ScaleY),
+                block.MinZ + (UnpackMortonAxis(morton >> 2) * block.ScaleZ));
+            if (applyTransform) position = transform.TransformPoint(position);
+            points.Add(new PclPoint(position,
+                Color: color,
+                Intensity: layout.Intensity >= 0 ? intensity / 65535.0f : null,
+                Index: baseIndex + (ulong)points.Count));
+        }
+
+        return points;
+    }
+
+    private static long UnpackMortonAxis(UInt128 code)
+    {
+        // Skip 63 interleaved bits at a time to retain the stride of three for the upper coordinate bits.
+        uint coordinate = CompactMortonAxis((ulong)code) | CompactMortonAxis((ulong)(code >> 63)) << 21;
+        return (long)coordinate - (1L << 31);
+    }
+
+    private static uint CompactMortonAxis(ulong code)
+    {
+        code &= 0x1249249249249249UL;
+        code = (code ^ (code >> 2)) & 0x10C30C30C30C30C3UL;
+        code = (code ^ (code >> 4)) & 0x100F00F00F00F00FUL;
+        code = (code ^ (code >> 8)) & 0x1F0000FF0000FFUL;
+        code = (code ^ (code >> 16)) & 0x1F00000000FFFFUL;
+        return (uint)((code ^ (code >> 32)) & 0x1FFFFFUL);
     }
 
     /// <summary>Unpacks the planes of one block into points, dropping padding slots. The first returned point gets <paramref name="baseIndex"/> and the rest keep consecutive values; <paramref name="dropped"/> counts dropped slots.</summary>
     private static List<PclPoint> UnpackBlock(Block block, int step, bool applyTransform, PclTransform transform, ulong baseIndex, out long dropped)
     {
+        dropped = 0;
+        if (block.Layout is { } layout)
+            return UnpackNativeBlock(block, layout, step, applyTransform, transform, baseIndex);
+
         var frames = block.Frames;
         byte[] p0 = frames[0];
         byte[] p1 = frames[1];
@@ -1016,7 +1126,6 @@ public sealed class LgsxScan : PclScan
 
         int numPoints = Math.Min(p0.Length, Math.Min(p1.Length, Math.Min(p2.Length, p3.Length)));
         var points = new List<PclPoint>(Math.Max(0, (numPoints + step - 1) / step));
-        dropped = 0;
         ulong yielded = baseIndex;
 
         for (int i = 0; i < numPoints; i++)
@@ -1156,51 +1265,4 @@ public sealed class LgsxScan : PclScan
         return (list, totalBytes, skipped, incomplete);
     }
 
-    private List<byte[]> ReadAllFrames(FileStream fs, long offset, long maxOffset, ReadState state)
-    {
-        var list = new List<byte[]>();
-        long limit = Math.Min(maxOffset, fs.Length);
-        if (offset < 0 || offset + 8 >= limit) return list;
-
-        fs.Position = offset;
-        byte[] lenBuf = new byte[8];
-        long totalBytes = 0;
-
-        while (fs.Position + 8 <= limit)
-        {
-            fs.ReadExactly(lenBuf);
-
-            // A zero length marks the end of the frame list.
-            ulong fLen = Bytes.ReadUInt64LE(lenBuf);
-            if (fLen == 0) break;
-
-            // A stream that is larger than the accepted size is skipped: the rest of the block is lost with it.
-            if (fLen > MaxCompressedFrameBytes)
-            {
-                state.SkippedStreams++;
-                break;
-            }
-
-            if ((long)fLen > limit - fs.Position) break;
-
-            byte[] fData = new byte[(int)fLen];
-            fs.ReadExactly(fData);
-
-            if (!fData.AsSpan().StartsWith(FrameMagic)) break;
-
-            if (list.Count >= MaxFramesPerBlock)
-                throw FormatError.Corrupted($"point block has more than {MaxFramesPerBlock} planes.");
-
-            // The size cap is checked against the frame's declared size before any allocation.
-            byte[] plane = ZstdDecoder.Decompress(fData, MaxFrameBytes);
-
-            totalBytes += plane.Length;
-            if (totalBytes > MaxBlockBytes)
-                throw FormatError.Corrupted($"point block decompresses to more than {MaxBlockBytes} bytes.");
-
-            list.Add(plane);
-        }
-
-        return list;
-    }
 }

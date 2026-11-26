@@ -242,7 +242,7 @@ internal static class SyntheticFixtures
         IReadOnlyList<byte[]>? extraPlanes = null, int setupCount = 1, bool assignPointsToSetups = false, bool overlappingSetupRanges = false,
         bool collidingSetupNames = false, bool damagedSetupRecord = false, bool damagedPointData = false, bool withPointCount = true,
         bool oversizedFrame = false, bool unknownBlock = false, bool unknownFirstBlock = false, bool truncatedFrameList = false, bool fewPlanes = false,
-        int blockCount = 0, int damagedBlock = -1)
+        int blockCount = 0, int damagedBlock = -1, bool nativeLeicaBlock = false)
     {
         points ??= DefaultLeicaPoints;
         using var ms = new MemoryStream();
@@ -257,7 +257,7 @@ internal static class SyntheticFixtures
 
         (byte[] payload, List<(long Start, long Length)> blocks) =
             BuildLeicaPayload(groups, withColorAndIntensity, extraPlanes ?? [], damagedPointData, withPointCount, oversizedFrame, unknownBlock,
-                unknownFirstBlock, truncatedFrameList, fewPlanes, damagedBlock);
+                unknownFirstBlock, truncatedFrameList, fewPlanes, damagedBlock, nativeLeicaBlock);
 
         // The point data follows the container entries and their records, so its start is known before they are written.
         var setupNames = Enumerable.Range(0, setupCount).Select(i => "SETUP-" + (3 + i)).ToList();
@@ -386,7 +386,8 @@ internal static class SyntheticFixtures
     private static (byte[] Payload, List<(long Start, long Length)> Blocks) BuildLeicaPayload(
         IReadOnlyList<IReadOnlyList<LeicaSamplePoint>> groups, bool full, IReadOnlyList<byte[]> extraPlanes, bool damaged = false,
         bool withPointCount = true, bool oversizedFrame = false, bool unknownBlock = false,
-        bool unknownFirstBlock = false, bool truncatedFrameList = false, bool fewPlanes = false, int damagedBlock = -1)
+        bool unknownFirstBlock = false, bool truncatedFrameList = false, bool fewPlanes = false, int damagedBlock = -1,
+        bool nativeLeicaBlock = false)
     {
         using var ms = new MemoryStream();
         using var bw = new BinaryWriter(ms);
@@ -414,7 +415,7 @@ internal static class SyntheticFixtures
             // A setup without points has no block of its own.
             if (group.Count == 0) continue;
 
-            var frames = BuildFrames(group, full, extraPlanes);
+            var frames = nativeLeicaBlock ? BuildNativeLeicaFrames(group.Count, full) : BuildFrames(group, full, extraPlanes);
             if (fewPlanes) frames = [.. frames.Take(3)];
             if (damaged || blockIndex == damagedBlock)
             {
@@ -426,12 +427,25 @@ internal static class SyntheticFixtures
 
             // A frame whose declared length is above the accepted size is skipped by the reader.
             const ulong OversizedLength = 20_000_000;
-            int blockLength = 8 + 128 + frames.Sum(f => 8 + f.Length) + (oversizedFrame ? 8 : 0) + (truncatedFrameList ? 8 : 0);
+            int headerLength = nativeLeicaBlock ? (full ? 232 : 205) : 128;
+            byte[] blockHeader = new byte[headerLength];
+            if (nativeLeicaBlock)
+            {
+                BinaryPrimitives.WriteUInt32LittleEndian(blockHeader.AsSpan(4), 22);
+                BinaryPrimitives.WriteUInt64LittleEndian(blockHeader.AsSpan(12), (ulong)group.Count);
+                BinaryPrimitives.WriteUInt32LittleEndian(blockHeader.AsSpan(160), full ? 5U : 2U);
+                const string position = "0A00000000000800504F534954494F4E";
+                const string color = "000400000000010052000500000000010047000600000000010042";
+                const string intensity = "0108000000000900494E54454E53495459";
+                byte[] attributes = Convert.FromHexString(position + (full ? color : "") + intensity);
+                attributes.CopyTo(blockHeader, 164);
+            }
+
+            int blockLength = 8 + blockHeader.Length + frames.Sum(f => 8 + f.Length) + (oversizedFrame ? 8 : 0) + (truncatedFrameList ? 8 : 0);
             long start = ms.Position;
 
             bw.Write("APRN"u8.ToArray());
             bw.Write((uint)blockLength);
-            byte[] blockHeader = new byte[128];
             double[] frame = [LeicaScale, LeicaScale, LeicaScale, LeicaOriginX, LeicaOriginY, LeicaOriginZ];
             for (int i = 0; i < frame.Length; i++)
                 BinaryPrimitives.WriteDoubleLittleEndian(blockHeader.AsSpan(0x34 + (i * 8), 8), frame[i]);
@@ -458,7 +472,43 @@ internal static class SyntheticFixtures
             bw.Write(new byte[128]);
         }
 
+        if (nativeLeicaBlock)
+        {
+            bw.Write("{\n\t\"tree-header-info\": {} }"u8.ToArray());
+            bw.Write(new byte[160]);
+        }
+
         return (ms.ToArray(), blocks);
+    }
+
+    private static List<byte[]> BuildNativeLeicaFrames(int pointCount, bool color)
+    {
+        byte[][] codes =
+        [
+            Convert.FromHexString("010000000000000000000000"),
+            Convert.FromHexString("104992244B92244992244972"),
+            Convert.FromHexString("0D0000000000000000000000"),
+            new byte[12],
+        ];
+        var frames = Enumerable.Range(0, 12)
+            .Select(plane => WrapPlane(codes.Select(code => code[plane]).ToArray()))
+            .ToList();
+        frames.Add(WrapPlane([1, 255, 255, 0]));
+        frames.Add(WrapPlane([0, 0, 255, 0]));
+        if (color)
+        {
+            frames.Add(WrapPlane([80, 120, 36, 40]));
+            frames.Add(WrapPlane([54, 156, 10, 21]));
+            frames.Add(WrapPlane([123, 110, 235, 18]));
+        }
+
+        return frames;
+
+        byte[] WrapPlane(byte[] storageOrder)
+        {
+            if ((pointCount & 1) != 0) storageOrder[pointCount - 1] = storageOrder[pointCount];
+            return RawZstdFrame.Wrap(storageOrder[..pointCount]);
+        }
     }
 
     // The compressed planes of one point block: the four position planes and the optional ones.

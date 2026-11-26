@@ -83,11 +83,11 @@ reading), `NotSupportedException` (unrecognised format or unsupported feature) o
 
 | Format | Extensions | Support level |
 | --- | --- | --- |
-| ASTM E57 | `.e57` | Points decoded for a defined subset (uncompressed bit-packed streams, single or double precision Cartesian coordinates, 8-bit colour and intensity). Per-point validity flags and images are not read. |
+| ASTM E57 | `.e57` | Points decoded for a defined subset (uncompressed bit-packed streams, single or double precision Cartesian coordinates, 8-bit colour and intensity). The format API also reads image blobs with checksum verification. |
 | ReCap scan | `.rcs` | Experimental; layout of major version 3 only. |
 | ReCap project | `.rcp` | Lists scans; opens the `.rcs` files it finds next to the project. Node transforms are not applied. |
-| Leica scan container | `.lgsx`, `.lgs` | Experimental; poses and bounds are not read, and all points of a container form one scan. |
-| FARO scan | `.fls`, or a FARO scan folder | Experimental; the scan grid comes from the stored parameters. A folder scan is read with an assumed layout, and a warning says so. |
+| Leica scan container | `.lgsx`, `.lgs` | Experimental. Version 22 blocks provide geometry, RGB and intensity. Containers without setup assignments open as one scan in container coordinates. |
+| FARO scan | `.fls`, or a FARO scan folder | Experimental. Single-file distance mode 26 reconstructs both halves of the scan grid. A folder scan is read with an assumed layout and carries a warning. |
 | PinPoint project | `.srf`, `.smf`, or a folder with `ScanProject.json` or `.smf`/`.srf` files | Experimental; manifest plus point data files in one of two layouts (named channels, or sections with Snappy-compressed channels); a data file in neither layout is not read. |
 | EdgeWise | `.c3db`, `.c3ptx` | Experimental; positions only, with a coordinate scale that is an assumption of the reader. |
 | LAS | `.las` | Versions 1.0 to 1.4 with point formats 0 to 10; positions, intensity, classification and RGB for the colour formats. |

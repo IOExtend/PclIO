@@ -13,11 +13,11 @@ namespace PclIO.Formats.E57;
 /// Cartesian X/Y/Z are single or double precision floats or scaled integers (raw value times scale plus offset),
 /// or spherical range, azimuth and elevation converted to Cartesian points. Colour and intensity are Integer fields
 /// with a range from zero (8, 16 or 32 bits), Float fields, or scaled-integer intensity; per-point validity flags
-/// skip invalid points and clear invalid channels. Images are not read.
+/// skip invalid points and clear invalid channels. Image blobs are available through <see cref="ReadImageBlob"/>.
 /// Not supported (reported with <see cref="NotSupportedException"/> when points are read): integer coordinates,
 /// other codecs (the scan must use plain bit-packing: an empty codecs vector), and packets whose streams hold
 /// different record counts.
-/// Per-point validity flags of another shape, images and 2D data are not interpreted.
+/// Per-point validity flags of another shape and other 2D data are not interpreted.
 /// </summary>
 public sealed class E57Document : PclDocument
 {
@@ -152,6 +152,20 @@ public sealed class E57Document : PclDocument
         }
 
         return document;
+    }
+
+    /// <summary>Reads a paged image blob referenced by the E57 XML and validates its section header.</summary>
+    /// <param name="fileOffset">Physical byte offset of the blob section from the XML.</param>
+    /// <param name="length">Number of image bytes declared by the XML.</param>
+    public byte[] ReadImageBlob(ulong fileOffset, int length)
+    {
+        if (length is < 4 or > 16 * 1024 * 1024)
+            throw FormatError.Corrupted("E57 image blob size is outside the supported range.");
+        using var reader = new E57StreamReader(FilePath, PageSize);
+        byte[] bytes = reader.ReadLogicalBytes(fileOffset, (ulong)(16 + length));
+        if (bytes[0] != 0 || Bytes.ReadUInt64LE(bytes.AsSpan(8, 8)) != (ulong)((16 + length + 3) & ~3))
+            throw FormatError.Corrupted("E57 image blob section header does not match its XML length.");
+        return bytes.AsSpan(16).ToArray();
     }
 
     // DTDs are refused (no entity expansion, no external resolution) and the tree is bounded before it is built.

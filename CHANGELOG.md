@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Read checksum-verified E57 image blobs and scanner-aligned FARO RGB panoramas.
+- Expose retained source point attributes and decoder concurrency through scene adapter options.
+
+### Changed
+
+- Leica LGSX version 22 decodes differential Morton positions, native RGB and intensity, retaining duplicate returns.
+- FARO FLS distance mode 26 decodes both range-grid halves with optional Morton RGB and intensity.
+
 ## [0.1.1] - 2026-11-25
 
 ### Added
