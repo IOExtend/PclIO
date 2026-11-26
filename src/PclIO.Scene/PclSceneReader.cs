@@ -141,6 +141,7 @@ public static class PclSceneReader
             {
                 MaxPoints = remaining,
                 SubsampleStep = options.SubsampleStep,
+                MaxDegreeOfParallelism = options.MaxDegreeOfParallelism,
                 ApplyTransform = true,
             };
 
@@ -148,10 +149,12 @@ public static class PclSceneReader
             var normals = new List<Vector3d>();
             bool hasColors = false, hasIntensities = false, hasClassifications = false;
             bool anyNormal = false, allNormals = true;
+            int geometryId = scene.Geometries.Count + 1;
 
             foreach (PclPoint point in scan.ReadPoints(readOptions))
             {
                 vertices.Add(new Vector3d(point.X * scale, point.Y * scale, point.Z * scale));
+                options.PointObserver?.Invoke(geometryId, point);
                 if (point.Color.HasValue) hasColors = true;
                 if (point.Intensity.HasValue) hasIntensities = true;
                 if (point.Classification.HasValue) hasClassifications = true;
@@ -181,7 +184,7 @@ public static class PclSceneReader
             scansWithPoints++;
             var geometry = new SceneGeometry
             {
-                Id = scene.Geometries.Count + 1,
+                Id = geometryId,
                 Topology = SceneTopology.Points,
                 Vertices = vertices,
             };

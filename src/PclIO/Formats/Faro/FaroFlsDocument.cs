@@ -102,7 +102,8 @@ public sealed class FaroFlsDocument : PclDocument
             ole2Path: isOle2 ? path : null,
             hasColors: hasColors,
             hasIntensities: hasIntensities,
-            recordSize: recordSize));
+            recordSize: recordSize,
+            storageDistanceFactor: g.StorageDistanceFactor));
     }
 
     /// <summary>Opens a FARO scan container file or scan folder and reads its scan parameters.</summary>
@@ -156,6 +157,20 @@ public sealed class FaroFlsDocument : PclDocument
         return document;
     }
 
+    /// <summary>
+    /// Reads the scanner-aligned colour raster as an RGB24 equirectangular image.
+    /// Pixels outside the recorded angular range are black. Horizontal centre faces +X.
+    /// Returns null when the file has no supported colour raster.
+    /// </summary>
+    /// <param name="width">An even image width from 2 to 4096 pixels. Height is half the width.</param>
+    public byte[]? ReadColorPanorama(int width = 2048)
+    {
+        if (width is < 2 or > 4096 || width % 2 != 0)
+            throw new ArgumentOutOfRangeException(nameof(width));
+
+        return ((FaroScan)_scans[0]).ReadColorPanorama(width);
+    }
+
     private static FaroFlsDocument OpenContainer(string path)
     {
         long fileSize = new FileInfo(path).Length;
@@ -173,12 +188,15 @@ public sealed class FaroFlsDocument : PclDocument
         if (dist != null)
         {
             ulong len = storage.GetStreamLength(dist);
-            if (len > (ulong)fileSize || (cells * 2 - HeaderSlack) / MaxDeflateRatio > (long)len)
+            long minimumPlaneBytes = g.StorageDistanceFactor != null ? cells / 2 : cells * 2;
+            if (len > (ulong)fileSize || (minimumPlaneBytes - HeaderSlack) / MaxDeflateRatio > (long)len)
                 throw FormatError.Corrupted("distance stream is too small for the declared scan grid");
         }
 
-        bool hasColors = FirstExisting(storage, "Scans/1/Color0", "Color0") != null;
-        bool hasIntensities = FirstExisting(storage, "Scans/1/Grey0", "Grey0") != null;
+        bool hasColors = FirstExisting(storage, "Scans/1/Color0", "Color0") != null ||
+            (g.StorageDistanceFactor != null && FirstExisting(storage, "Scans/1/Color1", "Color1") != null);
+        bool hasIntensities = FirstExisting(storage, "Scans/1/Grey0", "Grey0") != null ||
+            (g.StorageDistanceFactor != null && FirstExisting(storage, "Scans/1/Grey1", "Grey1") != null);
         return new FaroFlsDocument(path, fileSize, g, cells, null, isOle2: true, hasColors, hasIntensities);
     }
 
@@ -204,7 +222,7 @@ public sealed class FaroFlsDocument : PclDocument
 
     /// <summary>Scan grid and identity read from the scan parameters.</summary>
     private readonly record struct Geometry(
-        string? Model, string? Serial, int Rows, int Cols, double RowStart, double RowEnd, double ColEnd)
+        string? Model, string? Serial, int Rows, int Cols, double RowStart, double RowEnd, double ColEnd, double? StorageDistanceFactor)
     {
         private const double AngleTolerance = 1e-6;
 
@@ -226,7 +244,17 @@ public sealed class FaroFlsDocument : PclDocument
             if (colEnd == 0 || Math.Abs(colEnd) > Math.Tau + AngleTolerance)
                 throw FormatError.Corrupted("azimuth range is invalid");
 
-            return new Geometry(model, serial, rows, cols, rowStart, rowEnd, colEnd);
+            string? factorText = Find(text, KeyPattern("StorageDistFact", "([^\\s}]+)"));
+            double? factor = null;
+            if (factorText != null)
+            {
+                if (!double.TryParse(factorText, NumberStyles.Float, CultureInfo.InvariantCulture, out double storedFactor) ||
+                    !double.IsFinite(storedFactor) || storedFactor <= 0)
+                    throw FormatError.Corrupted("storage distance factor is invalid");
+                factor = storedFactor;
+            }
+
+            return new Geometry(model, serial, rows, cols, rowStart, rowEnd, colEnd, factor);
         }
 
         // A parameter is stored either as 'Name "key" Value v' or as 'key = v'.
@@ -299,6 +327,7 @@ public sealed class FaroScan : PclScan
     private readonly bool _hasColors;
     private readonly bool _hasIntensities;
     private readonly int _recordSize;
+    private readonly double? _storageDistanceFactor;
 
     private readonly Lazy<long> _validReturns;
     private double _intensityScale = TwelveBitScale;
@@ -346,7 +375,8 @@ public sealed class FaroScan : PclScan
         string? ole2Path = null,
         bool hasColors = false,
         bool hasIntensities = false,
-        int recordSize = DefaultRecordSize)
+        int recordSize = DefaultRecordSize,
+        double? storageDistanceFactor = null)
     {
         if (rows <= 0 || cols <= 0)
             throw new ArgumentOutOfRangeException(nameof(rows), "Scan grid dimensions must be positive.");
@@ -365,6 +395,7 @@ public sealed class FaroScan : PclScan
         _hasColors = hasColors;
         _hasIntensities = hasIntensities;
         _recordSize = recordSize;
+        _storageDistanceFactor = storageDistanceFactor;
 
         // The count is made once even when several threads reach it at the same time, and the value is published
         // whole, so a concurrent first access cannot observe a partial count.
@@ -423,6 +454,9 @@ public sealed class FaroScan : PclScan
         using var storage = Ole2Storage.Open(path);
         using var dist = Plane.Open(storage, "Dist0", 2, GridSize, fileLength)
             ?? throw FormatError.Corrupted("distance stream not found");
+
+        if (dist.IsDelta)
+            return ReadDeltaSamples(storage, dist, fileLength, 1, false).LongCount();
 
         long count = 0;
         byte[] cell = new byte[2];
@@ -491,6 +525,22 @@ public sealed class FaroScan : PclScan
         // Planes are inflated sequentially in small chunks, so memory stays bounded by the compressed data of the file.
         using var dist = Plane.Open(storage, "Dist0", 2, cells, fileLength)
             ?? throw FormatError.Corrupted("distance stream not found");
+        if (dist.IsDelta)
+        {
+            long count = 0;
+            long max = options.MaxPoints ?? long.MaxValue;
+            if (max <= 0) yield break;
+            foreach (var sample in ReadDeltaSamples(storage, dist, fileLength, Math.Max(1, options.SubsampleStep), true))
+            {
+                var position = Project(sample.Index, sample.Range);
+                if (options.ApplyTransform) position = Transform.TransformPoint(position);
+                yield return new PclPoint(position, Color: sample.Color, Intensity: sample.Intensity, Index: (ulong)count);
+                if (++count >= max) yield break;
+            }
+
+            yield break;
+        }
+
         using var color = Plane.Open(storage, "Color0", 3, cells, fileLength);
         using var grey = Plane.Open(storage, "Grey0", 1, cells, fileLength);
 
@@ -526,6 +576,120 @@ public sealed class FaroScan : PclScan
             yield return pt;
             yielded++;
         }
+    }
+
+    private IEnumerable<(long Index, double Range, PclColor? Color, float? Intensity)> ReadDeltaSamples(
+        Ole2Storage storage, Plane first, long fileLength, int step, bool includeAttributes)
+    {
+        if (_cols % 2 != 0 || _storageDistanceFactor is not double distanceFactor)
+            throw FormatError.Corrupted("delta planes require an even column count and storage distance factor");
+
+        long cells = (long)_rows * _cols;
+        long halfCells = cells / 2;
+        for (int half = 0; half < 2; half++)
+        {
+            using var second = half == 1 ? Plane.Open(storage, "Dist1", 2, cells, fileLength) : null;
+            Plane distance = half == 0 ? first : second ?? throw FormatError.Corrupted("second distance plane not found");
+            using var color = includeAttributes ? Plane.Open(storage, "Color" + half, 3, cells, fileLength) : null;
+            using var grey = includeAttributes ? Plane.Open(storage, "Grey" + half, 1, cells, fileLength) : null;
+            int storedDistance = 0, storedColor = 0, storedGrey = 0;
+            for (long i = 0; i < halfCells; i++)
+            {
+                if (i % _rows == 0) storedDistance = storedColor = storedGrey = 0;
+
+                storedDistance = distance.ReadDelta(storedDistance, int.MaxValue);
+                if (color != null) storedColor = color.ReadDelta(storedColor, 0x1FFFFFF);
+                if (grey != null) storedGrey = grey.ReadDelta(storedGrey, 2047);
+
+                long index = half * halfCells + i;
+                double range = storedDistance / distanceFactor;
+                if (index % step != 0 || range < MinRange || range > MaxRange) continue;
+                PclColor? rgb = color != null
+                    ? new PclColor(UnpackChannel(storedColor), UnpackChannel(storedColor >> 1), UnpackChannel(storedColor >> 2))
+                    : null;
+                yield return (index, range, rgb, grey != null ? storedGrey / 2047.0f : null);
+            }
+
+            distance.RequireEnd();
+            color?.RequireEnd();
+            grey?.RequireEnd();
+        }
+    }
+
+    internal byte[]? ReadColorPanorama(int width)
+    {
+        if (!_isOle2 || !_hasColors || _storageDistanceFactor == null || _cols % 2 != 0) return null;
+        string path = _ole2Path!;
+        long length = new FileInfo(path).Length;
+        long cells = (long)_rows * _cols;
+        int height = width / 2;
+        byte[] rgb = new byte[width * height * 3];
+        using var storage = Ole2Storage.Open(path);
+
+        var columns = Enumerable.Range(0, width).Select(x =>
+        {
+            double yaw = ((x + 0.5) / width - 0.5) * Math.Tau;
+            double azimuth = (Math.PI / 2 - yaw + Math.Tau) % Math.Tau;
+            if (_colEnd < 0) azimuth = (Math.Tau - azimuth) % Math.Tau;
+            int col = (int)Math.Round(azimuth / Math.Abs(_colEnd) * _cols);
+            if (col == _cols && Math.Abs(Math.Abs(_colEnd) - Math.Tau) < 1e-6) col = 0;
+            return (Column: col, Pixel: x);
+        }).Where(item => item.Column < _cols).OrderBy(item => item.Column).ToArray();
+
+        int[] rows = Enumerable.Range(0, height).Select(y =>
+        {
+            double elevation = (0.5 - (y + 0.5) / height) * Math.PI;
+            return (int)Math.Round((elevation - _rowStart) / (_rowEnd - _rowStart) * _rows);
+        }).ToArray();
+
+        int halfColumns = _cols / 2;
+        int destination = 0;
+        var values = new int[_rows];
+        bool hasPanorama = false;
+        for (int half = 0; half < 2; half++)
+        {
+            using var color = Plane.Open(storage, "Color" + half, 3, cells, length);
+            if (color is not { IsDelta: true })
+            {
+                while (destination < columns.Length && columns[destination].Column < (half + 1) * halfColumns)
+                    destination++;
+                continue;
+            }
+
+            hasPanorama = true;
+            for (int col = half * halfColumns; col < (half + 1) * halfColumns; col++)
+            {
+                int value = 0;
+                for (int row = 0; row < _rows; row++)
+                    values[row] = value = color.ReadDelta(value, 0x1FFFFFF);
+
+                while (destination < columns.Length && columns[destination].Column == col)
+                {
+                    int x = columns[destination++].Pixel;
+                    for (int y = 0; y < height; y++)
+                    {
+                        int row = rows[y];
+                        if ((uint)row >= (uint)_rows) continue;
+                        int packed = values[row];
+                        int offset = (y * width + x) * 3;
+                        rgb[offset] = UnpackChannel(packed);
+                        rgb[offset + 1] = UnpackChannel(packed >> 1);
+                        rgb[offset + 2] = UnpackChannel(packed >> 2);
+                    }
+                }
+            }
+
+            color.RequireEnd();
+        }
+
+        return hasPanorama ? rgb : null;
+    }
+
+    private static byte UnpackChannel(int packed)
+    {
+        int channel = 0;
+        for (int bit = 0; bit < 8; bit++) channel |= ((packed >> (bit * 3)) & 1) << bit;
+        return (byte)channel;
     }
 
     private IEnumerable<PclPoint> ReadFolderPoints(PclReadOptions options)
@@ -599,13 +763,15 @@ public sealed class FaroScan : PclScan
     {
         private readonly Stream _stream;
         private readonly int _cellBytes;
-        private readonly long _limit;
+        private long _limit;
         private readonly byte[] _head = new byte[HeaderSearchWindow];
         private readonly byte[] _skip = new byte[8192];
         private int _headPos;
         private int _headLen;
         private long _consumed;
         private long _position;
+
+        public bool IsDelta { get; private set; }
 
         private Plane(Stream stream, int cellBytes, long limit)
         {
@@ -629,15 +795,14 @@ public sealed class FaroScan : PclScan
             long limit = cells * cellBytes + FaroFlsDocument.HeaderSlack;
             byte[] data = storage.ReadStream(path);
             bool gzip = data.Length >= 3 && data[0] == 0x1F && data[1] == 0x8B && data[2] == 0x08;
-            if (!gzip && data.Length > limit)
-                throw FormatError.Corrupted("stream is larger than the declared scan grid allows");
-
             var input = new MemoryStream(data, writable: false);
             Stream stream = gzip ? new GZipStream(input, CompressionMode.Decompress) : input;
-            var plane = new Plane(stream, cellBytes, limit);
+            var plane = new Plane(new BufferedStream(stream, 8192), cellBytes, limit);
             try
             {
-                plane.SkipHeader();
+                plane.SkipHeader(name, cells);
+                if (!gzip && data.Length > plane._limit)
+                    throw FormatError.Corrupted("stream is larger than the declared scan grid allows");
             }
             catch
             {
@@ -664,13 +829,70 @@ public sealed class FaroScan : PclScan
             return true;
         }
 
+        // The first byte has six magnitude bits, a sign bit and a continuation bit. Following bytes have
+        // seven magnitude bits and a continuation bit. The predictor is reset for each column.
+        public int ReadDelta(int previous, int max)
+        {
+            if (!IsDelta) throw FormatError.Corrupted("inconsistent sample plane formats");
+            int first = ReadByte();
+            if (first < 0) throw FormatError.Truncated("a delta sample");
+
+            long magnitude = first & 63;
+            int current = first;
+            for (int shift = 6; (current & 128) != 0; shift += 7)
+            {
+                if (shift > 27) throw FormatError.Corrupted("delta sample is too large");
+                current = ReadByte();
+                if (current < 0) throw FormatError.Truncated("a delta sample");
+                magnitude |= (long)(current & 127) << shift;
+            }
+
+            long value = previous + ((first & 64) == 0 ? magnitude : -magnitude);
+            if (value < 0 || value > max) throw FormatError.Corrupted("decoded sample is out of range");
+            return (int)value;
+        }
+
+        public void RequireEnd()
+        {
+            if (ReadByte() != '\n' || ReadByte() != '}' || ReadByte() != -1)
+                throw FormatError.Corrupted("sample plane does not end after the declared grid");
+        }
+
+        private int ReadByte()
+        {
+            if (_headPos >= _headLen)
+            {
+                _headLen = Pull(_head);
+                _headPos = 0;
+            }
+
+            return _headPos < _headLen ? _head[_headPos++] : -1;
+        }
+
         // Skips the optional text header: everything up to and including an opening brace near the start, then blanks.
         // A stream without a brace in its first bytes has no header and is read from its first byte.
-        private void SkipHeader()
+        private void SkipHeader(string name, long cells)
         {
             _headLen = Pull(_head);
             int brace = Array.IndexOf(_head, (byte)'{', 0, _headLen);
-            _headPos = brace >= 0 ? brace + 1 : 0;
+            _headPos = brace + 1;
+            string header = brace >= 0 ? Encoding.ASCII.GetString(_head, 0, brace) : string.Empty;
+            string[] fields = header.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+            if (fields.Length > 0 && fields[0] is "DataMode" or "DistDataFormat" or "ColorDataFormat")
+            {
+                bool distance = name.StartsWith("Dist", StringComparison.Ordinal);
+                bool supported = distance
+                    ? fields is ["DataMode", "26", "DistDataFormat", "1", "Scan2DataBase", _]
+                    : fields is ["ColorDataFormat", "1", "Scan2DataBase", _];
+                if (!supported) throw FormatError.Unsupported("unknown sample plane encoding");
+                if (!long.TryParse(fields[^1], NumberStyles.None, CultureInfo.InvariantCulture, out long count) || count != cells ||
+                    _headPos >= _headLen || _head[_headPos++] != (byte)' ')
+                    throw FormatError.Corrupted("sample plane header does not match the declared grid");
+
+                IsDelta = true;
+                _limit = cells * 5 / 2 + FaroFlsDocument.HeaderSlack;
+                return;
+            }
 
             while (true)
             {

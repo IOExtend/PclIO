@@ -50,6 +50,22 @@ public sealed record PclSceneOptions
         }
     }
 
+    /// <summary>Receives each retained point in scene order with the id of its geometry, before the scene discards point attributes.</summary>
+    public Action<int, PclPoint>? PointObserver { get; init; }
+
+    private readonly int _maxDegreeOfParallelism = 1;
+
+    /// <summary>Maximum degree of parallelism for the source point reader. Formats that do not support it read sequentially.</summary>
+    public int MaxDegreeOfParallelism
+    {
+        get => _maxDegreeOfParallelism;
+        init
+        {
+            ArgumentOutOfRangeException.ThrowIfLessThan(value, 1, nameof(value));
+            _maxDegreeOfParallelism = value;
+        }
+    }
+
     private readonly double _metresPerUnit = 1.0;
 
     /// <summary>

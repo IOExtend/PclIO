@@ -155,6 +155,20 @@ public sealed class E57Document : PclDocument
     }
 
     // DTDs are refused (no entity expansion, no external resolution) and the tree is bounded before it is built.
+    /// <summary>Reads a paged image blob referenced by the E57 XML and validates its section header.</summary>
+    /// <param name="fileOffset">Physical byte offset of the blob section from the XML.</param>
+    /// <param name="length">Number of image bytes declared by the XML.</param>
+    public byte[] ReadImageBlob(ulong fileOffset, int length)
+    {
+        if (length is < 4 or > 16 * 1024 * 1024)
+            throw FormatError.Corrupted("E57 image blob size is outside the supported range.");
+        using var reader = new E57StreamReader(FilePath, PageSize);
+        byte[] bytes = reader.ReadLogicalBytes(fileOffset, (ulong)(16 + length));
+        if (bytes[0] != 0 || Bytes.ReadUInt64LE(bytes.AsSpan(8, 8)) != (ulong)((16 + length + 3) & ~3))
+            throw FormatError.Corrupted("E57 image blob section header does not match its XML length.");
+        return bytes.AsSpan(16).ToArray();
+    }
+
     private static XDocument ParseXml(string xmlText)
     {
         var settings = new XmlReaderSettings
