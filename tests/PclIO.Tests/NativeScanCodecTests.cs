@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.IO.Compression;
 using System.Text;
+using PclIO.Formats.E57;
 using PclIO.Formats.Faro;
 using PclIO.Formats.Leica;
 using Xunit;
@@ -62,6 +63,28 @@ public sealed class NativeScanCodecTests
         using var doc = LgsxDocument.Open(dir.Write("short.lgsx", data));
 
         Assert.Throws<InvalidDataException>(() => doc.ReadAllPoints().ToArray());
+    }
+
+    [Fact]
+    public void E57_Image_Blob_Checks_Header_And_Each_Page()
+    {
+        const int blobOffset = 80;
+        byte[] image = Enumerable.Range(0, 1_201).Select(i => unchecked((byte)i)).ToArray();
+        byte[] section = new byte[1_220];
+        BinaryPrimitives.WriteUInt64LittleEndian(section.AsSpan(8), (ulong)section.Length);
+        image.CopyTo(section, 16);
+        byte[] file = new E57Spec { Points = [], RawPackets = section }.Build();
+        using var dir = new TempDirectory();
+        string path = dir.Write("image.e57", file);
+        using var doc = E57Document.Open(path);
+
+        Assert.Equal(image, doc.ReadImageBlob(blobOffset, image.Length));
+        Assert.Throws<InvalidDataException>(() => doc.ReadImageBlob(blobOffset, image.Length - 1));
+        Assert.Throws<InvalidDataException>(() => doc.ReadImageBlob(1020, image.Length));
+
+        file[1054] ^= 1;
+        File.WriteAllBytes(path, file);
+        Assert.Throws<InvalidDataException>(() => doc.ReadImageBlob(blobOffset, image.Length));
     }
 
     [Fact]

@@ -13,11 +13,11 @@ namespace PclIO.Formats.E57;
 /// Cartesian X/Y/Z are single or double precision floats or scaled integers (raw value times scale plus offset),
 /// or spherical range, azimuth and elevation converted to Cartesian points. Colour and intensity are Integer fields
 /// with a range from zero (8, 16 or 32 bits), Float fields, or scaled-integer intensity; per-point validity flags
-/// skip invalid points and clear invalid channels. Images are not read.
+/// skip invalid points and clear invalid channels. Image blobs are available through <see cref="ReadImageBlob"/>.
 /// Not supported (reported with <see cref="NotSupportedException"/> when points are read): integer coordinates,
 /// other codecs (the scan must use plain bit-packing: an empty codecs vector), and packets whose streams hold
 /// different record counts.
-/// Per-point validity flags of another shape, images and 2D data are not interpreted.
+/// Per-point validity flags of another shape and other 2D data are not interpreted.
 /// </summary>
 public sealed class E57Document : PclDocument
 {
@@ -154,7 +154,6 @@ public sealed class E57Document : PclDocument
         return document;
     }
 
-    // DTDs are refused (no entity expansion, no external resolution) and the tree is bounded before it is built.
     /// <summary>Reads a paged image blob referenced by the E57 XML and validates its section header.</summary>
     /// <param name="fileOffset">Physical byte offset of the blob section from the XML.</param>
     /// <param name="length">Number of image bytes declared by the XML.</param>
@@ -169,6 +168,7 @@ public sealed class E57Document : PclDocument
         return bytes.AsSpan(16).ToArray();
     }
 
+    // DTDs are refused (no entity expansion, no external resolution) and the tree is bounded before it is built.
     private static XDocument ParseXml(string xmlText)
     {
         var settings = new XmlReaderSettings

@@ -103,6 +103,15 @@ no colour.
 
 ## Format documents
 
+For sampling plans, `LgsxDocument.GetEncodedPointCount` reads the declared counts in version 22 point block headers without
+decompressing the point data. It returns null when the file uses another block layout or has no point blocks.
+`PclSceneOptions.PointObserver` receives retained points in scene geometry order, including their source attributes.
+`PclSceneOptions.MaxDegreeOfParallelism` passes the requested concurrency to formats that support block decoding.
+
+The E57 reader exposes checksum-verified image blobs through `E57Document.ReadImageBlob`.
+`FaroFlsDocument.ReadColorPanorama` returns the scanner-aligned mode 26 RGB raster in an equirectangular projection.
+The image is RGB24 in row-major order and has a height of half the requested width. Pixels outside the recorded angles are black.
+
 `E57Document`/`E57Scan`, `RcsScanDocument`/`RcsScan`, `RcpProjectDocument`/`RcpScan`, `LgsxDocument`/`LgsxScan`/`LgsxEntry`/`LgsxSetup`,
 `FaroFlsDocument`/`FaroScan`, `PinPointDocument`/`PinPointScan`, `EdgeWiseDocument`/`EdgeWiseScan`, `LasDocument`/`LasScan`, `LazDocument`/`LazScan`, `CopcDocument`/`CopcScan`, `PcdDocument`/`PcdScan`, `PlyDocument`/`PlyScan`, `PtsDocument`/`PtsScan`, `PtxDocument`/`PtxScan`, `XyzDocument`/`XyzScan`, `SbfDocument`/`SbfScan`, `Tiles3dDocument`/`PntsScan`/`GlbScan`, `PotreeDocument`/`PotreeScan`, `EptDocument`/`EptScan`, `PtgDocument`/`PtgScan` and `CcBinDocument`/`CcBinScan` are the readers behind
 `PclFile.Open`. Each has a static `Open` method and format-specific properties (for example the E57 version or the FARO scanner model).
