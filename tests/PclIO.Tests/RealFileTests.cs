@@ -1,4 +1,5 @@
 using PclIO.Export;
+using PclIO.Formats.Recap;
 using Xunit;
 
 namespace PclIO.Tests;
@@ -10,6 +11,7 @@ namespace PclIO.Tests;
 public sealed class RealFileTests
 {
     private const int SampleSize = 100;
+    private const double Precision = 1e-9;
 
     private static void AssertReadsPoints(string extension, PclFileKind kind)
     {
@@ -93,6 +95,85 @@ public sealed class RealFileTests
 
     [SkippableFact]
     public void Read_Real_Recap_Project_Points() => AssertReadsPoints(".rcp", PclFileKind.RecapProject);
+
+    // The positions of an .rcs file are stored on a grid of this step, in metres.
+    private const double RcsGridStep = 0.001;
+
+    [SkippableFact]
+    public void Read_Real_Recap_Scan_To_Its_End()
+    {
+        // The smallest scan of the corpus is read to its end, so the check stays fast whatever the corpus holds. A full read
+        // returns the number of points the scan reports, the points lie within the bounds the header states, and the
+        // channels follow the flags of the header.
+        string? path = TestFiles.TryFindAllByExtension(".rcs", TestFiles.Roots())
+            .Where(p => PclFile.DetectKind(p) == PclFileKind.RecapScan)
+            .OrderBy(p => new FileInfo(p).Length)
+            .FirstOrDefault(StoresDecodablePoints);
+        if (path == null) throw TestFiles.Missing(".rcs");
+
+        using var doc = RcsScanDocument.Open(path);
+        var scan = Assert.Single(doc.Scans);
+        Assert.True(scan.PointCount > 0);
+
+        long count = 0;
+        var bounds = PclBounds.Empty;
+        foreach (PclPoint point in scan.ReadPoints(new PclReadOptions { ApplyTransform = false }))
+        {
+            count++;
+            bounds = bounds.Encapsulate(point.Position);
+            Assert.Equal(scan.HasColors, point.Color.HasValue);
+            Assert.Equal(scan.HasIntensities, point.Intensity.HasValue);
+            if (point.Intensity is { } intensity) Assert.InRange(intensity, 0f, 1f);
+            if (point.Normal is { } normal)
+            {
+                Assert.True(scan.HasNormals);
+                Assert.Equal(1.0, normal.X * normal.X + normal.Y * normal.Y + normal.Z * normal.Z, Precision);
+            }
+        }
+
+        Assert.Equal(scan.PointCount, count);
+
+        // The bounds of the header contain the stored points. They can be wider than these points, when the file states
+        // the bounds of the scan it was made from; and a stored position is rounded to the grid, so it can leave them by
+        // one step of the grid at most.
+        PclBounds stated = doc.LocalBounds;
+        Assert.True(bounds.Min.X >= stated.Min.X - RcsGridStep, $"x starts at {bounds.Min.X:R}, before {stated.Min.X:R}");
+        Assert.True(bounds.Min.Y >= stated.Min.Y - RcsGridStep, $"y starts at {bounds.Min.Y:R}, before {stated.Min.Y:R}");
+        Assert.True(bounds.Min.Z >= stated.Min.Z - RcsGridStep, $"z starts at {bounds.Min.Z:R}, before {stated.Min.Z:R}");
+        Assert.True(bounds.Max.X <= stated.Max.X + RcsGridStep, $"x ends at {bounds.Max.X:R}, after {stated.Max.X:R}");
+        Assert.True(bounds.Max.Y <= stated.Max.Y + RcsGridStep, $"y ends at {bounds.Max.Y:R}, after {stated.Max.Y:R}");
+        Assert.True(bounds.Max.Z <= stated.Max.Z + RcsGridStep, $"z ends at {bounds.Max.Z:R}, after {stated.Max.Z:R}");
+        Assert.False(bounds.IsEmpty);
+
+        // With a scale of one, the transform adds the translation of the header and leaves the normals as they are.
+        if (scan.Transform.Scale == PclVector3.One)
+        {
+            var translation = scan.Transform.Translation;
+            var local = doc.ReadAllPoints(new PclReadOptions { ApplyTransform = false, MaxPoints = SampleSize }).ToList();
+            var placed = doc.ReadAllPoints(new PclReadOptions { MaxPoints = SampleSize }).ToList();
+
+            Assert.Equal(
+                local.Select(p => new PclVector3(p.X * 1 + translation.X, p.Y * 1 + translation.Y, p.Z * 1 + translation.Z)),
+                placed.Select(p => p.Position));
+            Assert.Equal(local.Select(p => p.Normal), placed.Select(p => p.Normal));
+        }
+    }
+
+    // True when the file opens as a scan the reader decodes and states points it stores.
+    private static bool StoresDecodablePoints(string path)
+    {
+        try
+        {
+            using var doc = RcsScanDocument.Open(path);
+            return doc.TotalPointCount > 0;
+        }
+        catch (Exception e) when (e is InvalidDataException or NotSupportedException)
+        {
+            // A scan of a version the reader does not decode, or a damaged one, is no fixture for the test.
+            return false;
+        }
+    }
+
 
     [SkippableFact]
     public void Read_Real_Leica_Container_Points() => AssertReadsPoints(".lgsx", PclFileKind.LeicaLgsx);

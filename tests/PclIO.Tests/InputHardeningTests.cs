@@ -1000,42 +1000,216 @@ public sealed class InputHardeningTests
         Assert.Contains("decompresses to more than", exception.Message);
     }
 
-    // ---- ReCap scan limit -----------------------------------------------------------------------------------------
+    // ---- ReCap scan ---------------------------------------------------------------------------------------------
 
-    // Offset of the node table in the supported layout of an .rcs file.
-    private const int RcsNodeTableOffset = 98605;
+    // Where the section table starts in an .rcs file, and the entry of the points section in it.
+    private const int RcsSectionTable = 0x12D;
+    private const int RcsPointsEntry = RcsSectionTable + 24;
+
+    // Where the leaves section lies in the files built below, and the offset of the block size in a leaf record.
+    private const int RcsLeavesSection = RcsScanBuilder.HeaderSize;
+    private const int RcsBlockSizeInLeaf = 8 + 104;
+
+    private static byte[] RcsWithThreePoints() => SyntheticFixtures.CreateSyntheticRcsWithPoints(
+        [new RcsSamplePoint(1, 1, 1), new RcsSamplePoint(2, 2, 2), new RcsSamplePoint(3, 3, 3)], (0, 0, 0));
 
     [Theory]
-    [InlineData(500_001UL)]
-    [InlineData(1UL << 40)]
-    [InlineData(ulong.MaxValue)]
-    public void An_Rcs_Node_Table_Declaring_More_Nodes_Than_The_Limit_Is_Rejected_Without_Allocating_For_Them(ulong nodes)
+    [InlineData(65u)]
+    [InlineData(uint.MaxValue)]
+    public void An_Rcs_Section_Count_Above_The_Limit_Is_Rejected_Without_Reading_The_Table(uint sections)
     {
         using var dir = new TempDirectory();
-        byte[] bytes = SyntheticFixtures.CreateSyntheticRcs();
-        BinaryPrimitives.WriteUInt64LittleEndian(bytes.AsSpan(RcsNodeTableOffset, 8), nodes);
-        string path = dir.Write("nodes.rcs", bytes);
+        byte[] bytes = RcsWithThreePoints();
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(0x129, 4), sections);
+        string path = dir.Write("sections.rcs", bytes);
 
         AssertRejectedCheaply(() => ReadEverything(p => RcsScanDocument.Open(p), path));
     }
 
     [Fact]
-    public void An_Rcs_Node_Table_One_Node_Beyond_The_Limit_Is_Rejected_Although_The_File_Could_Hold_It()
+    public void An_Rcs_Whose_Section_Table_Runs_Past_The_End_Of_The_File_Is_Rejected()
+    {
+        // The file ends with its header. The eight entries the header can hold are empty sections, which are sound, and the
+        // count states 64: the ninth entry would have to come from beyond the end of the file.
+        using var dir = new TempDirectory();
+        byte[] bytes = SyntheticFixtures.CreateSyntheticRcs()[..RcsScanBuilder.HeaderSize];
+        bytes.AsSpan(RcsSectionTable, 8 * 24).Clear();
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(0x129, 4), 64);
+        string path = dir.Write("table.rcs", bytes);
+
+        var error = AssertRejectedCheaply(() => ReadEverything(p => RcsScanDocument.Open(p), path));
+        Assert.Contains("truncated", error.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(0L, long.MaxValue)]
+    [InlineData(long.MaxValue, 0L)]
+    [InlineData(-1L, 16L)]
+    [InlineData(0L, -16L)]
+    [InlineData(long.MaxValue - 8, 16L)]
+    public void An_Rcs_Section_That_Does_Not_Fit_In_The_File_Is_Rejected(long offset, long size)
+    {
+        // The offset and the size of the points section are set to the 64-bit patterns given, whatever their sign.
+        using var dir = new TempDirectory();
+        byte[] bytes = RcsWithThreePoints();
+        BinaryPrimitives.WriteInt64LittleEndian(bytes.AsSpan(RcsPointsEntry + 8, 8), offset);
+        BinaryPrimitives.WriteInt64LittleEndian(bytes.AsSpan(RcsPointsEntry + 16, 8), size);
+        string path = dir.Write("outside.rcs", bytes);
+
+        AssertRejectedCheaply(() => ReadEverything(p => RcsScanDocument.Open(p), path));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(24)]
+    public void An_Rcs_Without_Its_Leaves_Section_Or_Without_Its_Points_Section_Is_Rejected(int entry)
+    {
+        // The entry is given a section type the reader does not use.
+        using var dir = new TempDirectory();
+        byte[] bytes = RcsWithThreePoints();
+        BinaryPrimitives.WriteUInt64LittleEndian(bytes.AsSpan(RcsSectionTable + entry, 8), 99);
+        string path = dir.Write("missing.rcs", bytes);
+
+        var error = AssertRejectedCheaply(() => ReadEverything(p => RcsScanDocument.Open(p), path));
+        Assert.Contains("section", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void An_Rcs_That_Names_A_Section_Twice_Is_Rejected()
+    {
+        // The entry of the points section claims to be a second leaves section.
+        using var dir = new TempDirectory();
+        byte[] bytes = RcsWithThreePoints();
+        BinaryPrimitives.WriteUInt64LittleEndian(bytes.AsSpan(RcsPointsEntry, 8), 2);
+        string path = dir.Write("twice.rcs", bytes);
+
+        var error = AssertRejectedCheaply(() => ReadEverything(p => RcsScanDocument.Open(p), path));
+        Assert.Contains("twice", error.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(2u)]
+    [InlineData(uint.MaxValue)]
+    public void An_Rcs_Leaf_Count_That_The_Leaves_Section_Cannot_Hold_Is_Rejected_Without_Allocating_For_It(uint leaves)
+    {
+        // The section holds one leaf record; the count states more.
+        using var dir = new TempDirectory();
+        byte[] bytes = RcsWithThreePoints();
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(RcsLeavesSection, 4), leaves);
+        string path = dir.Write("leaves.rcs", bytes);
+
+        AssertRejectedCheaply(() => ReadEverything(p => RcsScanDocument.Open(p), path));
+    }
+
+    [Theory]
+    [InlineData(500_001u)]
+    [InlineData(1u << 20)]
+    [InlineData(uint.MaxValue)]
+    public void An_Rcs_Leaf_Table_Declaring_More_Leaves_Than_The_Limit_Is_Rejected_Without_Allocating_For_Them(uint leaves)
     {
         using var dir = new TempDirectory();
-        const long nodeSize = 368;
-        string path = dir.PathOf("nodes.rcs");
-        byte[] header = SyntheticFixtures.CreateSyntheticRcs();
-        BinaryPrimitives.WriteUInt64LittleEndian(header.AsSpan(RcsNodeTableOffset, 8), 500_001);
+        byte[] bytes = SyntheticFixtures.CreateSyntheticRcs();
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(RcsLeavesSection, 4), leaves);
+        string path = dir.Write("leaves.rcs", bytes);
 
-        // The file is long enough for the whole table, so only the limit on the node count can reject it (the zero-filled tail costs no data).
+        AssertRejectedCheaply(() => ReadEverything(p => RcsScanDocument.Open(p), path));
+    }
+
+    [Fact]
+    public void An_Rcs_Leaf_Table_One_Leaf_Beyond_The_Limit_Is_Rejected_Although_The_File_Could_Hold_It()
+    {
+        using var dir = new TempDirectory();
+        const long leafSize = 368;
+        const long leavesSize = 8 + (500_001 * leafSize);
+        string path = dir.PathOf("leaves.rcs");
+        byte[] header = SyntheticFixtures.CreateSyntheticRcs();
+        BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(RcsLeavesSection, 4), 500_001);
+        // The leaves section is declared large enough for the whole table, so only the limit on the leaf count can reject it.
+        BinaryPrimitives.WriteUInt64LittleEndian(header.AsSpan(RcsSectionTable + 16, 8), (ulong)leavesSize);
+
         using (var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write))
         {
             stream.Write(header);
-            stream.SetLength(RcsNodeTableOffset + 8 + (500_001 * nodeSize));
+            stream.SetLength(RcsLeavesSection + leavesSize);
         }
 
         AssertRejectedCheaply(() => ReadEverything(p => RcsScanDocument.Open(p), path));
+    }
+
+    [Fact]
+    public void An_Rcs_Whose_Leaf_Blocks_Do_Not_Fill_The_Points_Section_Is_Rejected()
+    {
+        // Eight bytes follow the leaf blocks inside the points section, which the leaf records do not account for.
+        var scan = new RcsScanBuilder();
+        scan.AddLeaf((0, 0, 0), 1, new RcsSamplePoint(1, 1, 1), new RcsSamplePoint(2, 2, 2));
+        scan.PointsTail = new byte[8];
+        using var dir = new TempDirectory();
+        string path = dir.Write("tail.rcs", scan.Build());
+
+        var error = AssertRejectedCheaply(() => ReadEverything(p => RcsScanDocument.Open(p), path));
+        Assert.Contains("fill", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void An_Rcs_Leaf_Block_Larger_Than_The_Rest_Of_The_Points_Section_Is_Rejected()
+    {
+        // The record of the last leaf states a block of 24 bytes where the points section holds 20.
+        var scan = new RcsScanBuilder();
+        scan.AddLeaf((0, 0, 0), 1, new RcsSamplePoint(1, 1, 1));
+        scan.AddLeaf((1, 1, 1), 1, new RcsSamplePoint(2, 2, 2));
+        byte[] bytes = scan.Build();
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(RcsLeavesSection + RcsBlockSizeInLeaf + RcsScanBuilder.LeafRecordSize, 4), 24);
+        using var dir = new TempDirectory();
+        string path = dir.Write("beyond.rcs", bytes);
+
+        var error = AssertRejectedCheaply(() => ReadEverything(p => RcsScanDocument.Open(p), path));
+        Assert.Contains("block", error.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(double.NaN)]
+    [InlineData(double.PositiveInfinity)]
+    [InlineData(double.NegativeInfinity)]
+    public void An_Rcs_Leaf_With_A_Cube_Corner_That_Is_Not_A_Finite_Number_Is_Rejected(double corner)
+    {
+        using var dir = new TempDirectory();
+        byte[] bytes = RcsWithThreePoints();
+        BinaryPrimitives.WriteDoubleLittleEndian(bytes.AsSpan(RcsLeavesSection + 8 + 8, 8), corner);
+        string path = dir.Write("corner.rcs", bytes);
+
+        AssertRejectedCheaply(() => ReadEverything(p => RcsScanDocument.Open(p), path));
+    }
+
+    [Fact]
+    public void An_Rcs_With_A_Damaged_Leaf_Returns_No_Point_At_All()
+    {
+        // The first leaf is sound and the second is not. The file is checked as a whole, so no point of the first leaf is
+        // returned before the failure.
+        var scan = new RcsScanBuilder();
+        scan.AddLeaf((0, 0, 0), 1, new RcsSamplePoint(1, 1, 1), new RcsSamplePoint(2, 2, 2));
+        scan.AddLeaf((1, 1, 1), 1, new RcsSamplePoint(3, 3, 3)).DeclaredBlockSize = 4;
+        using var dir = new TempDirectory();
+        using var doc = RcsScanDocument.Open(dir.Write("late.rcs", scan.Build()));
+
+        using var points = doc.Scans[0].ReadPoints().GetEnumerator();
+        Assert.Throws<InvalidDataException>(() => points.MoveNext());
+        Assert.Throws<InvalidDataException>(() => doc.Scans[0].PointCount);
+    }
+
+    [Fact]
+    public void An_Rcs_Truncated_Anywhere_Is_Rejected_As_Malformed()
+    {
+        // Wherever the file is cut, the reader reports a malformed file.
+        byte[] bytes = RcsWithThreePoints();
+        using var dir = new TempDirectory();
+
+        for (int length = 0; length < bytes.Length; length++)
+        {
+            string path = dir.Write($"cut/{length}.rcs", bytes[..length]);
+            AssertRejectedCheaply(() => ReadEverything(p => RcsScanDocument.Open(p), path));
+        }
+
+        Assert.Equal(3, OpenAndReadAll(p => RcsScanDocument.Open(p), dir.Write("whole.rcs", bytes)));
     }
 
     // ---- E57 XML and prototype limits -----------------------------------------------------------------------------

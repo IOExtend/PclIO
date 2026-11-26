@@ -49,32 +49,67 @@ public sealed class FormatTests
 
         Assert.Equal(PclFileKind.RecapScan, doc.Kind);
         Assert.Equal(3u, doc.MajorVersion);
+        Assert.Equal(2u, doc.MinorVersion);
         Assert.Equal(12345, doc.DeclaredPointCount);
+        Assert.Equal("12345", doc.Metadata["PointCount"]);
         Assert.Equal(new PclVector3(10.5, 20.5, 30.5), doc.ScanTransform.Translation);
+        Assert.Equal(PclVector3.Zero, doc.ScanTransform.Rotation);
         Assert.Equal(PclVector3.One, doc.ScanTransform.Scale);
         Assert.Equal(new PclBounds(new PclVector3(-10, -10, -10), new PclVector3(10, 10, 10)), doc.LocalBounds);
+        Assert.Equal(new PclBounds(new PclVector3(-10, -10, -10), new PclVector3(10, 10, 10)), doc.OctreeBounds);
         Assert.Equal("00000000-0000-0000-0000-000000000001", doc.ScanGuid);
         Assert.Equal("LOCAL_GRID_SYSTEM", doc.CoordinateSystem);
+        Assert.False(doc.HasColorData);
+        Assert.False(doc.HasNormalData);
+        Assert.False(doc.HasIntensityData);
 
         var scan = Assert.Single(doc.Scans);
-        Assert.Equal(12345, scan.PointCount);
-        Assert.Equal(12345, doc.TotalPointCount);
+        Assert.Equal("00000000-0000-0000-0000-000000000001", scan.Id);
+        Assert.Equal("sample", scan.Name);
+        Assert.Equal(doc.ScanTransform, scan.Transform);
+        Assert.Equal(doc.LocalBounds, scan.Bounds);
+        Assert.False(scan.HasColors);
+        Assert.False(scan.HasNormals);
+        Assert.False(scan.HasIntensities);
     }
 
     [Fact]
-    public void Rcs_With_An_Empty_Node_Table_Yields_No_Points()
+    public void Rcs_Without_Leaves_Stores_No_Points()
     {
+        // The header states a point count, but the file holds no leaf, so it stores no point.
         using var dir = new TempDirectory();
         using var doc = RcsScanDocument.Open(dir.Write("empty.rcs", SyntheticFixtures.CreateSyntheticRcs(pointCount: 10)));
 
+        Assert.Equal(10, doc.DeclaredPointCount);
+        Assert.Equal(0, doc.Scans[0].PointCount);
+        Assert.Equal(0, doc.TotalPointCount);
         Assert.Empty(doc.ReadAllPoints());
     }
 
+    [Fact]
+    public void Rcs_Point_Count_Is_The_Number_Of_Stored_Points_Not_The_Count_Of_The_Header()
+    {
+        // The header states a count of its own, which is not the number of the points the file stores.
+        using var dir = new TempDirectory();
+        var scan = new RcsScanBuilder { PointCount = 9000 };
+        scan.AddLeaf((0, 0, 0), 1, new RcsSamplePoint(1, 1, 1), new RcsSamplePoint(2, 2, 2));
+        scan.AddLeaf((5, 5, 5), 1, new RcsSamplePoint(3, 3, 3));
+        using var doc = RcsScanDocument.Open(dir.Write("count.rcs", scan.Build()));
+
+        Assert.Equal(9000, doc.DeclaredPointCount);
+        Assert.Equal(3, doc.Scans[0].PointCount);
+        Assert.Equal(3, doc.TotalPointCount);
+        Assert.Equal(3, doc.ReadAllPoints().Count());
+    }
+
+    // Records of the synthetic scans. The first lies 0.1, 0.2 and 0.3 metres from the corner of its leaf and names a cell
+    // near the +z axis; the second is the corner of the leaf and has no normal; the third holds the largest offset an
+    // axis can hold and the flag that leaves a point without a normal.
     private static readonly RcsSamplePoint[] RcsPoints =
     [
-        new(1000, 2000, 3000, 128, 10, 20, 30, 0, 0, 127),
+        new(100, 200, 300, 128, 10, 20, 30, 12194),
         new(0, 0, 0, 255, 1, 2, 3),
-        new(65535, 1, 2, 0, 255, 254, 253, 127, 0, 0),
+        new(RcsScanBuilder.MaxOffset, 1000, 2, 0, 255, 254, 253, 0x4000),
     ];
 
     [Fact]
@@ -88,44 +123,230 @@ public sealed class FormatTests
         var raw = doc.ReadAllPoints(NoTransform).ToList();
         var moved = doc.ReadAllPoints().ToList();
 
+        // A position counts millimetres from the corner of the cube of its leaf; the transform adds the translation.
         Assert.Equal(3, raw.Count);
-        AssertNear(new PclVector3(1.6, -2.3, 3.8), raw[0].Position);
-        AssertNear(new PclVector3(1.5, -2.5, 3.5), raw[1].Position);
-        AssertNear(new PclVector3(1.5 + 6.5535, -2.4999, 3.5002), raw[2].Position);
-        AssertNear(new PclVector3(11.6, 17.7, 33.8), moved[0].Position);
-
-        Assert.Equal(new PclColor(10, 20, 30), raw[0].Color);
-        Assert.Equal(128 / 255.0f, raw[0].Intensity);
-        Assert.Equal(1.0f, raw[1].Intensity);
+        Assert.Equal(new PclVector3(1.5 + 100 * 0.001, -2.5 + 200 * 0.001, 3.5 + 300 * 0.001), raw[0].Position);
+        Assert.Equal(new PclVector3(1.5, -2.5, 3.5), raw[1].Position);
+        Assert.Equal(new PclVector3(1.5 + 262143 * 0.001, -2.5 + 1000 * 0.001, 3.5 + 2 * 0.001), raw[2].Position);
+        Assert.Equal(new PclVector3((1.5 + 100 * 0.001) * 1 + 10, (-2.5 + 200 * 0.001) * 1 + 20, (3.5 + 300 * 0.001) * 1 + 30), moved[0].Position);
         Assert.Equal(new[] { 0UL, 1UL, 2UL }, raw.Select(p => p.Index));
 
-        // Packed normals are unit vectors; an all-zero normal means "none".
-        AssertNear(new PclVector3(0, 0, 1), raw[0].Normal!.Value);
+        // The colour and the intensity are the bytes of the record.
+        Assert.Equal(new PclColor(10, 20, 30), raw[0].Color);
+        Assert.Equal(new PclColor(255, 254, 253), raw[2].Color);
+        Assert.Equal(128 / 255.0f, raw[0].Intensity);
+        Assert.Equal(1.0f, raw[1].Intensity);
+        Assert.Equal(0.0f, raw[2].Intensity);
+
+        // The first record names a cell of the +z face; the others state that the point has no normal. A scale of one
+        // leaves a normal as it is.
+        AssertNear(new PclVector3(0.015101514293334039, 0.015101514293334039, 0.99977191825540723), raw[0].Normal!.Value);
         Assert.Null(raw[1].Normal);
-        AssertNear(new PclVector3(1, 0, 0), raw[2].Normal!.Value);
+        Assert.Null(raw[2].Normal);
+        Assert.Equal(raw.Select(p => p.Index), moved.Select(p => p.Index));
+        Assert.Equal(raw.Select(p => p.Color), moved.Select(p => p.Color));
+        Assert.Equal(raw.Select(p => p.Intensity), moved.Select(p => p.Intensity));
+        Assert.Equal(raw.Select(p => p.Normal), moved.Select(p => p.Normal));
+    }
+
+    [Theory]
+    [InlineData(1u, 0.60025827522031439, -0.5481850217573937, -0.58239435518416482)]
+    [InlineData(52u, 0.60025827522031439, -0.58239435518416482, -0.5481850217573937)]
+    [InlineData(53u, 0.61221412644254303, -0.55910368599401761, -0.55910368599401761)]
+    [InlineData(2704u, -0.5889765868020802, -0.57144841420681702, -0.57144841420681702)]
+    [InlineData(2756u, -0.60025827522031439, -0.58239435518416482, -0.5481850217573937)]
+    [InlineData(5408u, -0.57144841420681702, 0.5889765868020802, -0.57144841420681702)]
+    [InlineData(5459u, 0.57144841420681702, 0.58897658680208009, -0.57144841420681691)]
+    [InlineData(8112u, -0.57144841420681702, -0.5889765868020802, -0.57144841420681702)]
+    [InlineData(10816u, -0.57144841420681702, -0.57144841420681702, 0.5889765868020802)]
+    [InlineData(10867u, 0.57144841420681702, -0.57144841420681691, 0.58897658680208009)]
+    [InlineData(13520u, -0.57144841420681702, -0.57144841420681702, -0.5889765868020802)]
+    [InlineData(16223u, 0.57144841420681702, 0.57144841420681702, -0.58897658680208009)]
+    public void Rcs_Normals_Are_The_Directions_Of_The_Cells_Their_Codes_Name(ushort code, double x, double y, double z)
+    {
+        // A code names a cell on a face of a cube: face * 2704 + i * 52 + j, the faces along +x, -x, +y, -y, +z and -z, each
+        // with 52 by 52 cells of equal angle. The directions were computed from that definition apart from the reader, for the
+        // first cell of every face, for cells that differ in i alone and in j alone, and for the last cell.
+        using var dir = new TempDirectory();
+        var scan = new RcsScanBuilder { Normals = true };
+        scan.AddLeaf((0, 0, 0), 1, new RcsSamplePoint(0, 0, 0, Normal: code));
+        using var doc = RcsScanDocument.Open(dir.Write("normal.rcs", scan.Build()));
+
+        var point = Assert.Single(doc.ReadAllPoints(NoTransform));
+        PclVector3 normal = point.Normal!.Value;
+
+        AssertNear(new PclVector3(x, y, z), normal);
+        Assert.Equal(1.0, normal.X * normal.X + normal.Y * normal.Y + normal.Z * normal.Z, Precision);
     }
 
     [Fact]
-    public void An_Rcs_Without_Colour_Reports_No_Colour_And_No_Intensity()
+    public void An_Rcs_Point_Has_A_Normal_Only_For_A_Plain_Cell_Code()
+    {
+        // A point without a normal states a zero code, as some files do, or a flag bit beside the code, as others do. A
+        // code above the last cell names no cell either.
+        ushort[] fields = [12194, 0, 0x4000, 0x4000 | 12194, 0x8000, 0xC000, 0x3FFF];
+        bool[] hasNormal = [true, false, false, false, false, false, false];
+
+        using var dir = new TempDirectory();
+        var scan = new RcsScanBuilder { Normals = true };
+        scan.AddLeaf((0, 0, 0), 1, [.. fields.Select((field, i) => new RcsSamplePoint((uint)i, 0, 0, Normal: field))]);
+        using var doc = RcsScanDocument.Open(dir.Write("flags.rcs", scan.Build()));
+
+        Assert.True(doc.HasNormalData);
+        Assert.True(doc.Scans[0].HasNormals);
+        var points = doc.ReadAllPoints(NoTransform).ToList();
+        Assert.Equal(hasNormal, points.Select(p => p.Normal.HasValue));
+        AssertNear(new PclVector3(0.015101514293334039, 0.015101514293334039, 0.99977191825540723), points[0].Normal!.Value);
+    }
+
+    [Fact]
+    public void An_Rcs_Without_Normals_Reports_None_Whatever_Its_Records_State()
     {
         using var dir = new TempDirectory();
-        using var doc = RcsScanDocument.Open(dir.Write("plain.rcs",
-            SyntheticFixtures.CreateSyntheticRcsWithPoints(RcsPoints, (0, 0, 0), withColor: false)));
+        var scan = new RcsScanBuilder();
+        scan.AddLeaf((0, 0, 0), 1, new RcsSamplePoint(1, 2, 3, Normal: 12194));
+        using var doc = RcsScanDocument.Open(dir.Write("flat.rcs", scan.Build()));
 
-        var scan = Assert.Single(doc.Scans);
-        Assert.False(scan.HasColors);
-        Assert.False(scan.HasIntensities);
-        Assert.False(scan.HasNormals);
-        Assert.False(doc.HasColorData);
+        Assert.False(doc.HasNormalData);
+        Assert.False(doc.Scans[0].HasNormals);
+        Assert.Null(Assert.Single(doc.ReadAllPoints(NoTransform)).Normal);
+    }
 
-        var points = scan.ReadPoints(NoTransform).ToList();
-        Assert.Equal(3, points.Count);
-        Assert.All(points, p =>
+    [Theory]
+    [InlineData(true, true, true)]
+    [InlineData(true, false, false)]
+    [InlineData(false, true, false)]
+    [InlineData(false, false, false)]
+    public void Rcs_Channels_Follow_The_Flags_Of_The_Header(bool color, bool intensity, bool normals)
+    {
+        // The bytes of a channel are read only when the header states the channel; a file may hold anything in their place.
+        using var dir = new TempDirectory();
+        var scan = new RcsScanBuilder { Color = color, Intensity = intensity, Normals = normals };
+        scan.AddLeaf((0, 0, 0), 1, new RcsSamplePoint(1, 2, 3, 200, 10, 20, 30, 12194), new RcsSamplePoint(4, 5, 6));
+        using var doc = RcsScanDocument.Open(dir.Write("channels.rcs", scan.Build()));
+
+        var rcsScan = Assert.Single(doc.Scans);
+        Assert.Equal(color, doc.HasColorData);
+        Assert.Equal(normals, doc.HasNormalData);
+        Assert.Equal(intensity, doc.HasIntensityData);
+        Assert.Equal(color, rcsScan.HasColors);
+        Assert.Equal(normals, rcsScan.HasNormals);
+        Assert.Equal(intensity, rcsScan.HasIntensities);
+
+        var points = rcsScan.ReadPoints(NoTransform).ToList();
+        Assert.Equal(2, points.Count);
+        Assert.Equal(color ? new PclColor(10, 20, 30) : (PclColor?)null, points[0].Color);
+        Assert.Equal(color ? new PclColor(0, 0, 0) : (PclColor?)null, points[1].Color);
+        Assert.Equal(intensity ? 200 / 255.0f : (float?)null, points[0].Intensity);
+        Assert.Equal(intensity ? 0.0f : (float?)null, points[1].Intensity);
+        Assert.Equal(normals, points[0].Normal.HasValue);
+        Assert.Null(points[1].Normal);
+    }
+
+    [Fact]
+    public void Rcs_Points_Count_From_The_Cube_Of_Their_Own_Leaf_In_File_Order()
+    {
+        using var dir = new TempDirectory();
+        var scan = new RcsScanBuilder();
+        scan.AddLeaf((1, 2, 3), 0.5, new RcsSamplePoint(100, 0, 0), new RcsSamplePoint(0, 500, 0));
+        // A leaf without points and without a block lies between the two.
+        scan.AddLeaf((9, 9, 9), 0.25);
+        // The first record of the last leaf states the offsets of the first record of the first leaf.
+        scan.AddLeaf((-1, 5, 0.5), 0.25, new RcsSamplePoint(100, 0, 0), new RcsSamplePoint(0, 0, 250), new RcsSamplePoint(7, 8, 9));
+        using var doc = RcsScanDocument.Open(dir.Write("leaves.rcs", scan.Build()));
+
+        var rcsScan = Assert.Single(doc.Scans);
+        Assert.Equal(5, rcsScan.PointCount);
+        Assert.Equal(5, doc.TotalPointCount);
+
+        var points = rcsScan.ReadPoints(NoTransform).ToList();
+        Assert.Equal(5, points.Count);
+        Assert.Equal(new[]
         {
-            Assert.Null(p.Color);
-            Assert.Null(p.Intensity);
-            Assert.Null(p.Normal);
-        });
+            new PclVector3(1 + 100 * 0.001, 2, 3),
+            new PclVector3(1, 2 + 500 * 0.001, 3),
+            new PclVector3(-1 + 100 * 0.001, 5, 0.5),
+            new PclVector3(-1, 5, 0.5 + 250 * 0.001),
+            new PclVector3(-1 + 7 * 0.001, 5 + 8 * 0.001, 0.5 + 9 * 0.001),
+        }, points.Select(p => p.Position).ToArray());
+        Assert.Equal(new ulong[] { 0, 1, 2, 3, 4 }, points.Select(p => p.Index).ToArray());
+
+        // The step counts the points of every leaf on their own.
+        var stepped = rcsScan.ReadPoints(new PclReadOptions { SubsampleStep = 2, ApplyTransform = false }).ToList();
+        Assert.Equal(new[] { points[0].Position, points[2].Position, points[4].Position }, stepped.Select(p => p.Position).ToArray());
+        Assert.Equal(new ulong[] { 0, 1, 2 }, stepped.Select(p => p.Index).ToArray());
+    }
+
+    [Fact]
+    public void Rcs_Sections_Are_Taken_From_The_Table_Whatever_Their_Order()
+    {
+        // Reading needs the leaves section and the points section; the other sections are skipped wherever they lie.
+        RcsSamplePoint[] records = [new(100, 200, 300, 128, 10, 20, 30, 12194), new(0, 0, 0)];
+        var plain = new RcsScanBuilder { Normals = true };
+        plain.AddLeaf((1, 2, 3), 0.5, records);
+
+        var shuffled = new RcsScanBuilder { Normals = true };
+        shuffled.AddLeaf((1, 2, 3), 0.5, records);
+        shuffled.OtherSections[3] = new byte[72];
+        shuffled.OtherSections[7] = [0x12, 0x00, 0x00, 0x80, 0xFF];
+        shuffled.OtherSections[11] = new byte[134];
+        shuffled.SectionOrder = [3, 7, RcsScanBuilder.PointsSection, 11, RcsScanBuilder.LeavesSection];
+
+        using var dir = new TempDirectory();
+        using var first = RcsScanDocument.Open(dir.Write("plain.rcs", plain.Build()));
+        using var second = RcsScanDocument.Open(dir.Write("shuffled.rcs", shuffled.Build()));
+
+        Assert.Equal(2, second.Scans[0].PointCount);
+        Assert.Equal(first.ReadAllPoints(NoTransform).ToList(), second.ReadAllPoints(NoTransform).ToList());
+    }
+
+    [Fact]
+    public void An_Rcs_Leaf_With_More_Index_Words_Than_Points_Is_Read()
+    {
+        // The records of a block follow its index words. A leaf whose octree needs more words than the one every point has
+        // holds its records further back.
+        using var dir = new TempDirectory();
+        var scan = new RcsScanBuilder();
+        scan.AddLeaf((0, 0, 0), 262.144, RcsPoints).IndexBytes = 3 * RcsPoints.Length * 4 + 12;
+        using var doc = RcsScanDocument.Open(dir.Write("words.rcs", scan.Build()));
+        using var plain = RcsScanDocument.Open(dir.Write("plain.rcs", SyntheticFixtures.CreateSyntheticRcsWithPoints(RcsPoints, (0, 0, 0))));
+
+        Assert.Equal(3, doc.Scans[0].PointCount);
+        Assert.Equal(plain.ReadAllPoints(NoTransform).ToList(), doc.ReadAllPoints(NoTransform).ToList());
+    }
+
+    [Fact]
+    public void The_Top_Byte_Of_The_Word_Of_A_Record_Is_Not_Part_Of_Its_Position()
+    {
+        RcsSamplePoint[] plain = [new(100, 200, 300, 128, 10, 20, 30, 12194), new(RcsScanBuilder.MaxOffset, RcsScanBuilder.MaxOffset, RcsScanBuilder.MaxOffset)];
+        RcsSamplePoint[] marked = [plain[0] with { Top = 0xFF }, plain[1] with { Top = 0xA5 }];
+
+        using var dir = new TempDirectory();
+        using var first = RcsScanDocument.Open(dir.Write("plain.rcs", SyntheticFixtures.CreateSyntheticRcsWithPoints(plain, (1, 2, 3), withNormals: true)));
+        using var second = RcsScanDocument.Open(dir.Write("marked.rcs", SyntheticFixtures.CreateSyntheticRcsWithPoints(marked, (1, 2, 3), withNormals: true)));
+
+        Assert.Equal(first.ReadAllPoints(NoTransform).ToList(), second.ReadAllPoints(NoTransform).ToList());
+    }
+
+    [Fact]
+    public void Rcs_Scale_Is_Applied_To_A_Position_Before_The_Translation()
+    {
+        using var dir = new TempDirectory();
+        var scan = new RcsScanBuilder { Translation = (1, 2, 3), Scale = (0.5, 2, 10), Normals = true };
+        scan.AddLeaf((0.25, 0, -0.5), 1, new RcsSamplePoint(1000, 2000, 3000, Normal: 2678), new RcsSamplePoint(100, 100, 100));
+        using var doc = RcsScanDocument.Open(dir.Write("scaled.rcs", scan.Build()));
+
+        var raw = doc.ReadAllPoints(NoTransform).ToList();
+        var scaled = doc.ReadAllPoints().ToList();
+
+        Assert.Equal(new PclVector3(0.25 + 1000 * 0.001, 0 + 2000 * 0.001, -0.5 + 3000 * 0.001), raw[0].Position);
+        Assert.Equal(new PclVector3((0.25 + 1000 * 0.001) * 0.5 + 1, (0 + 2000 * 0.001) * 2 + 2, (-0.5 + 3000 * 0.001) * 10 + 3), scaled[0].Position);
+        Assert.Equal(new PclVector3((0.25 + 100 * 0.001) * 0.5 + 1, (0 + 100 * 0.001) * 2 + 2, (-0.5 + 100 * 0.001) * 10 + 3), scaled[1].Position);
+
+        // A scale that is not one re-orients a normal, as the transform of any scan does.
+        AssertNear(new PclVector3(0.71766355869077281, 0.010840278959110543, 0.69630561169603133), raw[0].Normal!.Value);
+        AssertNear(new PclVector3(0.051465119585504454, 0.0031095141795334682, 0.9986699516795412), scaled[0].Normal!.Value);
+        Assert.Null(scaled[1].Normal);
     }
 
     [Theory]
@@ -133,66 +354,43 @@ public sealed class FormatTests
     [InlineData(14)]
     [InlineData(17)]
     [InlineData(21)]
-    public void An_Rcs_Node_With_An_Unknown_Record_Size_Is_Rejected(int bytesPerPoint)
+    public void An_Rcs_Leaf_Block_That_Does_Not_Fit_Its_Points_Is_Rejected(int bytesPerRecord)
     {
-        // The decoder knows records of ten, sixteen and twenty bytes; any other size would be read with the
-        // wrong stride and return wrong positions, so the file is rejected instead of guessed.
+        // A block holds at least one four-byte index word per record, then the 16-byte records: 20 bytes per record. Any
+        // other size would place the records elsewhere, so the file is rejected instead of being read at a guess.
         using var dir = new TempDirectory();
         using var doc = RcsScanDocument.Open(dir.Write("odd.rcs",
-            SyntheticFixtures.CreateSyntheticRcsWithPoints(RcsPoints, (0, 0, 0),
-                declaredPayloadBytes: (uint)(RcsPoints.Length * bytesPerPoint))));
+            SyntheticFixtures.CreateSyntheticRcsWithPoints(RcsPoints, (0, 0, 0), declaredPayloadBytes: (uint)(RcsPoints.Length * bytesPerRecord))));
 
-        Assert.Throws<NotSupportedException>(() => doc.Scans[0].ReadPoints().ToList());
+        Assert.Throws<InvalidDataException>(() => doc.Scans[0].ReadPoints().ToList());
+        Assert.Throws<InvalidDataException>(() => doc.Scans[0].PointCount);
     }
 
     [Fact]
-    public void An_Rcs_Position_Only_Node_Larger_Than_A_Chunk_Keeps_Record_Alignment()
+    public void An_Rcs_Leaf_Block_Of_Twenty_Bytes_Per_Record_Is_Read()
     {
-        // A chunk of 65536 bytes holds 6553 whole ten-byte records; the next chunk must start at a record
-        // boundary, not six bytes into a record.
-        var points = Enumerable.Range(0, 7000)
-            .Select(i => new RcsSamplePoint((ushort)(i % 1000), (ushort)(i / 1000), 0, 0, 0, 0, 0)).ToList();
+        // The smallest block a leaf can hold: one index word and one record per point.
         using var dir = new TempDirectory();
-        using var doc = RcsScanDocument.Open(dir.Write("big.rcs",
-            SyntheticFixtures.CreateSyntheticRcsWithPoints(points, (0, 0, 0), withColor: false)));
+        using var doc = RcsScanDocument.Open(dir.Write("tight.rcs",
+            SyntheticFixtures.CreateSyntheticRcsWithPoints(RcsPoints, (0, 0, 0), declaredPayloadBytes: (uint)(RcsPoints.Length * 20))));
+
+        Assert.Equal(3, doc.Scans[0].PointCount);
+        Assert.Equal(3, doc.ReadAllPoints().Count());
+    }
+
+    [Fact]
+    public void An_Rcs_Leaf_Larger_Than_A_Chunk_Keeps_Record_Alignment()
+    {
+        // A chunk of 65536 bytes holds 4096 whole 16-byte records, so 7000 records run over a chunk boundary.
+        RcsSamplePoint[] records = [.. Enumerable.Range(0, 7000).Select(i => new RcsSamplePoint((uint)(i % 1000), (uint)(i / 1000), 0))];
+        using var dir = new TempDirectory();
+        using var doc = RcsScanDocument.Open(dir.Write("big.rcs", SyntheticFixtures.CreateSyntheticRcsWithPoints(records, (0, 0, 0))));
 
         var all = doc.Scans[0].ReadPoints(NoTransform).ToList();
+
         Assert.Equal(7000, all.Count);
-        AssertNear(new PclVector3(0.0553, 0.0006, 0), all[6553].Position);
-        AssertNear(new PclVector3(0.0999, 0.0006, 0), all[6999].Position);
-    }
-
-    [Fact]
-    public void An_Rcs_With_Colour_And_Normals_Reports_Them()
-    {
-        using var dir = new TempDirectory();
-        using var doc = RcsScanDocument.Open(dir.Write("full.rcs",
-            SyntheticFixtures.CreateSyntheticRcsWithPoints(RcsPoints, (0, 0, 0), withNormals: true)));
-
-        var scan = Assert.Single(doc.Scans);
-        Assert.True(scan.HasColors);
-        Assert.True(scan.HasIntensities);
-        Assert.True(scan.HasNormals);
-        Assert.True(doc.HasColorData);
-        Assert.True(doc.HasNormalData);
-
-        var points = scan.ReadPoints(NoTransform).ToList();
-        Assert.Equal(3, points.Count);
-        Assert.All(points, p => Assert.NotNull(p.Color));
-    }
-
-    [Fact]
-    public void An_Rcs_Without_Normals_Reports_No_Normal()
-    {
-        using var dir = new TempDirectory();
-        using var doc = RcsScanDocument.Open(dir.Write("flat.rcs",
-            SyntheticFixtures.CreateSyntheticRcsWithPoints(RcsPoints, (0, 0, 0))));
-
-        var scan = Assert.Single(doc.Scans);
-        Assert.True(scan.HasColors);
-        Assert.True(scan.HasIntensities);
-        Assert.False(scan.HasNormals);
-        Assert.All(scan.ReadPoints(NoTransform), p => Assert.Null(p.Normal));
+        Assert.Equal(records.Select(p => new PclVector3(p.X * 0.001, p.Y * 0.001, p.Z * 0.001)), all.Select(p => p.Position));
+        Assert.Equal(Enumerable.Range(0, 7000).Select(i => (ulong)i), all.Select(p => p.Index));
     }
 
     [Fact]
@@ -202,8 +400,10 @@ public sealed class FormatTests
         using var doc = RcsScanDocument.Open(dir.Write("points.rcs", SyntheticFixtures.CreateSyntheticRcsWithPoints(RcsPoints, (0, 0, 0))));
 
         Assert.Equal(2, doc.ReadAllPoints(new PclReadOptions { MaxPoints = 2 }).Count());
+        Assert.Equal(3, doc.ReadAllPoints(new PclReadOptions { MaxPoints = 3 }).Count());
         Assert.Equal(3, doc.ReadAllPoints(new PclReadOptions { MaxPoints = 99 }).Count());
         Assert.Equal(2, doc.ReadAllPoints(new PclReadOptions { SubsampleStep = 2 }).Count());
+        Assert.Single(doc.ReadAllPoints(new PclReadOptions { SubsampleStep = 3 }));
         Assert.Empty(doc.ReadAllPoints(new PclReadOptions { MaxPoints = 0 }));
     }
 
@@ -216,7 +416,8 @@ public sealed class FormatTests
         using var doc = RcsScanDocument.Open(dir.Write("old.rcs", bytes));
 
         Assert.Equal(2u, doc.MajorVersion);
-        Assert.Throws<NotSupportedException>(() => doc.ReadAllPoints().ToList());
+        var error = Assert.Throws<NotSupportedException>(() => doc.ReadAllPoints().ToList());
+        Assert.Contains("2.2", error.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -227,11 +428,26 @@ public sealed class FormatTests
         bytes[8] = 4;
         using var doc = RcsScanDocument.Open(dir.Write("new.rcs", bytes));
 
-        // The file is listed with its header, but its points cannot be decoded.
+        // The file is listed with its header, but its points cannot be decoded: nothing is read from the file for them,
+        // so the count of the header is reported.
         Assert.Equal(4u, doc.MajorVersion);
+        Assert.Equal(3, doc.Scans[0].PointCount);
         var error = Assert.Throws<NotSupportedException>(() => doc.ReadAllPoints().ToList());
-        Assert.Contains("4", error.Message, StringComparison.Ordinal);
+        Assert.Contains("4.2", error.Message, StringComparison.Ordinal);
         Assert.Contains("3", error.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public void Rcs_Declines_Unverified_Minor_Versions(byte minorVersion)
+    {
+        using var dir = new TempDirectory();
+        byte[] file = SyntheticFixtures.CreateSyntheticRcsWithPoints(RcsPoints, (0, 0, 0));
+        file[12] = minorVersion;
+        using var doc = RcsScanDocument.Open(dir.Write("older.rcs", file));
+        var exception = Assert.Throws<NotSupportedException>(() => doc.ReadAllPoints().ToList());
+        Assert.Contains($"3.{minorVersion}", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -241,13 +457,13 @@ public sealed class FormatTests
     }
 
     [Fact]
-    public void An_Rcs_With_A_Truncated_Node_Table_Is_Rejected()
+    public void An_Rcs_With_A_Truncated_Leaf_Table_Is_Rejected()
     {
         using var dir = new TempDirectory();
         byte[] bytes = SyntheticFixtures.CreateSyntheticRcsWithPoints(RcsPoints, (0, 0, 0));
 
-        // The file ends in the middle of the node table.
-        string path = dir.Write("short.rcs", bytes[..(98605 + 100)]);
+        // The file ends in the middle of the leaf record.
+        string path = dir.Write("short.rcs", bytes[..(RcsScanBuilder.HeaderSize + 8 + 100)]);
         using var doc = RcsScanDocument.Open(path);
 
         Assert.Throws<InvalidDataException>(() => doc.ReadAllPoints().ToList());
@@ -282,7 +498,51 @@ public sealed class FormatTests
         var scan = (RcpScan)Assert.Single(doc.Scans);
         Assert.Null(scan.RcsFilePath);
         Assert.False(scan.HasColors);
+        Assert.False(scan.HasNormals);
+        Assert.False(scan.HasIntensities);
         Assert.Empty(scan.ReadPoints());
+    }
+
+    [Theory]
+    [InlineData(false, false, false)]
+    [InlineData(true, false, false)]
+    [InlineData(false, true, false)]
+    [InlineData(false, false, true)]
+    [InlineData(true, true, true)]
+    public void Rcp_Scan_Channels_Only_Read_The_Referenced_Rcs_Header(bool color, bool intensity, bool normals)
+    {
+        using var dir = new TempDirectory();
+        string rcp = dir.Write("site.rcp", SyntheticFixtures.CreateSyntheticRcpZip(scanPath: "scan1.rcs"));
+        var builder = new RcsScanBuilder { Color = color, Intensity = intensity, Normals = normals };
+        builder.AddLeaf((0, 0, 0), 1, new RcsSamplePoint(1, 2, 3));
+        dir.Write("scan1.rcs", builder.Build()[..512]);
+
+        using var doc = RcpProjectDocument.Open(rcp);
+        var scan = Assert.Single(doc.Scans);
+        Assert.Equal(color, scan.HasColors);
+        Assert.Equal(intensity, scan.HasIntensities);
+        Assert.Equal(normals, scan.HasNormals);
+        Assert.Throws<InvalidDataException>(() => scan.ReadPoints().ToList());
+    }
+
+    [Fact]
+    public void Rcp_Scan_Can_Retry_Reading_The_Channels_After_A_Truncated_Rcs_Header()
+    {
+        using var dir = new TempDirectory();
+        string rcp = dir.Write("site.rcp", SyntheticFixtures.CreateSyntheticRcpZip(scanPath: "scan1.rcs"));
+        byte[] bytes = new RcsScanBuilder { Color = true, Intensity = false, Normals = true }.Build();
+        dir.Write("scan1.rcs", bytes[..511]);
+
+        using var doc = RcpProjectDocument.Open(rcp);
+        var scan = Assert.Single(doc.Scans);
+        Assert.Throws<InvalidDataException>(() => { _ = scan.HasColors; });
+        Assert.Throws<InvalidDataException>(() => { _ = scan.HasIntensities; });
+        Assert.Throws<InvalidDataException>(() => { _ = scan.HasNormals; });
+
+        dir.Write("scan1.rcs", bytes);
+        Assert.True(scan.HasColors);
+        Assert.False(scan.HasIntensities);
+        Assert.True(scan.HasNormals);
     }
 
     [Fact]
@@ -357,14 +617,15 @@ public sealed class FormatTests
             .Replace("<Translation X=\"10.5\" Y=\"20.5\" Z=\"5.0\" />", "<Translation X=\"0\" Y=\"0\" Z=\"0\" />")
             .Replace("<Scale X=\"1\" Y=\"1\" Z=\"1\" />", "<Scale X=\"2\" Y=\"1\" Z=\"1\" />");
         string rcp = dir.Write("site.rcp", SyntheticFixtures.CreateZip("project.xml", manifest));
-        var points = new[] { new RcsSamplePoint(1000, 0, 0, 0, 0, 0, 0, 89, 0, 89) };
+        // The point lies 0.1 metres along x and names the cell (i = 51, j = 26) of the +x face.
+        var points = new[] { new RcsSamplePoint(100, 0, 0, Normal: 2678) };
         dir.Write(Path.Combine("site Support", "scan1.rcs"),
             SyntheticFixtures.CreateSyntheticRcsWithPoints(points, (0, 0, 0), withNormals: true));
 
         using var doc = RcpProjectDocument.Open(rcp);
         var pt = Assert.Single(doc.ReadAllPoints());
         AssertNear(new PclVector3(0.2, 0, 0), pt.Position);
-        AssertNear(new PclVector3(2 / Math.Sqrt(5), 0, 1 / Math.Sqrt(5)), pt.Normal!.Value);
+        AssertNear(new PclVector3(0.8996974848469792, 0.0067949470169167041, 0.43646106865911521), pt.Normal!.Value);
     }
 
     [Fact]

@@ -84,8 +84,8 @@ reading), `NotSupportedException` (unrecognised format or unsupported feature) o
 | Format | Extensions | Support level |
 | --- | --- | --- |
 | ASTM E57 | `.e57` | Points decoded for a defined subset (uncompressed bit-packed streams, single or double precision Cartesian coordinates, 8-bit colour and intensity). The format API also reads image blobs with checksum verification. |
-| ReCap scan | `.rcs` | Experimental; layout of major version 3 only. |
-| ReCap project | `.rcp` | Lists scans; opens the `.rcs` files it finds next to the project. Node transforms are not applied. |
+| ReCap scan | `.rcs` | Experimental support for container version 3.2. Reads positions, intensity, colour and normals. Rotation values are metadata. |
+| ReCap project | `.rcp` | Opens referenced `.rcs` files next to the project. With transforms enabled, uses the node's translation and scale when stated, and otherwise uses the scan file's transform. Rotation values are metadata. |
 | Leica scan container | `.lgsx`, `.lgs` | Experimental. Version 22 blocks provide geometry, RGB and intensity. Containers without setup assignments open as one scan in container coordinates. |
 | FARO scan | `.fls`, or a FARO scan folder | Experimental. Single-file distance mode 26 reconstructs both halves of the scan grid. A folder scan is read with an assumed layout and carries a warning. |
 | PinPoint project | `.srf`, `.smf`, or a folder with `ScanProject.json` or `.smf`/`.srf` files | Experimental; manifest plus point data files in one of two layouts (named channels, or sections with Snappy-compressed channels); a data file in neither layout is not read. |
@@ -101,7 +101,7 @@ are decided by extension alone, without a content check. A `.pcd` file is recogn
 and a `.ply` file by its magic word and header structure. Anything else is `PclFileKind.Unknown`. The rules are in
 [Public API](public-api.md#format-detection).
 Anything a decoder does not support fails instead of being guessed, apart from the assumptions named in the README (the FARO folder
-record layout, the EdgeWise position scale and the ReCap scan channel flags). The sizes and counts a reader accepts are limited; a
+record layout and the EdgeWise position scale). The sizes and counts a reader accepts are limited; a
 file that exceeds a limit is rejected with `InvalidDataException`, with the exceptions listed in the README.
 
 ## Limitations
