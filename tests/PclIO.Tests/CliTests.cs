@@ -18,7 +18,7 @@ public sealed class CliTests
 
     private static string PointsRcs(TempDirectory dir, string name = "points.rcs") =>
         dir.Write(name, SyntheticFixtures.CreateSyntheticRcsWithPoints(
-            [new RcsSamplePoint(10000, 20000, 30000, 128, 10, 20, 30), new RcsSamplePoint(0, 0, 0, 255, 1, 2, 3), new RcsSamplePoint(5, 5, 5, 0, 4, 5, 6)],
+            [new RcsSamplePoint(1000, 2000, 3000, 128, 10, 20, 30), new RcsSamplePoint(0, 0, 0, 255, 1, 2, 3), new RcsSamplePoint(5, 5, 5, 0, 4, 5, 6)],
             (0, 0, 0)));
 
     private static string MissingPath(string name) => Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"), name);
@@ -175,8 +175,12 @@ public sealed class CliTests
         Assert.Equal(Program.ExitOk, result.Exit);
         using var doc = JsonDocument.Parse(result.Out);
         Assert.Equal("RecapScan", doc.RootElement.GetProperty("kind").GetString());
-        Assert.Equal(777, doc.RootElement.GetProperty("totalPoints").GetInt64());
+        // The header states 777 points, but the file stores none.
+        Assert.Equal(0, doc.RootElement.GetProperty("totalPoints").GetInt64());
         Assert.Equal(1, doc.RootElement.GetProperty("scanCount").GetInt32());
+
+        using var withPoints = JsonDocument.Parse(Run("info", PointsRcs(dir), "--json").Out);
+        Assert.Equal(3, withPoints.RootElement.GetProperty("totalPoints").GetInt64());
     }
 
     [Fact]
@@ -197,11 +201,15 @@ public sealed class CliTests
         var result = Run("scans", path);
 
         Assert.Equal(Program.ExitOk, result.Exit);
+        // The header states 500 points, but the file stores none: a scan reports the points a read returns.
         Assert.Contains("Scans in header.rcs (1):", result.Out);
-        Assert.Contains("Points:     500", result.Out);
+        Assert.Contains("Points:     0", result.Out);
 
         using var json = JsonDocument.Parse(Run("scans", path, "--json").Out);
-        Assert.Equal(500, json.RootElement[0].GetProperty("pointCount").GetInt64());
+        Assert.Equal(0, json.RootElement[0].GetProperty("pointCount").GetInt64());
+
+        using var withPoints = JsonDocument.Parse(Run("scans", PointsRcs(dir), "--json").Out);
+        Assert.Equal(3, withPoints.RootElement[0].GetProperty("pointCount").GetInt64());
     }
 
     [Fact]

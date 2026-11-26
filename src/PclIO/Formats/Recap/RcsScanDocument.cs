@@ -5,8 +5,7 @@ using PclIO.Internal;
 namespace PclIO.Formats.Recap;
 
 /// <summary>
-/// Reads the header of a ReCap scan file (.rcs). Point decoding is experimental: only the node layouts that are
-/// described in <see cref="RcsLayout"/> are decoded, and any other version is rejected instead of guessed.
+/// Reads header metadata and the stored points of a ReCap scan file (.rcs). Point decoding is experimental and supports container version 3.2.
 /// </summary>
 public sealed class RcsScanDocument : PclDocument
 {
@@ -34,20 +33,17 @@ public sealed class RcsScanDocument : PclDocument
     /// <summary>Octree bounding box stored in the header.</summary>
     public PclBounds OctreeBounds { get; }
 
-    /// <summary>Point count declared in the header; it is not cross-checked against the node table.</summary>
+    /// <summary>Point count declared in the header. Read a scan's PointCount for the number of stored records.</summary>
     public long DeclaredPointCount { get; }
 
-    /// <summary>True when the file holds colour for its points; it is read from the node table.</summary>
-    public bool HasColorData => _scans.Count > 0 && _scans[0].HasColors;
+    /// <summary>True when the header declares point colour.</summary>
+    public bool HasColorData { get; }
 
-    /// <summary>
-    /// True when the file can hold normals for its points; it is read from the node table, and a single point may still
-    /// have none.
-    /// </summary>
-    public bool HasNormalData => _scans.Count > 0 && _scans[0].HasNormals;
+    /// <summary>True when the header declares point normals.</summary>
+    public bool HasNormalData { get; }
 
-    /// <summary>True when the file holds an intensity for its points; it is read from the node table.</summary>
-    public bool HasIntensityData => _scans.Count > 0 && _scans[0].HasIntensities;
+    /// <summary>True when the header declares point intensity.</summary>
+    public bool HasIntensityData { get; }
 
     /// <inheritdoc />
     public override IReadOnlyList<PclScan> Scans => _scans;
@@ -63,7 +59,10 @@ public sealed class RcsScanDocument : PclDocument
         PclTransform transform,
         PclBounds localBounds,
         PclBounds octreeBounds,
-        long pointCount)
+        long pointCount,
+        bool hasColor,
+        bool hasNormal,
+        bool hasIntensity)
         : base(path, fileSize)
     {
         MajorVersion = major;
@@ -74,6 +73,9 @@ public sealed class RcsScanDocument : PclDocument
         LocalBounds = localBounds;
         OctreeBounds = octreeBounds;
         DeclaredPointCount = pointCount;
+        HasColorData = hasColor;
+        HasNormalData = hasNormal;
+        HasIntensityData = hasIntensity;
 
         var scan = new RcsScan(this, path);
         _scans.Add(scan);
@@ -171,64 +173,57 @@ public sealed class RcsScanDocument : PclDocument
             transform,
             localBounds,
             octreeBounds,
-            pointCount);
+            pointCount,
+            header[224] != 0,
+            header[225] != 0,
+            header[226] != 0);
     }
 }
 
-/// <summary>
-/// The layout of the node table of a ReCap scan file, one per container major version.
-/// </summary>
-/// <remarks>
-/// A layout is described only when the files of that version may be used for the tests, so that its offsets can be
-/// verified. A file of a version without a described layout is listed with its header, but its points cannot be read:
-/// the reader rejects it with a message that names the version.
-/// </remarks>
-/// <param name="MajorVersion">Major version of the container that the layout belongs to.</param>
-/// <param name="NodeTableOffset">Offset of the node table in the file, in bytes.</param>
-/// <param name="NodeSize">Size of one entry of the node table, in bytes.</param>
-internal sealed record RcsLayout(uint MajorVersion, long NodeTableOffset, int NodeSize)
-{
-    // The layout of major version 3: the node table starts at a fixed offset and the node payloads occupy the end
-    // of the file.
-    private static readonly RcsLayout Version3 = new(3, 98605, 368);
-
-    private static readonly RcsLayout[] Described = [Version3];
-
-    /// <summary>The layout of the given major version, or null when the version has no described layout.</summary>
-    public static RcsLayout? ForVersion(uint majorVersion) =>
-        Described.FirstOrDefault(l => l.MajorVersion == majorVersion);
-
-    /// <summary>The major versions whose layout is described, for a message that names them.</summary>
-    public static string DescribedVersions => string.Join(", ", Described.Select(l => l.MajorVersion));
-}
 
 /// <summary>Individual scan of an RCS file.</summary>
 public sealed class RcsScan : PclScan
 {
-    // Layout of major version 3: the node table starts at a fixed offset and the node
-    // payloads occupy the end of the file. Both are verified against the file length before use.
-    private const ulong MaxNodes = 500_000;
-
-    // Bytes of one point record: the position of the point and, when the node holds them, the intensity and the
-    // colour. A record without them is shorter.
-    private const int PointRecordSize = 16;
-    private const int PositionRecordSize = 10;
-    private const int NormalRecordSize = 4;
-    private const double Quantization = 0.0001;
+    private const int SectionCountOffset = 297;
+    private const int SectionEntrySize = 24;
+    private const int LeafSize = 368;
+    private const int PointSize = 16;
+    private const int CellSide = 52;
+    private const int FaceCells = CellSide * CellSide;
+    private const ulong AxisMask = (1UL << 18) - 1;
 
     private readonly RcsScanDocument _document;
-    private readonly string _filePath;
+    private readonly string _path;
+    private long _pointCount = -1;
 
-    private (bool Colors, bool Intensities, bool Normals)? _channels;
+    internal RcsScan(RcsScanDocument document, string filePath)
+    {
+        _document = document;
+        _path = filePath;
+    }
+
+    private bool CanReadPoints => _document is { MajorVersion: 3, MinorVersion: 2 };
 
     /// <inheritdoc />
     public override string Id => _document.ScanGuid;
 
     /// <inheritdoc />
-    public override string Name => Path.GetFileNameWithoutExtension(_filePath);
+    public override string Name => Path.GetFileNameWithoutExtension(_path);
 
-    /// <summary>Point count declared in the file header; it is not cross-checked against the node table.</summary>
-    public override long PointCount => _document.DeclaredPointCount;
+    /// <summary>Number of records in the stored leaves, or the header count for an unsupported version.</summary>
+    public override long PointCount
+    {
+        get
+        {
+            if (!CanReadPoints) return _document.DeclaredPointCount;
+            long stored = Volatile.Read(ref _pointCount);
+            if (stored >= 0) return stored;
+            using var stream = File.OpenRead(_path);
+            ReadLeaves(stream, out long count);
+            Volatile.Write(ref _pointCount, count);
+            return count;
+        }
+    }
 
     /// <inheritdoc />
     public override PclBounds Bounds => _document.LocalBounds;
@@ -236,237 +231,170 @@ public sealed class RcsScan : PclScan
     /// <inheritdoc />
     public override PclTransform Transform => _document.ScanTransform;
 
-    /// <summary>True when the file holds colour for its points; it is read from the node table.</summary>
-    public override bool HasColors => Channels.Colors;
+    /// <inheritdoc />
+    public override bool HasColors => _document.HasColorData;
 
-    /// <summary>True when the file holds normals for its points; it is read from the node table.</summary>
-    public override bool HasNormals => Channels.Normals;
+    /// <inheritdoc />
+    public override bool HasNormals => _document.HasNormalData;
 
-    /// <summary>True when the file holds an intensity for its points; it is read from the node table.</summary>
-    public override bool HasIntensities => Channels.Intensities;
+    /// <inheritdoc />
+    public override bool HasIntensities => _document.HasIntensityData;
 
-    internal RcsScan(RcsScanDocument document, string filePath)
-    {
-        _document = document;
-        _filePath = filePath;
-    }
-
-    private readonly record struct Node(PclVector3 TightMin, uint Points, uint Bytes);
-
-    // The channels of the points follow from the size of the payload of the nodes.
-    private (bool Colors, bool Intensities, bool Normals) Channels => _channels ??= DetectChannels();
-
-    private (bool, bool, bool) DetectChannels()
-    {
-        var layout = RcsLayout.ForVersion(_document.MajorVersion);
-        if (layout == null) return (false, false, false);
-
-        try
-        {
-            using var fs = File.OpenRead(_filePath);
-            var nodes = ReadNodeTable(fs, layout, _document.MinorVersion, out _);
-
-            bool colors = false, intensities = false, normals = false;
-            foreach (var node in nodes)
-            {
-                if (node.Points == 0) continue;
-                long bytesPerPoint = node.Bytes / node.Points;
-                if (bytesPerPoint >= PointRecordSize) { colors = true; intensities = true; }
-                if (node.Bytes >= (long)node.Points * (PointRecordSize + NormalRecordSize)) normals = true;
-            }
-
-            return (colors, intensities, normals);
-        }
-        catch (Exception e) when (e is InvalidDataException or NotSupportedException)
-        {
-            // A damaged node table or an undecoded payload leaves the channels unknown.
-            return (false, false, false);
-        }
-    }
-
-    /// <summary>
-    /// Streams points from the node table (experimental, major version 3 only). Throws
-    /// <see cref="NotSupportedException"/> for other versions or node payloads that do not match the known layout,
-    /// and <see cref="InvalidDataException"/> when the node table is inconsistent with the file size.
-    /// Scale and translation of the header transform are applied when requested; rotation is not.
-    /// </summary>
+    /// <summary>Streams the stored points in leaf order after validating the section and leaf ranges.</summary>
     public override IEnumerable<PclPoint> ReadPoints(PclReadOptions? options = null)
     {
+        if (!CanReadPoints)
+            throw FormatError.Unsupported($"RCS container version {_document.MajorVersion}.{_document.MinorVersion}; point decoding supports 3.2.");
+
         options ??= PclReadOptions.Default;
-        if (PointCount == 0) yield break;
+        long limit = options.MaxPoints ?? long.MaxValue;
+        if (limit <= 0) yield break;
 
-        var layout = RcsLayout.ForVersion(_document.MajorVersion)
-            ?? throw FormatError.Unsupported(
-                $"RCS container version {_document.MajorVersion}.{_document.MinorVersion}: the layout of its node table is not described. The described versions are {RcsLayout.DescribedVersions}.");
-
-        long targetCount = options.MaxPoints ?? PointCount;
+        using var stream = File.OpenRead(_path);
+        List<Leaf> leaves = ReadLeaves(stream, out long count);
+        Volatile.Write(ref _pointCount, count);
+        var chunk = new byte[64 * 1024];
         int step = Math.Max(1, options.SubsampleStep);
-        long yielded = 0;
-
-        using var fs = File.OpenRead(_filePath);
-        var nodes = ReadNodeTable(fs, layout, _document.MinorVersion, out long payloadStart);
-
-        long curOffset = payloadStart;
-        byte[] chunkBuf = new byte[65536];
-        // Normals are read per chunk, so memory stays constant however large a node is. Sized for the shortest
-        // record, which packs the most points per chunk.
-        byte[] normalBuf = new byte[chunkBuf.Length / PositionRecordSize * NormalRecordSize];
-
-        foreach (var node in nodes)
+        long read = 0, emitted = 0;
+        foreach (Leaf leaf in leaves)
         {
-            if (yielded >= targetCount) yield break;
-            if (node.Points == 0 || node.Bytes == 0)
-            {
-                curOffset += node.Bytes;
-                continue;
-            }
-
-            // The size of the payload tells which channels the points of the node hold: a record with the intensity
-            // and the colour is longer than one with the position only.
-            long bytesPerPoint = node.Bytes / node.Points;
-            bool hasColor = bytesPerPoint >= PointRecordSize;
-            int recordSize = hasColor ? PointRecordSize : PositionRecordSize;
-
-            // The optional normal plane follows the point records.
-            bool hasNormals = node.Bytes >= (long)node.Points * (PointRecordSize + NormalRecordSize);
-            long normalStart = curOffset + ((long)node.Points * recordSize);
-
-            fs.Position = curOffset;
-            long remaining = (long)node.Points * recordSize;
-            long pointIdx = 0;
-
+            stream.Position = leaf.PointsAt;
+            long remaining = leaf.Count;
             while (remaining > 0)
             {
-                // A chunk holds whole records only, so the next one starts at a record boundary.
-                int toRead = (int)Math.Min(chunkBuf.Length / recordSize * recordSize, remaining);
-                fs.ReadExactly(chunkBuf, 0, toRead);
-                remaining -= toRead;
-
-                int ptsInBlock = toRead / recordSize;
-                if (hasNormals)
+                int records = (int)Math.Min(remaining, chunk.Length / PointSize);
+                ReadExactly(stream, chunk.AsSpan(0, records * PointSize));
+                for (int i = 0; i < records; i++)
                 {
-                    long resume = fs.Position;
-                    fs.Position = normalStart + (pointIdx * NormalRecordSize);
-                    fs.ReadExactly(normalBuf, 0, ptsInBlock * NormalRecordSize);
-                    fs.Position = resume;
+                    if (read++ % step != 0) continue;
+                    PclPoint point = DecodePoint(chunk.AsSpan(i * PointSize, PointSize), leaf.Corner, options.ApplyTransform, (ulong)emitted);
+                    yield return point;
+                    if (++emitted == limit) yield break;
                 }
 
-                for (int p = 0; p < ptsInBlock; p++, pointIdx++)
-                {
-                    if (pointIdx % step != 0) continue;
-
-                    int off = p * recordSize;
-                    ushort v1 = Bytes.ReadUInt16LE(chunkBuf.AsSpan(off + 4, 2));
-                    ushort v2 = Bytes.ReadUInt16LE(chunkBuf.AsSpan(off + 6, 2));
-                    ushort v3 = Bytes.ReadUInt16LE(chunkBuf.AsSpan(off + 8, 2));
-
-                    // Fixed-step quantization relative to the node minimum.
-                    double x = node.TightMin.X + (v1 * Quantization);
-                    double y = node.TightMin.Y + (v2 * Quantization);
-                    double z = node.TightMin.Z + (v3 * Quantization);
-
-                    // Packed normal: signed byte components; an all-zero normal means none.
-                    PclVector3? normal = null;
-                    if (hasNormals)
-                    {
-                        int n = p * NormalRecordSize;
-                        sbyte nx = (sbyte)normalBuf[n];
-                        sbyte ny = (sbyte)normalBuf[n + 1];
-                        sbyte nz = (sbyte)normalBuf[n + 2];
-                        if (nx != 0 || ny != 0 || nz != 0)
-                        {
-                            double len = Math.Sqrt((nx * nx) + (ny * ny) + (nz * nz));
-                            var norm = new PclVector3(nx / len, ny / len, nz / len);
-                            normal = options.ApplyTransform ? Transform.TransformVector(norm) : norm;
-                        }
-                    }
-
-                    // A node without colour and intensity holds the position of the point only.
-                    PclColor? color = null;
-                    float? intensity = null;
-                    if (hasColor)
-                    {
-                        color = new PclColor(chunkBuf[off + 13], chunkBuf[off + 14], chunkBuf[off + 15]);
-                        intensity = chunkBuf[off + 12] / 255.0f;
-                    }
-
-                    var pt = new PclPoint(
-                        new PclVector3(x, y, z),
-                        Color: color,
-                        Intensity: intensity,
-                        Normal: normal,
-                        Index: (ulong)yielded);
-
-                    if (options.ApplyTransform)
-                        pt = pt with { Position = Transform.TransformPoint(pt.Position) };
-
-                    yield return pt;
-                    yielded++;
-                    if (yielded >= targetCount) yield break;
-                }
+                remaining -= records;
             }
-
-            curOffset += node.Bytes;
         }
     }
 
-    // Reads and validates the node table; payloadStart is where the first node payload begins.
-    private static List<Node> ReadNodeTable(FileStream fs, RcsLayout layout, uint minorVersion, out long payloadStart)
+    private PclPoint DecodePoint(ReadOnlySpan<byte> record, PclVector3 corner, bool applyTransform, ulong index)
     {
-        if (fs.Length < layout.NodeTableOffset + 8) throw FormatError.Truncated("RCS node table");
-
-        fs.Position = layout.NodeTableOffset;
-        Span<byte> countBuf = stackalloc byte[8];
-        fs.ReadExactly(countBuf);
-        ulong numNodes = Bytes.ReadUInt64LE(countBuf);
-
-        long tableEnd = layout.NodeTableOffset + 8 + ((long)Math.Min(numNodes, MaxNodes + 1) * layout.NodeSize);
-        if (numNodes > MaxNodes || tableEnd > fs.Length)
-            throw FormatError.Corrupted("RCS node table does not fit in the file.");
-
-        var nodes = new List<Node>((int)numNodes);
-        byte[] nodeBuf = new byte[layout.NodeSize];
-        long totalPayloadBytes = 0;
-
-        for (ulong i = 0; i < numNodes; i++)
+        ulong positionBits = Bytes.ReadUInt64LE(record);
+        var position = corner + new PclVector3((positionBits & AxisMask) * 0.001,
+            ((positionBits >> 18) & AxisMask) * 0.001, ((positionBits >> 36) & AxisMask) * 0.001);
+        PclVector3? normal = HasNormals ? DecodeNormal(Bytes.ReadUInt16LE(record[12..])) : null;
+        if (applyTransform)
         {
-            fs.ReadExactly(nodeBuf, 0, layout.NodeSize);
-
-            double tMinX = Bytes.ReadDoubleLE(nodeBuf.AsSpan(0x30, 8));
-            double tMinY = Bytes.ReadDoubleLE(nodeBuf.AsSpan(0x38, 8));
-            double tMinZ = Bytes.ReadDoubleLE(nodeBuf.AsSpan(0x40, 8));
-            double tMaxX = Bytes.ReadDoubleLE(nodeBuf.AsSpan(0x48, 8));
-            double tMaxY = Bytes.ReadDoubleLE(nodeBuf.AsSpan(0x50, 8));
-            double tMaxZ = Bytes.ReadDoubleLE(nodeBuf.AsSpan(0x58, 8));
-
-            uint npts = Bytes.ReadUInt32LE(nodeBuf.AsSpan(0x64, 4));
-            uint nbytes = Bytes.ReadUInt32LE(nodeBuf.AsSpan(0x68, 4));
-
-            if (npts > 0 && nbytes > 0)
-            {
-                if (!double.IsFinite(tMinX) || !double.IsFinite(tMinY) || !double.IsFinite(tMinZ) ||
-                    !double.IsFinite(tMaxX) || !double.IsFinite(tMaxY) || !double.IsFinite(tMaxZ) ||
-                    tMinX > tMaxX || tMinY > tMaxY || tMinZ > tMaxZ)
-                    throw FormatError.Corrupted("RCS node bounds are invalid.");
-
-                // The decoder reads records of exactly ten bytes (position), sixteen (position, colour and
-                // intensity) or twenty (the same plus the plane of the normals). Any other payload size would be
-                // read with the wrong stride and return wrong positions, so it is rejected instead of guessed.
-                if (nbytes != (long)npts * PositionRecordSize &&
-                    nbytes != (long)npts * PointRecordSize &&
-                    nbytes != (long)npts * (PointRecordSize + NormalRecordSize))
-                    throw FormatError.Unsupported(
-                        $"RCS container version {layout.MajorVersion}.{minorVersion}: node payload does not match a known point record layout.");
-            }
-
-            nodes.Add(new Node(new PclVector3(tMinX, tMinY, tMinZ), npts, nbytes));
-            totalPayloadBytes += nbytes;
+            position = Transform.TransformPoint(position);
+            if (normal.HasValue && Transform.Scale != PclVector3.One)
+                normal = Transform.TransformVector(normal.Value);
         }
 
-        payloadStart = fs.Length - totalPayloadBytes;
-        if (payloadStart < tableEnd)
-            throw FormatError.Corrupted("RCS node payload sizes exceed the file size.");
+        return new PclPoint(position, Color: HasColors ? new PclColor(record[11], record[10], record[9]) : null,
+            Intensity: HasIntensities ? record[8] / 255f : null, Normal: normal, Index: index);
+    }
 
-        return nodes;
+    private static PclVector3? DecodeNormal(ushort code)
+    {
+        if (code == 0 || code >= 6 * FaceCells) return null;
+
+        int face = code / FaceCells;
+        int cell = code % FaceCells;
+        double u = CellSlope(cell % CellSide);
+        double v = CellSlope(cell / CellSide);
+        double side = (face & 1) == 0 ? 1 : -1;
+        var direction = (face / 2) switch
+        {
+            0 => new PclVector3(side, u, v),
+            1 => new PclVector3(u, side, v),
+            _ => new PclVector3(u, v, side),
+        };
+        return direction * (1 / Math.Sqrt(1 + u * u + v * v));
+
+        static double CellSlope(int index) => Math.Tan(Math.PI / 2 * ((index + 0.5) / CellSide - 0.5));
+    }
+
+    private readonly record struct FileRange(long Start, long End)
+    {
+        public long Length => End - Start;
+    }
+
+    private readonly record struct Leaf(long PointsAt, uint Count, PclVector3 Corner);
+
+    private static List<Leaf> ReadLeaves(FileStream stream, out long pointCount)
+    {
+        var ranges = ReadSectionRanges(stream);
+        if (!ranges.TryGetValue(1, out FileRange points) || !ranges.TryGetValue(2, out FileRange leaves))
+            throw FormatError.Corrupted("RCS needs both a points section and a leaf section.");
+
+        if (points.Length != 0 && points.Start < leaves.End && leaves.Start < points.End)
+            throw FormatError.Corrupted("RCS point and leaf sections overlap.");
+        if (leaves.Length < 8)
+            throw FormatError.Truncated("the RCS leaf section header");
+        stream.Position = leaves.Start;
+        Span<byte> scratch = stackalloc byte[LeafSize];
+        ReadExactly(stream, scratch[..8]);
+        uint leafCount = Bytes.ReadUInt32LE(scratch);
+        if (leafCount > 500_000 || leaves.Length != 8 + (long)leafCount * LeafSize)
+            throw FormatError.Corrupted("RCS leaf count does not match the section size or exceeds the limit.");
+
+        var plan = new List<Leaf>((int)leafCount);
+        long cursor = points.Start;
+        pointCount = 0;
+        for (int i = 0; i < leafCount; i++)
+        {
+            ReadExactly(stream, scratch);
+            uint records = Bytes.ReadUInt32LE(scratch[100..]);
+            uint blockBytes = Bytes.ReadUInt32LE(scratch[104..]);
+            long recordBytes = (long)records * PointSize;
+            long prefixBytes = blockBytes - recordBytes;
+            if (prefixBytes < (long)records * sizeof(uint) || prefixBytes % sizeof(uint) != 0 ||
+                blockBytes > points.End - cursor)
+                throw FormatError.Corrupted("RCS leaf block does not fit its point count or the points section.");
+
+            var corner = new PclVector3(Bytes.ReadDoubleLE(scratch), Bytes.ReadDoubleLE(scratch[8..]), Bytes.ReadDoubleLE(scratch[16..]));
+            if (!double.IsFinite(corner.X) || !double.IsFinite(corner.Y) || !double.IsFinite(corner.Z))
+                throw FormatError.Corrupted("RCS leaf origin is not finite.");
+
+            plan.Add(new Leaf(cursor + prefixBytes, records, corner));
+            cursor += blockBytes;
+            pointCount += records;
+        }
+
+        if (cursor != points.End)
+            throw FormatError.Corrupted("RCS leaf blocks do not fill the points section.");
+        return plan;
+    }
+
+    private static Dictionary<ulong, FileRange> ReadSectionRanges(FileStream stream)
+    {
+        stream.Position = SectionCountOffset;
+        Span<byte> entry = stackalloc byte[SectionEntrySize];
+        ReadExactly(stream, entry[..4]);
+        uint count = Bytes.ReadUInt32LE(entry);
+        if (count is 0 or > 64) throw FormatError.Corrupted("RCS section count is out of range.");
+        long tableEnd = stream.Position + (long)count * SectionEntrySize;
+        if (tableEnd > stream.Length) throw FormatError.Truncated("the RCS section table");
+
+        var result = new Dictionary<ulong, FileRange>((int)count);
+        ulong length = (ulong)stream.Length;
+        for (int i = 0; i < count; i++)
+        {
+            ReadExactly(stream, entry);
+            ulong type = Bytes.ReadUInt64LE(entry);
+            ulong start = Bytes.ReadUInt64LE(entry[8..]);
+            ulong size = Bytes.ReadUInt64LE(entry[16..]);
+            if (start > length || size > length - start || (size > 0 && start < (ulong)tableEnd))
+                throw FormatError.Truncated("an RCS section outside the file");
+            if (!result.TryAdd(type, new FileRange((long)start, (long)(start + size))))
+                throw FormatError.Corrupted("RCS section type appears twice.");
+        }
+        return result;
+    }
+
+    private static void ReadExactly(FileStream stream, Span<byte> buffer)
+    {
+        if (stream.ReadAtLeast(buffer, buffer.Length, throwOnEndOfStream: false) != buffer.Length)
+            throw FormatError.Truncated("the RCS point data");
     }
 }

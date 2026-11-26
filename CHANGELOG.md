@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-11-26
+
 ### Added
 
 - Read checksum-verified E57 image blobs and scanner-aligned FARO RGB panoramas.
@@ -16,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Leica LGSX version 22 decodes differential Morton positions, native RGB and intensity, retaining duplicate returns.
 - FARO FLS distance mode 26 decodes both range-grid halves with optional Morton RGB and intensity.
+- ReCap version 3.2 decodes stored point records with RGB, intensity and normals. ReCap project scans report their referenced scan's channels.
 
 ## [0.1.1] - 2026-11-25
 

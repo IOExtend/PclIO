@@ -285,6 +285,7 @@ public sealed class RcpScan : PclScan
 {
     // True when the project states a transform for the node; it then places the scan.
     private readonly bool _transformStated;
+    private readonly Lazy<(bool Colors, bool Intensities, bool Normals)>? _channels;
 
     /// <inheritdoc />
     public override string Id { get; }
@@ -298,14 +299,14 @@ public sealed class RcpScan : PclScan
     /// <summary>Resolved .rcs file next to the project, or null when it was not found.</summary>
     public string? RcsFilePath { get; }
 
-    /// <inheritdoc />
-    public override bool HasColors => RcsFilePath != null;
+    /// <summary>True when the referenced scan's header declares colour.</summary>
+    public override bool HasColors => _channels?.Value.Colors == true;
 
-    /// <inheritdoc />
-    public override bool HasNormals => RcsFilePath != null;
+    /// <summary>True when the referenced scan's header declares normals.</summary>
+    public override bool HasNormals => _channels?.Value.Normals == true;
 
-    /// <inheritdoc />
-    public override bool HasIntensities => RcsFilePath != null;
+    /// <summary>True when the referenced scan's header declares intensity.</summary>
+    public override bool HasIntensities => _channels?.Value.Intensities == true;
 
     internal RcpScan(string id, string name, long pointCount, PclTransform transform, string? rcsFilePath, bool transformStated)
     {
@@ -315,6 +316,14 @@ public sealed class RcpScan : PclScan
         Transform = transform;
         RcsFilePath = rcsFilePath;
         _transformStated = transformStated;
+        if (rcsFilePath != null)
+        {
+            _channels = new(() =>
+            {
+                using var scan = RcsScanDocument.Open(rcsFilePath);
+                return (scan.HasColorData, scan.HasIntensityData, scan.HasNormalData);
+            }, LazyThreadSafetyMode.PublicationOnly);
+        }
     }
 
     /// <summary>

@@ -75,7 +75,7 @@ drop points that fail a plausibility rule (see the README), so a scan can yield 
 | Reader | `PointCount` |
 |---|---|
 | E57 | Declared by the file. It is not checked against the point data until the points are read. Points that the validity flags mark as invalid are skipped, so a read can yield fewer points. |
-| ReCap scan | Declared in the header. It is not checked against the node table. The node layout of major version 3 is decoded; a file of another version is listed but its points cannot be read (`RcsScanDocument.DecodedNodeLayoutVersions` names the decoded versions). |
+| ReCap scan | Stored point count for container version 3.2. For other versions the header count is available and reading points reports the unsupported version. |
 | ReCap project | Declared by the project manifest; 0 when the manifest states none. |
 | Leica | The number of points the container states, when it states one; otherwise it is computed. The computed value needs the first access to decode all of the point data and caches the result, which can be slow on large files; the access throws `InvalidDataException` for corrupt data. A container that assigns its points to its setups has one scan per setup, each with the id and the name of its setup; otherwise the container is one scan with the id `unified-cloud`. The `Transform` and the `Bounds` of a setup are read from its record and are empty when the record does not hold them. `Blocks` applies per scan in file order; a truncated read (fewer points yielded than selected, via `MaxPoints`) reports no incomplete-data warning. |
 | FARO | The number of valid returns, which is counted on the first access by reading the distance data of the scan; `FaroScan.GridSize` is the size of the scan grid (rows times columns). For a folder scan the grid size is limited by the size of the data stream, and `FaroScan.RecordSize` is the size of one sample in bytes. |
@@ -96,10 +96,9 @@ drop points that fail a plausibility rule (see the README), so a scan can yield 
 | Leica PTG | Total valid returns across all gridded scans, determined by decoding the column validity bitmasks. |
 | CC BIN | The point count declared for the entity. The reader rejects files with a truncated XYZ block or a point count that exceeds the available XYZ data. Points with non-finite coordinates are skipped. Packed point normals are decoded in file versions 41, 42 and 50. A stored zero direction is returned as `PclVector3.Zero`. |
 
-`HasColors`, `HasIntensities` and `HasNormals` follow what the file contains, except for the scans of a ReCap project, where all three
-are true when the `.rcs` file was found and false otherwise, without the file being opened. A ReCap scan reads the channels
-from the node table, so they are known after the node table has been read; a node whose points hold no colour gives its points
-no colour.
+ReCap scans with container version 3.2 report stored point counts from their leaf records. `DeclaredPointCount` holds the count in the file header.
+The channel flags in the scan header determine `HasColors`, `HasIntensities` and `HasNormals`. ReCap project scans read and cache those flags on the first successful
+request. An unresolved reference reports false for the channel properties. A resolved reference with a damaged or inaccessible header reports a read error.
 
 ## Format documents
 
